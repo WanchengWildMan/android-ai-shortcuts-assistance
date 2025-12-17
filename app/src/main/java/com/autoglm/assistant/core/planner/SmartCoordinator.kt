@@ -59,16 +59,22 @@ class SmartCoordinator(
             Logger.i(Logger.AGENT, "Calling coordinator model: ${config.plannerModelConfig?.modelName}")
             Logger.startTimer("coordinator_planning_request")
 
+            val streamContent = StringBuilder()
             val response = withTimeout(config.planningTimeout) {
                 coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
-                    override fun onToken(token: String) {}
+                    override fun onToken(token: String) {
+                        streamContent.append(token)
+                        // 每收到token就打印，方便调试
+                        Logger.d(Logger.AGENT, "Coordinator token: $token")
+                    }
 
                     override fun onThinkingComplete(thinking: String) {
-                        Logger.i(Logger.AGENT, "Coordinator thinking: ${thinking.take(200)}...")
+                        Logger.i(Logger.AGENT, "Coordinator thinking: ${thinking.take(500)}...")
                     }
 
                     override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
                         Logger.i(Logger.AGENT, "Coordinator TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
+                        Logger.i(Logger.AGENT, "Coordinator full response: ${streamContent.toString().take(1000)}")
                     }
 
                     override fun onError(error: String) {
@@ -138,15 +144,20 @@ class SmartCoordinator(
             Logger.i(Logger.AGENT, "Calling coordinator to supervise sub-task ${subTask.index}")
             Logger.startTimer("coordinator_supervision_request")
 
+            val supervisionContent = StringBuilder()
             val response = coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
-                override fun onToken(token: String) {}
+                override fun onToken(token: String) {
+                    supervisionContent.append(token)
+                    Logger.d(Logger.AGENT, "Supervision token: $token")
+                }
 
                 override fun onThinkingComplete(thinking: String) {
-                    Logger.i(Logger.AGENT, "Coordinator supervising: ${thinking.take(150)}...")
+                    Logger.i(Logger.AGENT, "Coordinator supervising: ${thinking.take(300)}...")
                 }
 
                 override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
                     Logger.i(Logger.AGENT, "Supervision TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
+                    Logger.i(Logger.AGENT, "Supervision full response: ${supervisionContent.toString().take(500)}")
                 }
 
                 override fun onError(error: String) {
