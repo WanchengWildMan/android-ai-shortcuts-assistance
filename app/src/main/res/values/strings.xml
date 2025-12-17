@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoGLM Assistant</string>
+    <string name="accessibility_service_description">AutoGLM Assistant needs accessibility service to automate phone operations like tapping, swiping, and text input.</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">AutoGLM Service</string>
+    <string name="notification_channel_description">Shows when AutoGLM is listening for wake word</string>
+    <string name="notification_title">AutoGLM Assistant</string>
+    <string name="notification_listening">Listening for wake word...</string>
+    <string name="notification_processing">Processing your request...</string>
+
+    <!-- Wake Word -->
+    <string name="wake_word_default">Hey GLM</string>
+
+    <!-- Permissions -->
+    <string name="permission_audio_title">Microphone Permission</string>
+    <string name="permission_audio_message">AutoGLM needs microphone access to listen for wake word and voice commands.</string>
+    <string name="permission_overlay_title">Overlay Permission</string>
+    <string name="permission_overlay_message">AutoGLM needs overlay permission to show floating assistant.</string>
+    <string name="permission_accessibility_title">Accessibility Service</string>
+    <string name="permission_accessibility_message">AutoGLM needs accessibility service to automate phone operations.</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_api_url">API URL</string>
+    <string name="settings_api_key">API Key</string>
+    <string name="settings_model_name">Model Name</string>
+    <string name="settings_wake_word">Wake Word</string>
+    <string name="settings_language">Language</string>
+
+    <!-- Actions -->
+    <string name="action_start">Start</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_settings">Settings</string>
+</resources>

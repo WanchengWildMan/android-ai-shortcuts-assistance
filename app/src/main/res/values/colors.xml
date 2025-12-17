@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#1976D2</color>
+    <color name="primary_container">#BBDEFB</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="secondary">#26A69A</color>
+    <color name="secondary_container">#B2DFDB</color>
+    <color name="on_secondary">#FFFFFF</color>
+    <color name="tertiary">#7C4DFF</color>
+    <color name="on_tertiary">#FFFFFF</color>
+    <color name="error">#B00020</color>
+    <color name="on_error">#FFFFFF</color>
+    <color name="background">#FAFAFA</color>
+    <color name="on_background">#212121</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="on_surface">#212121</color>
+
+    <!-- Chat colors -->
+    <color name="user_bubble">#E3F2FD</color>
+    <color name="assistant_bubble">#F5F5F5</color>
+    <color name="thinking_text">#757575</color>
+</resources>
