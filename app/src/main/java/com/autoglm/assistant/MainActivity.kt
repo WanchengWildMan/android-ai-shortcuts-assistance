@@ -104,7 +104,8 @@ class MainActivity : ComponentActivity() {
                     onStopTask = { stopCurrentTask() },
                     getServiceState = { wakeWordService?.serviceState },
                     getLastRecognizedText = { wakeWordService?.lastRecognizedText },
-                    getAgentMessage = { wakeWordService?.agentMessage }
+                    getAgentMessage = { wakeWordService?.agentMessage },
+                    getStreamingMessage = { wakeWordService?.streamingMessage }
                 )
             }
         }
@@ -237,7 +238,8 @@ fun MainScreen(
     onStopTask: () -> Unit,
     getServiceState: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.ServiceState>?,
     getLastRecognizedText: () -> kotlinx.coroutines.flow.StateFlow<String>?,
-    getAgentMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.AgentMessage?>?
+    getAgentMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.AgentMessage?>?,
+    getStreamingMessage: () -> kotlinx.coroutines.flow.StateFlow<String?>?
 ) {
     var isServiceRunning by remember { mutableStateOf(false) }
     val conversations = remember { mutableStateListOf<Conversation>() }
@@ -247,6 +249,10 @@ fun MainScreen(
     val serviceState = getServiceState()?.collectAsState()
     val lastRecognizedText = getLastRecognizedText()?.collectAsState()
     val agentMessage = getAgentMessage()?.collectAsState()
+    val streamingMessage = getStreamingMessage()?.collectAsState()
+
+    // 流式消息状态 - 用于打字机效果
+    var currentStreamingContent by remember { mutableStateOf<String?>(null) }
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
@@ -324,6 +330,28 @@ fun MainScreen(
         }
     }
 
+    // 观察流式消息 - 打字机效果
+    LaunchedEffect(streamingMessage?.value) {
+        val content = streamingMessage?.value
+        if (content != null && content.isNotBlank()) {
+            val showProcess = App.instance.preferenceManager.showAgentProcess
+            if (showProcess) {
+                currentStreamingContent = content
+                // 更新最后一条assistant消息，或添加新的
+                val lastMsg = messages.lastOrNull()
+                if (lastMsg != null && !lastMsg.isUser && lastMsg.content.startsWith("[Coordinator]")) {
+                    // 更新最后一条消息
+                    messages[messages.lastIndex] = lastMsg.copy(content = content)
+                } else {
+                    // 添加新的流式消息
+                    messages.add(ChatMessage(content = content, isUser = false))
+                }
+            }
+        } else {
+            currentStreamingContent = null
+        }
+    }
+
     // Observe agent messages and add to chat based on setting
     LaunchedEffect(agentMessage?.value) {
         agentMessage?.value?.let { msg ->
@@ -333,6 +361,11 @@ fun MainScreen(
                 WakeWordService.AgentMessageType.RESULT -> true  // Always show final result
                 WakeWordService.AgentMessageType.THINKING,
                 WakeWordService.AgentMessageType.ACTION -> showProcess  // Only show if setting enabled
+            }
+            // 如果是Coordinator的THINKING消息且已经通过流式显示，跳过
+            if (msg.content.startsWith("[Coordinator]") && msg.type == WakeWordService.AgentMessageType.THINKING) {
+                // 已经通过流式消息显示了，不需要再添加
+                return@LaunchedEffect
             }
             if (shouldShow && msg.content.isNotBlank()) {
                 val prefix = when (msg.type) {

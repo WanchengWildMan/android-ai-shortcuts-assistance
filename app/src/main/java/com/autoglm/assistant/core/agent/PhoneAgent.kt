@@ -72,6 +72,9 @@ class PhoneAgent(
     var onHumanInterventionNeeded: ((String) -> Unit)? = null
     var onMaxStepsReached: ((Int, String) -> Unit)? = null  // (步数, 任务ID) 达到最大步数时回调
     var onTaskSaved: ((String) -> Unit)? = null  // 任务保存时回调
+    var onStreamToken: ((String) -> Unit)? = null  // 流式token回调 - 用于打字机效果
+    var onStreamStart: (() -> Unit)? = null  // 流式输出开始
+    var onStreamEnd: (() -> Unit)? = null    // 流式输出结束
 
     // State
     private val _isRunning = MutableStateFlow(false)
@@ -99,10 +102,10 @@ class PhoneAgent(
         agentConfig.plannerConfig?.let { config ->
             if (config.enabled) {
                 smartCoordinator = SmartCoordinator(config).apply {
-                    // 设置流式输出回调 - 将协调器输出传到UI
+                    // 设置流式输出回调 - 用于打字机效果
                     onStreamToken = { token ->
-                        // 通过onThinking回调传递给UI显示打字机效果
-                        onThinking?.invoke(token)
+                        // 通过流式回调传递给UI显示打字机效果
+                        this@PhoneAgent.onStreamToken?.invoke(token)
                     }
                     onCoordinatorThinking = { thinking ->
                         Logger.i(Logger.AGENT, "[Coordinator Thinking] $thinking")

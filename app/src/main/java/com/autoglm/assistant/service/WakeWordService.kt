@@ -63,6 +63,11 @@ class WakeWordService : Service() {
     private val _agentMessage = MutableStateFlow<AgentMessage?>(null)
     val agentMessage: StateFlow<AgentMessage?> = _agentMessage
 
+    // 流式消息 - 用于打字机效果（累积的内容）
+    private val _streamingMessage = MutableStateFlow<String?>(null)
+    val streamingMessage: StateFlow<String?> = _streamingMessage
+    private val streamingBuffer = StringBuilder()
+
     // Callbacks for UI updates
     var onWakeWordDetected: (() -> Unit)? = null
     var onSpeechRecognized: ((String) -> Unit)? = null
@@ -176,9 +181,35 @@ class WakeWordService : Service() {
                 _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
             }
 
+            // 流式输出回调 - 打字机效果
+            onStreamToken = { token ->
+                streamingBuffer.append(token)
+                _streamingMessage.value = "[Coordinator] " + streamingBuffer.toString()
+            }
+
+            onStreamStart = {
+                streamingBuffer.clear()
+                _streamingMessage.value = "[Coordinator] "
+            }
+
+            onStreamEnd = {
+                // 流结束后，将完整内容作为THINKING消息发出
+                if (streamingBuffer.isNotEmpty()) {
+                    _agentMessage.value = AgentMessage(
+                        "[Coordinator] " + streamingBuffer.toString(),
+                        AgentMessageType.THINKING
+                    )
+                }
+                streamingBuffer.clear()
+                _streamingMessage.value = null
+            }
+
             onTaskComplete = { message ->
                 _serviceState.value = ServiceState.IDLE
                 onTaskCompleted?.invoke(message)
+                // 清理流式消息
+                _streamingMessage.value = null
+                streamingBuffer.clear()
                 // Emit final result message
                 _agentMessage.value = AgentMessage(message, AgentMessageType.RESULT)
                 speak(message)
@@ -188,6 +219,9 @@ class WakeWordService : Service() {
             onError = { error ->
                 _serviceState.value = ServiceState.IDLE
                 this@WakeWordService.onError?.invoke(error)
+                // 清理流式消息
+                _streamingMessage.value = null
+                streamingBuffer.clear()
                 // Emit error as result
                 _agentMessage.value = AgentMessage(error, AgentMessageType.RESULT)
                 startWakeWordListening()
