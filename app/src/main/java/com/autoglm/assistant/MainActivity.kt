@@ -563,6 +563,12 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalMaxSteps = remember { prefs.maxSteps.toString() }
     val originalLanguage = remember { prefs.language }
     val originalShowAgentProcess = remember { prefs.showAgentProcess }
+    val originalSmartCoordinatorEnabled = remember { prefs.smartCoordinatorEnabled }
+    val originalCoordinatorApiUrl = remember { prefs.coordinatorApiUrl }
+    val originalCoordinatorApiKey = remember { prefs.coordinatorApiKey }
+    val originalCoordinatorModelName = remember { prefs.coordinatorModelName }
+    val originalSupervisionEnabled = remember { prefs.supervisionEnabled }
+    val originalMaxCorrections = remember { prefs.maxCorrections.toString() }
 
     var apiUrl by remember { mutableStateOf(prefs.apiUrl) }
     var apiKey by remember { mutableStateOf(prefs.apiKey) }
@@ -573,6 +579,13 @@ fun SettingsScreen(onBack: () -> Unit) {
     var maxSteps by remember { mutableStateOf(prefs.maxSteps.toString()) }
     var language by remember { mutableStateOf(prefs.language) }
     var showAgentProcess by remember { mutableStateOf(prefs.showAgentProcess) }
+    var smartCoordinatorEnabled by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
+    var coordinatorApiUrl by remember { mutableStateOf(prefs.coordinatorApiUrl) }
+    var coordinatorApiKey by remember { mutableStateOf(prefs.coordinatorApiKey) }
+    var coordinatorModelName by remember { mutableStateOf(prefs.coordinatorModelName) }
+    var coordinatorModelDropdownExpanded by remember { mutableStateOf(false) }
+    var supervisionEnabled by remember { mutableStateOf(prefs.supervisionEnabled) }
+    var maxCorrections by remember { mutableStateOf(prefs.maxCorrections.toString()) }
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check if any setting has changed
@@ -583,7 +596,13 @@ fun SettingsScreen(onBack: () -> Unit) {
             wakeWordKeyword != originalWakeWordKeyword ||
             maxSteps != originalMaxSteps ||
             language != originalLanguage ||
-            showAgentProcess != originalShowAgentProcess
+            showAgentProcess != originalShowAgentProcess ||
+            smartCoordinatorEnabled != originalSmartCoordinatorEnabled ||
+            coordinatorApiUrl != originalCoordinatorApiUrl ||
+            coordinatorApiKey != originalCoordinatorApiKey ||
+            coordinatorModelName != originalCoordinatorModelName ||
+            supervisionEnabled != originalSupervisionEnabled ||
+            maxCorrections != originalMaxCorrections
 
     // Available wake words
     val availableWakeWords = listOf(
@@ -626,6 +645,15 @@ fun SettingsScreen(onBack: () -> Unit) {
         val english = "English"
         val showProcess = if (isChinese) "显示执行过程" else "Show Agent Process"
         val showProcessDesc = if (isChinese) "在对话中显示思考和操作步骤" else "Display thinking and action steps in chat"
+        val smartCoordinatorSettings = if (isChinese) "智能协调器设置" else "Smart Coordinator Settings"
+        val enableSmartCoordinator = if (isChinese) "启用智能协调器" else "Enable Smart Coordinator"
+        val smartCoordinatorDesc = if (isChinese) "使用更强模型解释指令和监督执行" else "Use stronger model to interpret instructions and supervise execution"
+        val coordinatorApiUrlLabel = if (isChinese) "协调器 API URL" else "Coordinator API URL"
+        val coordinatorApiKeyLabel = if (isChinese) "协调器 API Key" else "Coordinator API Key"
+        val coordinatorModelLabel = if (isChinese) "协调器模型" else "Coordinator Model"
+        val enableSupervision = if (isChinese) "启用执行监督" else "Enable Supervision"
+        val supervisionDesc = if (isChinese) "检查每个子任务的执行结果" else "Check execution result of each subtask"
+        val maxCorrectionsLabel = if (isChinese) "最大纠正次数" else "Max Corrections"
         val unsavedChanges = if (isChinese) "未保存的更改" else "Unsaved Changes"
         val unsavedChangesMsg = if (isChinese) "是否保存更改？" else "Do you want to save changes?"
         val saveBtn = if (isChinese) "保存" else "Save"
@@ -652,6 +680,12 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.maxSteps = maxSteps.toIntOrNull() ?: 100
         prefs.language = language
         prefs.showAgentProcess = showAgentProcess
+        prefs.smartCoordinatorEnabled = smartCoordinatorEnabled
+        prefs.coordinatorApiUrl = coordinatorApiUrl
+        prefs.coordinatorApiKey = coordinatorApiKey
+        prefs.coordinatorModelName = coordinatorModelName
+        prefs.supervisionEnabled = supervisionEnabled
+        prefs.maxCorrections = maxCorrections.toIntOrNull() ?: 2
         Toast.makeText(context, strings.saved, Toast.LENGTH_SHORT).show()
     }
 
@@ -673,13 +707,15 @@ fun SettingsScreen(onBack: () -> Unit) {
             )
         }
     ) { paddingValues ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text(strings.modelSettings, style = MaterialTheme.typography.titleMedium)
 
             OutlinedTextField(
@@ -800,6 +836,120 @@ fun SettingsScreen(onBack: () -> Unit) {
                     checked = showAgentProcess,
                     onCheckedChange = { showAgentProcess = it }
                 )
+            }
+
+            Divider()
+
+            // SmartCoordinator Settings
+            Text(strings.smartCoordinatorSettings, style = MaterialTheme.typography.titleMedium)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(strings.enableSmartCoordinator, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        strings.smartCoordinatorDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = smartCoordinatorEnabled,
+                    onCheckedChange = { smartCoordinatorEnabled = it }
+                )
+            }
+
+            if (smartCoordinatorEnabled) {
+                OutlinedTextField(
+                    value = coordinatorApiUrl,
+                    onValueChange = { coordinatorApiUrl = it },
+                    label = { Text(strings.coordinatorApiUrlLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text("DeepSeek: https://api.deepseek.com/v1") }
+                )
+
+                OutlinedTextField(
+                    value = coordinatorApiKey,
+                    onValueChange = { coordinatorApiKey = it },
+                    label = { Text(strings.coordinatorApiKeyLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                // Model selection dropdown
+                val coordinatorModels = listOf(
+                    "deepseek-chat" to "DeepSeek Chat",
+                    "glm-4-plus" to "智谱 GLM-4 Plus",
+                    "glm-4" to "智谱 GLM-4"
+                )
+
+                ExposedDropdownMenuBox(
+                    expanded = coordinatorModelDropdownExpanded,
+                    onExpandedChange = { coordinatorModelDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = coordinatorModels.find { it.first == coordinatorModelName }?.second ?: coordinatorModelName,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text(strings.coordinatorModelLabel) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = coordinatorModelDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = coordinatorModelDropdownExpanded,
+                        onDismissRequest = { coordinatorModelDropdownExpanded = false }
+                    ) {
+                        coordinatorModels.forEach { (model, displayName) ->
+                            DropdownMenuItem(
+                                text = { Text(displayName) },
+                                onClick = {
+                                    coordinatorModelName = model
+                                    coordinatorModelDropdownExpanded = false
+                                },
+                                leadingIcon = if (coordinatorModelName == model) {
+                                    { Icon(Icons.Default.Check, contentDescription = null) }
+                                } else null
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(strings.enableSupervision, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            strings.supervisionDesc,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = supervisionEnabled,
+                        onCheckedChange = { supervisionEnabled = it }
+                    )
+                }
+
+                if (supervisionEnabled) {
+                    OutlinedTextField(
+                        value = maxCorrections,
+                        onValueChange = { maxCorrections = it },
+                        label = { Text(strings.maxCorrectionsLabel) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+            }
+                }
             }
         }
     }

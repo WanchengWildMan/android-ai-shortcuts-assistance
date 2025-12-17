@@ -21,12 +21,24 @@ class PreferenceManager(context: Context) {
         private const val KEY_WAKE_WORD_KEYWORD = "wake_word_keyword"
         private const val KEY_SHOW_AGENT_PROCESS = "show_agent_process"
 
+        // SmartCoordinator settings
+        private const val KEY_SMART_COORDINATOR_ENABLED = "smart_coordinator_enabled"
+        private const val KEY_COORDINATOR_API_URL = "coordinator_api_url"
+        private const val KEY_COORDINATOR_API_KEY = "coordinator_api_key"
+        private const val KEY_COORDINATOR_MODEL_NAME = "coordinator_model_name"
+        private const val KEY_SUPERVISION_ENABLED = "supervision_enabled"
+        private const val KEY_MAX_CORRECTIONS = "max_corrections"
+
         // Default values - BigModel API
         const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱 custom wake word
         const val DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4"
         const val DEFAULT_MODEL_NAME = "autoglm-phone"
         const val DEFAULT_LANGUAGE = "cn"
         const val DEFAULT_MAX_STEPS = 100
+        // SmartCoordinator defaults - DeepSeek
+        const val DEFAULT_COORDINATOR_API_URL = "https://api.deepseek.com/v1"
+        const val DEFAULT_COORDINATOR_MODEL_NAME = "deepseek-chat"
+        const val DEFAULT_MAX_CORRECTIONS = 2
     }
 
     var apiUrl: String
@@ -65,4 +77,29 @@ class PreferenceManager(context: Context) {
     var showAgentProcess: Boolean
         get() = prefs.getBoolean(KEY_SHOW_AGENT_PROCESS, false)
         set(value) = prefs.edit { putBoolean(KEY_SHOW_AGENT_PROCESS, value) }
+
+    // SmartCoordinator settings
+    var smartCoordinatorEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SMART_COORDINATOR_ENABLED, false)
+        set(value) = prefs.edit { putBoolean(KEY_SMART_COORDINATOR_ENABLED, value) }
+
+    var coordinatorApiUrl: String
+        get() = prefs.getString(KEY_COORDINATOR_API_URL, DEFAULT_COORDINATOR_API_URL) ?: DEFAULT_COORDINATOR_API_URL
+        set(value) = prefs.edit { putString(KEY_COORDINATOR_API_URL, value) }
+
+    var coordinatorApiKey: String
+        get() = prefs.getString(KEY_COORDINATOR_API_KEY, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_COORDINATOR_API_KEY, value) }
+
+    var coordinatorModelName: String
+        get() = prefs.getString(KEY_COORDINATOR_MODEL_NAME, DEFAULT_COORDINATOR_MODEL_NAME) ?: DEFAULT_COORDINATOR_MODEL_NAME
+        set(value) = prefs.edit { putString(KEY_COORDINATOR_MODEL_NAME, value) }
+
+    var supervisionEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SUPERVISION_ENABLED, true)
+        set(value) = prefs.edit { putBoolean(KEY_SUPERVISION_ENABLED, value) }
+
+    var maxCorrections: Int
+        get() = prefs.getInt(KEY_MAX_CORRECTIONS, DEFAULT_MAX_CORRECTIONS)
+        set(value) = prefs.edit { putInt(KEY_MAX_CORRECTIONS, value) }
 }
