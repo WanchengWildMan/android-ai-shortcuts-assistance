@@ -18,6 +18,7 @@ import com.autoglm.assistant.ai.ModelConfig
 import com.autoglm.assistant.core.agent.AgentConfig
 import com.autoglm.assistant.core.agent.PhoneAgent
 import com.autoglm.assistant.core.agent.SerializableMessage
+import com.autoglm.assistant.core.planner.TaskPlannerConfig
 import com.autoglm.assistant.voice.SpeechRecognizer
 import com.autoglm.assistant.voice.TextToSpeech
 import com.autoglm.assistant.voice.WakeWordEngine
@@ -135,9 +136,31 @@ class WakeWordService : Service() {
             modelName = prefs.modelName
         )
 
+        // 创建SmartCoordinator配置（如果启用）
+        val plannerConfig = if (prefs.smartCoordinatorEnabled) {
+            val coordinatorModelConfig = ModelConfig(
+                baseUrl = prefs.coordinatorApiUrl,
+                apiKey = prefs.coordinatorApiKey,
+                modelName = prefs.coordinatorModelName
+            )
+            TaskPlannerConfig(
+                enabled = true,
+                plannerModelConfig = coordinatorModelConfig,
+                enableSupervision = prefs.supervisionEnabled,
+                supervisorModelConfig = coordinatorModelConfig,
+                maxCorrections = prefs.maxCorrections
+            ).also {
+                android.util.Log.i("AutoGLM", "SmartCoordinator enabled: model=${prefs.coordinatorModelName}, supervision=${prefs.supervisionEnabled}")
+            }
+        } else {
+            android.util.Log.i("AutoGLM", "SmartCoordinator disabled")
+            null
+        }
+
         val agentConfig = AgentConfig(
             maxSteps = prefs.maxSteps,
-            language = prefs.language
+            language = prefs.language,
+            plannerConfig = plannerConfig
         )
 
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
