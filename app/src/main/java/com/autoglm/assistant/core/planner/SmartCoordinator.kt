@@ -23,6 +23,10 @@ class SmartCoordinator(
     private var coordinatorClient: ModelClient? = null
     private val gatheredInfo = mutableListOf<String>()  // 收集的信息
 
+    // 流式输出回调 - 用于在UI上显示打字机效果
+    var onStreamToken: ((String) -> Unit)? = null
+    var onCoordinatorThinking: ((String) -> Unit)? = null
+
     init {
         config.plannerModelConfig?.let {
             coordinatorClient = ModelClient(it)
@@ -66,10 +70,13 @@ class SmartCoordinator(
                         streamContent.append(token)
                         // 每收到token就打印，方便调试
                         Logger.d(Logger.AGENT, "Coordinator token: $token")
+                        // 流式输出到UI
+                        onStreamToken?.invoke(token)
                     }
 
                     override fun onThinkingComplete(thinking: String) {
                         Logger.i(Logger.AGENT, "Coordinator thinking: ${thinking.take(500)}...")
+                        onCoordinatorThinking?.invoke(thinking)
                     }
 
                     override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
@@ -149,10 +156,13 @@ class SmartCoordinator(
                 override fun onToken(token: String) {
                     supervisionContent.append(token)
                     Logger.d(Logger.AGENT, "Supervision token: $token")
+                    // 流式输出到UI
+                    onStreamToken?.invoke(token)
                 }
 
                 override fun onThinkingComplete(thinking: String) {
                     Logger.i(Logger.AGENT, "Coordinator supervising: ${thinking.take(300)}...")
+                    onCoordinatorThinking?.invoke(thinking)
                 }
 
                 override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {

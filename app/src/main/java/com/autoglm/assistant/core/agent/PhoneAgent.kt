@@ -98,7 +98,16 @@ class PhoneAgent(
         // 初始化智能协调器（如果配置了）
         agentConfig.plannerConfig?.let { config ->
             if (config.enabled) {
-                smartCoordinator = SmartCoordinator(config)
+                smartCoordinator = SmartCoordinator(config).apply {
+                    // 设置流式输出回调 - 将协调器输出传到UI
+                    onStreamToken = { token ->
+                        // 通过onThinking回调传递给UI显示打字机效果
+                        onThinking?.invoke(token)
+                    }
+                    onCoordinatorThinking = { thinking ->
+                        Logger.i(Logger.AGENT, "[Coordinator Thinking] $thinking")
+                    }
+                }
                 Logger.i(Logger.AGENT, "SmartCoordinator initialized with model: ${config.plannerModelConfig?.modelName}")
             }
         }
