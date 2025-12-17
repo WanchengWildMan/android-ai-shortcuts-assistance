@@ -105,7 +105,7 @@ class MainActivity : ComponentActivity() {
                     getServiceState = { wakeWordService?.serviceState },
                     getLastRecognizedText = { wakeWordService?.lastRecognizedText },
                     getAgentMessage = { wakeWordService?.agentMessage },
-                    getStreamingMessage = { wakeWordService?.streamingMessage }
+                    getCoordinatorMessage = { wakeWordService?.coordinatorMessage }
                 )
             }
         }
@@ -239,7 +239,7 @@ fun MainScreen(
     getServiceState: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.ServiceState>?,
     getLastRecognizedText: () -> kotlinx.coroutines.flow.StateFlow<String>?,
     getAgentMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.AgentMessage?>?,
-    getStreamingMessage: () -> kotlinx.coroutines.flow.StateFlow<String?>?
+    getCoordinatorMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.CoordinatorMessage?>?
 ) {
     var isServiceRunning by remember { mutableStateOf(false) }
     val conversations = remember { mutableStateListOf<Conversation>() }
@@ -249,10 +249,10 @@ fun MainScreen(
     val serviceState = getServiceState()?.collectAsState()
     val lastRecognizedText = getLastRecognizedText()?.collectAsState()
     val agentMessage = getAgentMessage()?.collectAsState()
-    val streamingMessage = getStreamingMessage()?.collectAsState()
+    val coordinatorMessage = getCoordinatorMessage()?.collectAsState()
 
-    // 流式消息状态 - 用于打字机效果
-    var currentStreamingContent by remember { mutableStateOf<String?>(null) }
+    // Coordinator消息状态
+    var lastCoordinatorContent by remember { mutableStateOf<String?>(null) }
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
@@ -330,25 +330,95 @@ fun MainScreen(
         }
     }
 
-    // 观察流式消息 - 打字机效果
-    LaunchedEffect(streamingMessage?.value) {
-        val content = streamingMessage?.value
-        if (content != null && content.isNotBlank()) {
-            val showProcess = App.instance.preferenceManager.showAgentProcess
-            if (showProcess) {
-                currentStreamingContent = content
-                // 更新最后一条assistant消息，或添加新的
-                val lastMsg = messages.lastOrNull()
-                if (lastMsg != null && !lastMsg.isUser && lastMsg.content.startsWith("[Coordinator]")) {
-                    // 更新最后一条消息
-                    messages[messages.lastIndex] = lastMsg.copy(content = content)
+    // 观察Coordinator消息 - 基于消息类型处理
+    // 跟踪当前正在流式更新的消息索引（优化器和规划器各自独立）
+    var optimizerMessageIndex by remember { mutableStateOf(-1) }
+    var plannerMessageIndex by remember { mutableStateOf(-1) }
+
+    LaunchedEffect(coordinatorMessage?.value) {
+        val msg = coordinatorMessage?.value ?: return@LaunchedEffect
+        val showProcess = App.instance.preferenceManager.showAgentProcess
+
+        // CLEAR类型：重置索引
+        if (msg.type == WakeWordService.CoordinatorMessageType.CLEAR) {
+            lastCoordinatorContent = null
+            optimizerMessageIndex = -1
+            plannerMessageIndex = -1
+            return@LaunchedEffect
+        }
+
+        if (!showProcess) return@LaunchedEffect
+
+        // 根据类型格式化显示内容
+        val displayContent = when (msg.type) {
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_STREAMING -> {
+                if (msg.content.isBlank()) "✨ 正在优化指令..."
+                else "✨ 优化中：${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_COMPLETE -> {
+                "✨ **优化后的指令：**\n\n${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.PLANNING_STREAMING -> {
+                if (msg.content.isBlank()) "🤔 正在规划任务..."
+                else "🤔 正在规划...\n\n${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.PLAN_COMPLETE -> {
+                msg.content  // 已经包含格式化内容
+            }
+            WakeWordService.CoordinatorMessageType.SUBTASK_START -> {
+                "🎯 ${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.SUPERVISION_RESULT -> {
+                // content格式: "STATUS|内容"
+                val parts = msg.content.split("|", limit = 2)
+                val status = parts.getOrNull(0) ?: ""
+                val content = parts.getOrNull(1) ?: msg.content
+                val emoji = when (status) {
+                    "SUCCESS" -> "✅"
+                    "NEEDS_CORRECTION" -> "⚠️"
+                    "FAILED" -> "❌"
+                    "UNCERTAIN" -> "❓"
+                    else -> "📊"
+                }
+                "$emoji 监督结果\n\n$content"
+            }
+            WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> {
+                "💭 协调器思考：\n${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.CLEAR -> ""
+        }
+
+        if (displayContent.isBlank()) return@LaunchedEffect
+
+        // 根据类型决定是更新还是新增消息
+        when (msg.type) {
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_STREAMING,
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_COMPLETE -> {
+                // 优化器消息：流式更新同一条
+                if (optimizerMessageIndex >= 0 && optimizerMessageIndex < messages.size) {
+                    messages[optimizerMessageIndex] = ChatMessage(content = displayContent, isUser = false)
                 } else {
-                    // 添加新的流式消息
-                    messages.add(ChatMessage(content = content, isUser = false))
+                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    optimizerMessageIndex = messages.size - 1
                 }
             }
-        } else {
-            currentStreamingContent = null
+            WakeWordService.CoordinatorMessageType.PLANNING_STREAMING,
+            WakeWordService.CoordinatorMessageType.PLAN_COMPLETE -> {
+                // 规划器消息：流式更新同一条（与优化器消息分开）
+                if (plannerMessageIndex >= 0 && plannerMessageIndex < messages.size) {
+                    messages[plannerMessageIndex] = ChatMessage(content = displayContent, isUser = false)
+                } else {
+                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    plannerMessageIndex = messages.size - 1
+                }
+            }
+            else -> {
+                // 其他消息：添加新消息
+                if (displayContent != lastCoordinatorContent) {
+                    lastCoordinatorContent = displayContent
+                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                }
+            }
         }
     }
 
@@ -362,11 +432,7 @@ fun MainScreen(
                 WakeWordService.AgentMessageType.THINKING,
                 WakeWordService.AgentMessageType.ACTION -> showProcess  // Only show if setting enabled
             }
-            // 如果是Coordinator的THINKING消息且已经通过流式显示，跳过
-            if (msg.content.startsWith("[Coordinator]") && msg.type == WakeWordService.AgentMessageType.THINKING) {
-                // 已经通过流式消息显示了，不需要再添加
-                return@LaunchedEffect
-            }
+            // Coordinator/Optimizer消息现在通过coordinatorMessage处理，这里不会收到重复消息
             if (shouldShow && msg.content.isNotBlank()) {
                 val prefix = when (msg.type) {
                     WakeWordService.AgentMessageType.THINKING -> "[Thinking] "
@@ -602,6 +668,11 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalCoordinatorModelName = remember { prefs.coordinatorModelName }
     val originalSupervisionEnabled = remember { prefs.supervisionEnabled }
     val originalMaxCorrections = remember { prefs.maxCorrections.toString() }
+    // Prompt Optimizer originals
+    val originalPromptOptimizerEnabled = remember { prefs.promptOptimizerEnabled }
+    val originalOptimizerApiUrl = remember { prefs.optimizerApiUrl }
+    val originalOptimizerApiKey = remember { prefs.optimizerApiKey }
+    val originalOptimizerModelName = remember { prefs.optimizerModelName }
 
     var apiUrl by remember { mutableStateOf(prefs.apiUrl) }
     var apiKey by remember { mutableStateOf(prefs.apiKey) }
@@ -619,6 +690,12 @@ fun SettingsScreen(onBack: () -> Unit) {
     var coordinatorModelDropdownExpanded by remember { mutableStateOf(false) }
     var supervisionEnabled by remember { mutableStateOf(prefs.supervisionEnabled) }
     var maxCorrections by remember { mutableStateOf(prefs.maxCorrections.toString()) }
+    // Prompt Optimizer states
+    var promptOptimizerEnabled by remember { mutableStateOf(prefs.promptOptimizerEnabled) }
+    var optimizerApiUrl by remember { mutableStateOf(prefs.optimizerApiUrl) }
+    var optimizerApiKey by remember { mutableStateOf(prefs.optimizerApiKey) }
+    var optimizerModelName by remember { mutableStateOf(prefs.optimizerModelName) }
+    var optimizerModelDropdownExpanded by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check if any setting has changed
@@ -635,7 +712,11 @@ fun SettingsScreen(onBack: () -> Unit) {
             coordinatorApiKey != originalCoordinatorApiKey ||
             coordinatorModelName != originalCoordinatorModelName ||
             supervisionEnabled != originalSupervisionEnabled ||
-            maxCorrections != originalMaxCorrections
+            maxCorrections != originalMaxCorrections ||
+            promptOptimizerEnabled != originalPromptOptimizerEnabled ||
+            optimizerApiUrl != originalOptimizerApiUrl ||
+            optimizerApiKey != originalOptimizerApiKey ||
+            optimizerModelName != originalOptimizerModelName
 
     // Available wake words
     val availableWakeWords = listOf(
@@ -687,6 +768,13 @@ fun SettingsScreen(onBack: () -> Unit) {
         val enableSupervision = if (isChinese) "启用执行监督" else "Enable Supervision"
         val supervisionDesc = if (isChinese) "检查每个子任务的执行结果" else "Check execution result of each subtask"
         val maxCorrectionsLabel = if (isChinese) "最大纠正次数" else "Max Corrections"
+        // Prompt Optimizer strings
+        val promptOptimizerSettings = if (isChinese) "指令优化器设置" else "Prompt Optimizer Settings"
+        val enablePromptOptimizer = if (isChinese) "启用指令优化器" else "Enable Prompt Optimizer"
+        val promptOptimizerDesc = if (isChinese) "将简短指令扩展为详细任务描述" else "Expand short instructions into detailed task descriptions"
+        val optimizerApiUrlLabel = if (isChinese) "优化器 API URL" else "Optimizer API URL"
+        val optimizerApiKeyLabel = if (isChinese) "优化器 API Key" else "Optimizer API Key"
+        val optimizerModelLabel = if (isChinese) "优化器模型" else "Optimizer Model"
         val unsavedChanges = if (isChinese) "未保存的更改" else "Unsaved Changes"
         val unsavedChangesMsg = if (isChinese) "是否保存更改？" else "Do you want to save changes?"
         val saveBtn = if (isChinese) "保存" else "Save"
@@ -719,6 +807,11 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.coordinatorModelName = coordinatorModelName
         prefs.supervisionEnabled = supervisionEnabled
         prefs.maxCorrections = maxCorrections.toIntOrNull() ?: 2
+        // Prompt Optimizer settings
+        prefs.promptOptimizerEnabled = promptOptimizerEnabled
+        prefs.optimizerApiUrl = optimizerApiUrl
+        prefs.optimizerApiKey = optimizerApiKey
+        prefs.optimizerModelName = optimizerModelName
         Toast.makeText(context, strings.saved, Toast.LENGTH_SHORT).show()
     }
 
@@ -981,6 +1074,151 @@ fun SettingsScreen(onBack: () -> Unit) {
                         singleLine = true
                     )
                 }
+            }
+
+            Divider()
+
+            // Prompt Optimizer Settings
+            Text(strings.promptOptimizerSettings, style = MaterialTheme.typography.titleMedium)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(strings.enablePromptOptimizer, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        strings.promptOptimizerDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = promptOptimizerEnabled,
+                    onCheckedChange = { promptOptimizerEnabled = it }
+                )
+            }
+
+            if (promptOptimizerEnabled) {
+                OutlinedTextField(
+                    value = optimizerApiUrl,
+                    onValueChange = { optimizerApiUrl = it },
+                    label = { Text(strings.optimizerApiUrlLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text("DeepSeek: https://api.deepseek.com/v1") }
+                )
+
+                OutlinedTextField(
+                    value = optimizerApiKey,
+                    onValueChange = { optimizerApiKey = it },
+                    label = { Text(strings.optimizerApiKeyLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                // Model selection dropdown
+                val optimizerModels = listOf(
+                    "deepseek-chat" to "DeepSeek Chat",
+                    "glm-4-plus" to "智谱 GLM-4 Plus",
+                    "glm-4" to "智谱 GLM-4"
+                )
+
+                ExposedDropdownMenuBox(
+                    expanded = optimizerModelDropdownExpanded,
+                    onExpandedChange = { optimizerModelDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = optimizerModels.find { it.first == optimizerModelName }?.second ?: optimizerModelName,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text(strings.optimizerModelLabel) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = optimizerModelDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = optimizerModelDropdownExpanded,
+                        onDismissRequest = { optimizerModelDropdownExpanded = false }
+                    ) {
+                        optimizerModels.forEach { (model, displayName) ->
+                            DropdownMenuItem(
+                                text = { Text(displayName) },
+                                onClick = {
+                                    optimizerModelName = model
+                                    optimizerModelDropdownExpanded = false
+                                },
+                                leadingIcon = if (optimizerModelName == model) {
+                                    { Icon(Icons.Default.Check, contentDescription = null) }
+                                } else null
+                            )
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            // System Tools
+            Text(if (isChinese) "系统工具" else "System Tools", style = MaterialTheme.typography.titleMedium)
+
+            val scope = rememberCoroutineScope()
+
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        // 尝试多种方式重启 input 服务
+                        var result = com.autoglm.assistant.util.ShellExecutor.execute("setprop ctl.restart inputflinger", useRoot = true)
+                        if (!result.success) {
+                            result = com.autoglm.assistant.util.ShellExecutor.execute("killall inputflinger", useRoot = true)
+                        }
+                        Toast.makeText(context, if (result.success) "Input 服务已重启" else "失败: ${result.stderr}", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (isChinese) "重启 Input 服务" else "Restart Input Service")
+            }
+
+            var showZygoteConfirm by remember { mutableStateOf(false) }
+
+            OutlinedButton(
+                onClick = { showZygoteConfirm = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Replay, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (isChinese) "重启 Zygote" else "Restart Zygote")
+            }
+
+            if (showZygoteConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showZygoteConfirm = false },
+                    title = { Text(if (isChinese) "确认重启" else "Confirm Restart") },
+                    text = { Text(if (isChinese) "这会重启所有应用，你需要重新打开本应用。确定继续？" else "This will restart all apps. You need to reopen this app. Continue?") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showZygoteConfirm = false
+                            scope.launch {
+                                val result = com.autoglm.assistant.util.ShellExecutor.execute("setprop ctl.restart zygote", useRoot = true)
+                                if (!result.success) {
+                                    Toast.makeText(context, "失败: ${result.stderr}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }) {
+                            Text(if (isChinese) "确定" else "OK")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showZygoteConfirm = false }) {
+                            Text(if (isChinese) "取消" else "Cancel")
+                        }
+                    }
+                )
             }
                 }
             }

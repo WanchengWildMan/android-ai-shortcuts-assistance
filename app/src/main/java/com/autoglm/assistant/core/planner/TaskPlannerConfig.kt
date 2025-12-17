@@ -119,4 +119,58 @@ data class TaskPlan(
      * 规划时间戳
      */
     val timestamp: Long = System.currentTimeMillis()
-)
+) {
+    /**
+     * 将任务计划格式化为可读的文本
+     */
+    fun toReadableText(): String {
+        val sb = StringBuilder()
+        sb.appendLine("📋 **任务规划**")
+        sb.appendLine()
+
+        // 如果只有一个子任务且goal就是originalTask，说明是自然语言模式
+        val isNaturalLanguageMode = subTasks.size == 1 && subTasks[0].goal == originalTask
+
+        if (!isNaturalLanguageMode) {
+            // JSON模式：显示任务分解
+            sb.appendLine("**原始任务：**$originalTask")
+            sb.appendLine()
+            sb.appendLine("📊 **任务理解：**")
+            sb.appendLine(analysis)
+            sb.appendLine()
+
+            if (estimatedDuration != null) {
+                val minutes = estimatedDuration / 60
+                val seconds = estimatedDuration % 60
+                sb.appendLine("⏱ **预计耗时：**${minutes}分${seconds}秒")
+                sb.appendLine()
+            }
+
+            sb.appendLine("📝 **执行步骤（共${subTasks.size}步）：**")
+            sb.appendLine()
+
+            subTasks.forEachIndexed { index, task ->
+                sb.appendLine("**${index + 1}. ${task.goal}**")
+                // 显示具体操作
+                if (task.actions.isNotBlank() && task.actions != task.goal) {
+                    sb.appendLine("   📌 操作：${task.actions}")
+                }
+                if (task.context.isNotBlank() && task.context != "协调器提供的任务指导") {
+                    sb.appendLine("   💡 ${task.context}")
+                }
+                if (task.dependencies.isNotEmpty()) {
+                    sb.appendLine("   ⚠️ 依赖：步骤 ${task.dependencies.joinToString(", ")}")
+                }
+                sb.appendLine()
+            }
+        } else {
+            // 自然语言模式：直接显示指导
+            sb.appendLine("**任务：**$originalTask")
+            sb.appendLine()
+            sb.appendLine("📌 **执行指导：**")
+            sb.appendLine(analysis)
+        }
+
+        return sb.toString().trim()
+    }
+}

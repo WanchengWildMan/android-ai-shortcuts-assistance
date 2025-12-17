@@ -29,6 +29,12 @@ class PreferenceManager(context: Context) {
         private const val KEY_SUPERVISION_ENABLED = "supervision_enabled"
         private const val KEY_MAX_CORRECTIONS = "max_corrections"
 
+        // PromptOptimizer settings
+        private const val KEY_PROMPT_OPTIMIZER_ENABLED = "prompt_optimizer_enabled"
+        private const val KEY_OPTIMIZER_API_URL = "optimizer_api_url"
+        private const val KEY_OPTIMIZER_API_KEY = "optimizer_api_key"
+        private const val KEY_OPTIMIZER_MODEL_NAME = "optimizer_model_name"
+
         // Default values - BigModel API
         const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱 custom wake word
         const val DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4"
@@ -39,6 +45,8 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_COORDINATOR_API_URL = "https://api.deepseek.com/v1"
         const val DEFAULT_COORDINATOR_MODEL_NAME = "deepseek-chat"
         const val DEFAULT_MAX_CORRECTIONS = 2
+        // PromptOptimizer defaults - uses coordinator settings as default
+        const val DEFAULT_OPTIMIZER_MODEL_NAME = "deepseek-chat"
     }
 
     var apiUrl: String
@@ -102,4 +110,21 @@ class PreferenceManager(context: Context) {
     var maxCorrections: Int
         get() = prefs.getInt(KEY_MAX_CORRECTIONS, DEFAULT_MAX_CORRECTIONS)
         set(value) = prefs.edit { putInt(KEY_MAX_CORRECTIONS, value) }
+
+    // PromptOptimizer settings
+    var promptOptimizerEnabled: Boolean
+        get() = prefs.getBoolean(KEY_PROMPT_OPTIMIZER_ENABLED, false)
+        set(value) = prefs.edit { putBoolean(KEY_PROMPT_OPTIMIZER_ENABLED, value) }
+
+    var optimizerApiUrl: String
+        get() = prefs.getString(KEY_OPTIMIZER_API_URL, DEFAULT_COORDINATOR_API_URL) ?: DEFAULT_COORDINATOR_API_URL
+        set(value) = prefs.edit { putString(KEY_OPTIMIZER_API_URL, value) }
+
+    var optimizerApiKey: String
+        get() = prefs.getString(KEY_OPTIMIZER_API_KEY, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_OPTIMIZER_API_KEY, value) }
+
+    var optimizerModelName: String
+        get() = prefs.getString(KEY_OPTIMIZER_MODEL_NAME, DEFAULT_OPTIMIZER_MODEL_NAME) ?: DEFAULT_OPTIMIZER_MODEL_NAME
+        set(value) = prefs.edit { putString(KEY_OPTIMIZER_MODEL_NAME, value) }
 }

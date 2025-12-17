@@ -23,9 +23,17 @@ class SmartCoordinator(
     private var coordinatorClient: ModelClient? = null
     private val gatheredInfo = mutableListOf<String>()  // 收集的信息
 
-    // 流式输出回调 - 用于在UI上显示打字机效果
-    var onStreamToken: ((String) -> Unit)? = null
-    var onCoordinatorThinking: ((String) -> Unit)? = null
+    // 回调接口 - 用于UI显示
+    var onPlanningStart: (() -> Unit)? = null           // 开始规划
+    var onPlanningComplete: ((TaskPlan?) -> Unit)? = null  // 规划完成，传递格式化的任务计划
+    var onSubTaskStart: ((PlannedSubTask) -> Unit)? = null  // 开始执行子任务
+    var onSupervisionResult: ((SupervisionResult) -> Unit)? = null  // 监督结果
+    
+    // 流式输出回调 - 用于打字机效果
+    var onStreamToken: ((String) -> Unit)? = null       // 流式token回调
+    var onStreamStart: (() -> Unit)? = null             // 流式输出开始
+    var onStreamEnd: (() -> Unit)? = null               // 流式输出结束
+    var onCoordinatorThinking: ((String) -> Unit)? = null  // 协调者思考过程
 
     init {
         config.plannerModelConfig?.let {
@@ -63,36 +71,39 @@ class SmartCoordinator(
             Logger.i(Logger.AGENT, "Calling coordinator model: ${config.plannerModelConfig?.modelName}")
             Logger.startTimer("coordinator_planning_request")
 
-            val streamContent = StringBuilder()
+            // 通知UI开始规划
+            onPlanningStart?.invoke()
+            onStreamStart?.invoke()
+
             val response = withTimeout(config.planningTimeout) {
                 coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
                     override fun onToken(token: String) {
-                        streamContent.append(token)
-                        // 每收到token就打印，方便调试
-                        Logger.d(Logger.AGENT, "Coordinator token: $token")
-                        // 流式输出到UI
+                        // 将token传递给UI以实现打字机效果
                         onStreamToken?.invoke(token)
+                        Logger.d(Logger.AGENT, "Coordinator planning token: $token")
                     }
 
                     override fun onThinkingComplete(thinking: String) {
-                        Logger.i(Logger.AGENT, "Coordinator thinking: ${thinking.take(500)}...")
+                        Logger.i(Logger.AGENT, "[COORDINATOR] Planning thinking (${thinking.length} chars): ${thinking.take(200)}...")
                         onCoordinatorThinking?.invoke(thinking)
                     }
 
                     override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
-                        Logger.i(Logger.AGENT, "Coordinator TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
-                        Logger.i(Logger.AGENT, "Coordinator full response: ${streamContent.toString().take(1000)}")
+                        Logger.i(Logger.AGENT, "[COORDINATOR] Planning TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
+                        onStreamEnd?.invoke()
                     }
 
                     override fun onError(error: String) {
-                        Logger.e(Logger.AGENT, "Coordinator error: $error")
+                        Logger.e(Logger.AGENT, "[COORDINATOR] Planning error: $error")
+                        onStreamEnd?.invoke()
                     }
                 })
             }
 
             val planningTime = Logger.endTimer("coordinator_planning_request", Logger.AGENT)
             Logger.i(Logger.AGENT, "Planning completed in ${planningTime}ms")
-
+            Logger.i(Logger.AGENT, "[COORDINATOR] Raw action response (${response.action.length} chars): ${response.action.take(500)}...")
+            
             val taskPlan = parsePlanningResponse(response.action, userTask)
 
             if (taskPlan != null) {
@@ -107,6 +118,9 @@ class SmartCoordinator(
 
             val totalTime = Logger.endTimer("smart_planning", Logger.AGENT)
             Logger.i(Logger.AGENT, "========== PLANNING COMPLETE (${totalTime}ms) ==========")
+
+            // 通知UI规划完成（传递格式化的任务计划，而非原始JSON）
+            onPlanningComplete?.invoke(taskPlan)
 
             return taskPlan
 
@@ -150,34 +164,35 @@ class SmartCoordinator(
 
             Logger.i(Logger.AGENT, "Calling coordinator to supervise sub-task ${subTask.index}")
             Logger.startTimer("coordinator_supervision_request")
+            onStreamStart?.invoke()
 
-            val supervisionContent = StringBuilder()
             val response = coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
                 override fun onToken(token: String) {
-                    supervisionContent.append(token)
-                    Logger.d(Logger.AGENT, "Supervision token: $token")
-                    // 流式输出到UI
+                    // 将token传递给UI以实现打字机效果
                     onStreamToken?.invoke(token)
+                    Logger.d(Logger.AGENT, "Supervision token: $token")
                 }
 
                 override fun onThinkingComplete(thinking: String) {
-                    Logger.i(Logger.AGENT, "Coordinator supervising: ${thinking.take(300)}...")
+                    Logger.i(Logger.AGENT, "[COORDINATOR] Supervision thinking (${thinking.length} chars): ${thinking.take(200)}...")
                     onCoordinatorThinking?.invoke(thinking)
                 }
 
                 override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
-                    Logger.i(Logger.AGENT, "Supervision TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
-                    Logger.i(Logger.AGENT, "Supervision full response: ${supervisionContent.toString().take(500)}")
+                    Logger.i(Logger.AGENT, "[COORDINATOR] Supervision TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
+                    onStreamEnd?.invoke()
                 }
 
                 override fun onError(error: String) {
-                    Logger.e(Logger.AGENT, "Supervision error: $error")
+                    Logger.e(Logger.AGENT, "[COORDINATOR] Supervision error: $error")
+                    onStreamEnd?.invoke()
                 }
             })
 
             val supervisionTime = Logger.endTimer("coordinator_supervision_request", Logger.AGENT)
             Logger.i(Logger.AGENT, "Supervision completed in ${supervisionTime}ms")
-
+            Logger.i(Logger.AGENT, "[COORDINATOR] Raw supervision response (${response.action.length} chars): ${response.action.take(500)}...")
+            
             val result = parseSupervisionResponse(response.action)
 
             if (result != null) {
@@ -196,6 +211,9 @@ class SmartCoordinator(
 
             val totalTime = Logger.endTimer("smart_supervision", Logger.AGENT)
             Logger.i(Logger.AGENT, "========== SUPERVISION COMPLETE (${totalTime}ms) ==========")
+
+            // 通知UI监督结果
+            result?.let { onSupervisionResult?.invoke(it) }
 
             return result ?: SupervisionResult(
                 status = SupervisionStatus.UNCERTAIN,
@@ -240,45 +258,66 @@ class SmartCoordinator(
 
     /**
      * 解析规划响应
+     * 支持两种格式：
+     * 1. JSON格式 - 解析为多个子任务
+     * 2. 自然语言 - 作为单个子任务的指导
      */
     private fun parsePlanningResponse(responseText: String, originalTask: String): TaskPlan? {
+        // 先尝试解析JSON格式
         try {
             val jsonText = extractJson(responseText)
-            if (jsonText.isBlank()) {
-                Logger.e(Logger.AGENT, "No valid JSON found in planning response")
-                return null
+            if (jsonText.isNotBlank()) {
+                val planResponse = gson.fromJson(jsonText, PlanResponse::class.java)
+
+                if (planResponse.subTasks.size > config.maxSubTasks) {
+                    Logger.w(Logger.AGENT, "Too many sub-tasks (${planResponse.subTasks.size}), truncating to ${config.maxSubTasks}")
+                    planResponse.subTasks = planResponse.subTasks.take(config.maxSubTasks)
+                }
+
+                Logger.i(Logger.AGENT, "Successfully parsed JSON plan with ${planResponse.subTasks.size} sub-tasks")
+                return TaskPlan(
+                    originalTask = originalTask,
+                    analysis = planResponse.analysis,
+                    subTasks = planResponse.subTasks.map { subTask ->
+                        PlannedSubTask(
+                            index = subTask.index,
+                            goal = subTask.goal,
+                            currentState = subTask.currentState,
+                            actions = subTask.actions,
+                            context = subTask.context,
+                            dependencies = subTask.dependencies
+                        )
+                    },
+                    estimatedDuration = planResponse.estimatedDuration
+                )
             }
+        } catch (e: JsonSyntaxException) {
+            Logger.w(Logger.AGENT, "JSON parse failed, will use natural language response: ${e.message}")
+        } catch (e: Exception) {
+            Logger.w(Logger.AGENT, "Error parsing JSON, will use natural language response: ${e.message}")
+        }
 
-            val planResponse = gson.fromJson(jsonText, PlanResponse::class.java)
-
-            if (planResponse.subTasks.size > config.maxSubTasks) {
-                Logger.w(Logger.AGENT, "Too many sub-tasks (${planResponse.subTasks.size}), truncating to ${config.maxSubTasks}")
-                planResponse.subTasks = planResponse.subTasks.take(config.maxSubTasks)
-            }
-
+        // JSON解析失败或没有JSON，把模型的自然语言输出作为任务指导
+        if (responseText.isNotBlank()) {
+            Logger.i(Logger.AGENT, "Using natural language response as task guidance")
             return TaskPlan(
                 originalTask = originalTask,
-                analysis = planResponse.analysis,
-                subTasks = planResponse.subTasks.map { subTask ->
+                analysis = responseText,  // 整个回复作为分析
+                subTasks = listOf(
                     PlannedSubTask(
-                        index = subTask.index,
-                        goal = subTask.goal,
-                        currentState = subTask.currentState,
-                        actions = subTask.actions,
-                        context = subTask.context,
-                        dependencies = subTask.dependencies
+                        index = 1,
+                        goal = originalTask,
+                        currentState = "待执行",
+                        actions = responseText,  // 模型的自然语言输出作为操作指导
+                        context = "协调器提供的任务指导",
+                        dependencies = emptyList()
                     )
-                },
-                estimatedDuration = planResponse.estimatedDuration
+                )
             )
-
-        } catch (e: JsonSyntaxException) {
-            Logger.e(Logger.AGENT, "Failed to parse planning response", e)
-            return null
-        } catch (e: Exception) {
-            Logger.e(Logger.AGENT, "Error parsing planning response", e)
-            return null
         }
+
+        Logger.e(Logger.AGENT, "Empty response from coordinator")
+        return null
     }
 
     /**

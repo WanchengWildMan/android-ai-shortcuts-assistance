@@ -8,6 +8,7 @@ import com.autoglm.assistant.ai.ModelConfig
 import com.autoglm.assistant.core.action.ActionExecutor
 import com.autoglm.assistant.core.action.ActionParser
 import com.autoglm.assistant.core.action.ActionType
+import com.autoglm.assistant.core.planner.PromptOptimizer
 import com.autoglm.assistant.core.planner.SmartCoordinator
 import com.autoglm.assistant.core.planner.TaskPlan
 import com.autoglm.assistant.core.planner.PlannedSubTask
@@ -50,6 +51,7 @@ class PhoneAgent(
     private lateinit var screenCapture: ScreenCapture
     private lateinit var actionExecutor: ActionExecutor
     private var smartCoordinator: SmartCoordinator? = null
+    private var promptOptimizer: PromptOptimizer? = null
 
     private val conversationHistory = mutableListOf<Message>()
     private var currentStep = 0
@@ -72,9 +74,19 @@ class PhoneAgent(
     var onHumanInterventionNeeded: ((String) -> Unit)? = null
     var onMaxStepsReached: ((Int, String) -> Unit)? = null  // (步数, 任务ID) 达到最大步数时回调
     var onTaskSaved: ((String) -> Unit)? = null  // 任务保存时回调
-    var onStreamToken: ((String) -> Unit)? = null  // 流式token回调 - 用于打字机效果
-    var onStreamStart: (() -> Unit)? = null  // 流式输出开始
-    var onStreamEnd: (() -> Unit)? = null    // 流式输出结束
+    // SmartCoordinator结构化回调 - 显示格式化内容而非原始JSON
+    var onPlanningStart: (() -> Unit)? = null           // 开始规划
+    var onPlanningComplete: ((TaskPlan?) -> Unit)? = null  // 规划完成
+    var onSubTaskStart: ((PlannedSubTask) -> Unit)? = null  // 开始执行子任务
+    var onSupervisionResult: ((com.autoglm.assistant.core.planner.SupervisionResult) -> Unit)? = null  // 监督结果
+    var onCoordinatorThinking: ((String) -> Unit)? = null  // 协调器思考过程
+    // 流式输出回调 - 用于打字机效果（如果需要）
+    var onStreamToken: ((String) -> Unit)? = null       // 流式token回调
+    var onStreamStart: (() -> Unit)? = null             // 流式输出开始
+    var onStreamEnd: (() -> Unit)? = null               // 流式输出结束
+    // Prompt优化器回调
+    var onPromptOptimizing: (() -> Unit)? = null        // 正在优化prompt
+    var onPromptOptimized: ((String) -> Unit)? = null   // prompt优化完成
 
     // State
     private val _isRunning = MutableStateFlow(false)
@@ -102,16 +114,58 @@ class PhoneAgent(
         agentConfig.plannerConfig?.let { config ->
             if (config.enabled) {
                 smartCoordinator = SmartCoordinator(config).apply {
-                    // 设置流式输出回调 - 用于打字机效果
+                    // 设置结构化回调 - 用于显示格式化内容
+                    onPlanningStart = {
+                        this@PhoneAgent.onPlanningStart?.invoke()
+                    }
+                    onPlanningComplete = { taskPlan ->
+                        this@PhoneAgent.onPlanningComplete?.invoke(taskPlan)
+                    }
+                    onSubTaskStart = { subTask ->
+                        this@PhoneAgent.onSubTaskStart?.invoke(subTask)
+                    }
+                    onSupervisionResult = { result ->
+                        this@PhoneAgent.onSupervisionResult?.invoke(result)
+                    }
+                    
+                    // 连接流式输出回调 - 用于打字机效果
                     onStreamToken = { token ->
-                        // 通过流式回调传递给UI显示打字机效果
+                        Logger.d(Logger.AGENT, "[COORDINATOR->UI] Token: $token")
                         this@PhoneAgent.onStreamToken?.invoke(token)
                     }
+                    onStreamStart = {
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream start")
+                        this@PhoneAgent.onStreamStart?.invoke()
+                    }
+                    onStreamEnd = {
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream end")
+                        this@PhoneAgent.onStreamEnd?.invoke()
+                    }
                     onCoordinatorThinking = { thinking ->
-                        Logger.i(Logger.AGENT, "[Coordinator Thinking] $thinking")
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Thinking: ${thinking.take(100)}...")
+                        this@PhoneAgent.onCoordinatorThinking?.invoke(thinking)
                     }
                 }
                 Logger.i(Logger.AGENT, "SmartCoordinator initialized with model: ${config.plannerModelConfig?.modelName}")
+            }
+        }
+
+        // 初始化Prompt优化器（如果配置了）
+        agentConfig.optimizerConfig?.let { config ->
+            if (config.enabled && config.modelConfig != null) {
+                promptOptimizer = PromptOptimizer(config.modelConfig).apply {
+                    onOptimizing = {
+                        this@PhoneAgent.onPromptOptimizing?.invoke()
+                    }
+                    onOptimized = { optimizedPrompt ->
+                        this@PhoneAgent.onPromptOptimized?.invoke(optimizedPrompt)
+                    }
+                    onStreamToken = { token ->
+                        Logger.d(Logger.AGENT, "[OPTIMIZER->UI] Token: $token")
+                        this@PhoneAgent.onStreamToken?.invoke(token)
+                    }
+                }
+                Logger.i(Logger.AGENT, "PromptOptimizer initialized with model: ${config.modelConfig.modelName}")
             }
         }
     }
@@ -133,6 +187,18 @@ class PhoneAgent(
         _isRunning.value = true
         _currentTask.value = task
         stopRequested = false
+
+        // 使用Prompt优化器优化任务描述（如果启用）
+        val effectiveTask = if (promptOptimizer != null) {
+            Logger.i(Logger.AGENT, "[PhoneAgent] Optimizing prompt with PromptOptimizer...")
+            // 将对话上下文转换为优化器需要的格式
+            val conversationContext = context.map { msg -> msg.role to msg.content }
+            val optimized = promptOptimizer!!.optimize(task, agentConfig.language, conversationContext)
+            Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Prompt optimized: $optimized")
+            optimized
+        } else {
+            task
+        }
 
         if (resetHistory) {
             conversationHistory.clear()
@@ -161,15 +227,16 @@ class PhoneAgent(
         try {
             // 尝试使用SmartCoordinator分解任务（如果启用）
             if (smartCoordinator != null && currentTaskPlan == null) {
-                Logger.i(Logger.AGENT, "Attempting to plan task with SmartCoordinator...")
-                currentTaskPlan = smartCoordinator?.planTask(task, agentConfig.language)
+                Logger.i(Logger.AGENT, "[PhoneAgent] Attempting to plan task with SmartCoordinator...")
+                currentTaskPlan = smartCoordinator?.planTask(effectiveTask, agentConfig.language)
 
                 if (currentTaskPlan != null) {
-                    Logger.i(Logger.AGENT, "Task successfully planned into ${currentTaskPlan!!.subTasks.size} sub-tasks")
-                    Logger.i(Logger.AGENT, "Task analysis: ${currentTaskPlan!!.analysis}")
+                    Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Task successfully planned into ${currentTaskPlan!!.subTasks.size} sub-tasks")
+                    Logger.i(Logger.AGENT, "[PhoneAgent] Task analysis: ${currentTaskPlan!!.analysis}")
+                    Logger.i(Logger.AGENT, "[PhoneAgent] Formatted plan:\n${currentTaskPlan!!.toReadableText()}")
                     currentSubTaskIndex = 0
                 } else {
-                    Logger.w(Logger.AGENT, "Task planning failed, falling back to direct execution")
+                    Logger.w(Logger.AGENT, "[PhoneAgent] ⚠ Task planning failed, falling back to direct execution")
                 }
             }
 
@@ -179,7 +246,7 @@ class PhoneAgent(
             }
 
             // 否则按原来的方式直接执行
-            return executeDirectly(task)
+            return executeDirectly(effectiveTask)
 
         } catch (e: Exception) {
             val error = "Error: ${e.message}"
@@ -211,6 +278,9 @@ class PhoneAgent(
             Logger.i(Logger.AGENT, "Goal: ${subTask.goal}")
 
             currentSubTaskIndex = index
+
+            // 通知UI开始执行子任务（显示指令内容）
+            onSubTaskStart?.invoke(subTask)
 
             // 构建子任务的详细prompt
             val subTaskPrompt = buildSubTaskPrompt(subTask, plan.originalTask)
@@ -553,5 +623,7 @@ ${supervision.correctionInstruction}
         screenCapture.release()
         smartCoordinator?.release()
         smartCoordinator = null
+        promptOptimizer?.release()
+        promptOptimizer = null
     }
 }

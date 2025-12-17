@@ -17,6 +17,7 @@ import com.autoglm.assistant.R
 import com.autoglm.assistant.ai.ModelConfig
 import com.autoglm.assistant.core.agent.AgentConfig
 import com.autoglm.assistant.core.agent.PhoneAgent
+import com.autoglm.assistant.core.agent.PromptOptimizerConfig
 import com.autoglm.assistant.core.agent.SerializableMessage
 import com.autoglm.assistant.core.planner.TaskPlannerConfig
 import com.autoglm.assistant.voice.SpeechRecognizer
@@ -59,14 +60,31 @@ class WakeWordService : Service() {
         val timestamp: Long = System.currentTimeMillis()
     )
 
+    // Coordinator消息类型
+    enum class CoordinatorMessageType {
+        OPTIMIZER_STREAMING,    // 优化器流式输出中
+        OPTIMIZER_COMPLETE,     // 优化完成
+        PLANNING_STREAMING,     // 规划流式输出中
+        PLAN_COMPLETE,          // 规划完成
+        SUBTASK_START,          // 子任务开始
+        SUPERVISION_RESULT,     // 监督结果
+        COORDINATOR_THINKING,   // 协调器思考
+        CLEAR                   // 清除消息
+    }
+
+    data class CoordinatorMessage(
+        val type: CoordinatorMessageType,
+        val content: String,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+
     // Agent response message with type to filter by setting
     private val _agentMessage = MutableStateFlow<AgentMessage?>(null)
     val agentMessage: StateFlow<AgentMessage?> = _agentMessage
 
-    // 流式消息 - 用于打字机效果（累积的内容）
-    private val _streamingMessage = MutableStateFlow<String?>(null)
-    val streamingMessage: StateFlow<String?> = _streamingMessage
-    private val streamingBuffer = StringBuilder()
+    // Coordinator消息 - 使用类型标签区分
+    private val _coordinatorMessage = MutableStateFlow<CoordinatorMessage?>(null)
+    val coordinatorMessage: StateFlow<CoordinatorMessage?> = _coordinatorMessage
 
     // Callbacks for UI updates
     var onWakeWordDetected: (() -> Unit)? = null
@@ -162,10 +180,29 @@ class WakeWordService : Service() {
             null
         }
 
+        // 创建Prompt优化器配置（如果启用）
+        val optimizerConfig = if (prefs.promptOptimizerEnabled) {
+            val optimizerModelConfig = ModelConfig(
+                baseUrl = prefs.optimizerApiUrl,
+                apiKey = prefs.optimizerApiKey,
+                modelName = prefs.optimizerModelName
+            )
+            PromptOptimizerConfig(
+                enabled = true,
+                modelConfig = optimizerModelConfig
+            ).also {
+                android.util.Log.i("AutoGLM", "PromptOptimizer enabled: model=${prefs.optimizerModelName}")
+            }
+        } else {
+            android.util.Log.i("AutoGLM", "PromptOptimizer disabled")
+            null
+        }
+
         val agentConfig = AgentConfig(
             maxSteps = prefs.maxSteps,
             language = prefs.language,
-            plannerConfig = plannerConfig
+            plannerConfig = plannerConfig,
+            optimizerConfig = optimizerConfig
         )
 
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
@@ -181,35 +218,133 @@ class WakeWordService : Service() {
                 _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
             }
 
-            // 流式输出回调 - 打字机效果
-            onStreamToken = { token ->
-                streamingBuffer.append(token)
-                _streamingMessage.value = "[Coordinator] " + streamingBuffer.toString()
+            // Prompt优化器回调 - 支持流式输出
+            var optimizerStreamingContent = StringBuilder()
+            var isOptimizing = false
+
+            onPromptOptimizing = {
+                isOptimizing = true
+                optimizerStreamingContent.clear()
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.OPTIMIZER_STREAMING,
+                    content = ""
+                )
             }
 
-            onStreamStart = {
-                streamingBuffer.clear()
-                _streamingMessage.value = "[Coordinator] "
+            onPromptOptimized = { optimizedPrompt ->
+                isOptimizing = false
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.OPTIMIZER_COMPLETE,
+                    content = optimizedPrompt
+                )
+            }
+
+            // SmartCoordinator结构化回调 - 显示格式化内容
+            var plannerStreamingContent = StringBuilder()
+            var isPlanning = false
+
+            onPlanningStart = {
+                isPlanning = true
+                plannerStreamingContent.clear()
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.PLANNING_STREAMING,
+                    content = ""
+                )
+            }
+
+            onStreamToken = { token ->
+                // 流式显示内容 - 根据当前状态决定是优化器还是规划器
+                if (isOptimizing) {
+                    optimizerStreamingContent.append(token)
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.OPTIMIZER_STREAMING,
+                        content = optimizerStreamingContent.toString()
+                    )
+                } else if (isPlanning) {
+                    plannerStreamingContent.append(token)
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.PLANNING_STREAMING,
+                        content = plannerStreamingContent.toString()
+                    )
+                }
+            }
+
+            onCoordinatorThinking = { thinking ->
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.COORDINATOR_THINKING,
+                    content = thinking
+                )
             }
 
             onStreamEnd = {
-                // 流结束后，将完整内容作为THINKING消息发出
-                if (streamingBuffer.isNotEmpty()) {
-                    _agentMessage.value = AgentMessage(
-                        "[Coordinator] " + streamingBuffer.toString(),
-                        AgentMessageType.THINKING
+                isPlanning = false
+            }
+
+            onPlanningComplete = { taskPlan ->
+                if (taskPlan != null) {
+                    // 使用TaskPlan的toReadableText方法，但去掉emoji前缀
+                    val planText = taskPlan.toReadableText()
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.PLAN_COMPLETE,
+                        content = planText
+                    )
+                    android.util.Log.i("AutoGLM", "[COORDINATOR] Task plan generated with ${taskPlan.subTasks.size} sub-tasks")
+                } else {
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.PLAN_COMPLETE,
+                        content = "任务规划失败，将直接执行"
                     )
                 }
-                streamingBuffer.clear()
-                _streamingMessage.value = null
+            }
+
+            onSubTaskStart = { subTask ->
+                val subTaskText = buildString {
+                    appendLine("开始执行子任务 ${subTask.index}")
+                    appendLine()
+                    appendLine("**目标：**${subTask.goal}")
+                    if (subTask.actions.isNotBlank()) {
+                        appendLine()
+                        appendLine("**操作指导：**")
+                        appendLine(subTask.actions)
+                    }
+                    if (subTask.context.isNotBlank() && subTask.context != "协调器提供的任务指导") {
+                        appendLine()
+                        appendLine("**注意事项：**${subTask.context}")
+                    }
+                }
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUBTASK_START,
+                    content = subTaskText.trim()
+                )
+            }
+
+            onSupervisionResult = { result ->
+                val resultText = buildString {
+                    appendLine("**评估：**${result.assessment}")
+                    if (result.correctionInstruction != null) {
+                        appendLine()
+                        appendLine("**纠正指令：**${result.correctionInstruction}")
+                    }
+                    if (result.gatheredInfo.isNotBlank()) {
+                        appendLine()
+                        appendLine("**收集信息：**${result.gatheredInfo}")
+                    }
+                }
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUPERVISION_RESULT,
+                    // 在content中存储状态和内容，用|分隔
+                    content = "${result.status.name}|${resultText.trim()}"
+                )
             }
 
             onTaskComplete = { message ->
                 _serviceState.value = ServiceState.IDLE
                 onTaskCompleted?.invoke(message)
-                // 清理流式消息
-                _streamingMessage.value = null
-                streamingBuffer.clear()
+                // 清理coordinator消息
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.CLEAR,
+                    content = ""
+                )
                 // Emit final result message
                 _agentMessage.value = AgentMessage(message, AgentMessageType.RESULT)
                 speak(message)
@@ -219,9 +354,11 @@ class WakeWordService : Service() {
             onError = { error ->
                 _serviceState.value = ServiceState.IDLE
                 this@WakeWordService.onError?.invoke(error)
-                // 清理流式消息
-                _streamingMessage.value = null
-                streamingBuffer.clear()
+                // 清理coordinator消息
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.CLEAR,
+                    content = ""
+                )
                 // Emit error as result
                 _agentMessage.value = AgentMessage(error, AgentMessageType.RESULT)
                 startWakeWordListening()
@@ -316,6 +453,18 @@ class WakeWordService : Service() {
         if (wasListening) {
             startWakeWordListening()
         }
+    }
+
+    /**
+     * 重新初始化PhoneAgent（当协调器设置改变时调用）
+     */
+    fun reinitializePhoneAgent() {
+        android.util.Log.i("AutoGLM", "Reinitializing PhoneAgent due to settings change")
+        // 释放旧的Agent
+        phoneAgent?.release()
+        // 重新初始化
+        initializePhoneAgent()
+        // 注意：屏幕截图权限需要重新授予
     }
 
     fun setScreenCapturePermission(resultCode: Int, data: Intent) {
