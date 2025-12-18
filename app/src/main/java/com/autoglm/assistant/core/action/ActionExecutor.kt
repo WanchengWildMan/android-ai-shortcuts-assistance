@@ -70,7 +70,8 @@ class ActionExecutor(
     private suspend fun executeLaunch(action: ParsedAction): ActionResult {
         val appName = action.params["app"] as? String ?: return ActionResult(false, "App name not specified")
 
-        val packageName = AppDetector.getPackageFromAppName(appName) ?: appName
+        // 使用动态搜索，支持从设备已安装应用中查找
+        val packageName = AppDetector.getPackageFromAppName(context, appName) ?: appName
 
         return when (getEffectiveMode()) {
             Mode.SHELL_INPUT -> {
