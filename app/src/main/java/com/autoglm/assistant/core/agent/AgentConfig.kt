@@ -48,5 +48,9 @@ data class PromptOptimizerConfig(
     /**
      * 优化器使用的模型配置
      */
-    val modelConfig: ModelConfig? = null
+    val modelConfig: ModelConfig? = null,
+    /**
+     * 是否启用任务完成后的自动总结
+     */
+    val enableTaskSummary: Boolean = false
 )

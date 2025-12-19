@@ -26,9 +26,10 @@ class SmartCoordinator(
     // 回调接口 - 用于UI显示
     var onPlanningStart: (() -> Unit)? = null           // 开始规划
     var onPlanningComplete: ((TaskPlan?) -> Unit)? = null  // 规划完成，传递格式化的任务计划
+    var onSubTaskGenerated: ((PlannedSubTask) -> Unit)? = null  // 生成一个新子任务（流式）
     var onSubTaskStart: ((PlannedSubTask) -> Unit)? = null  // 开始执行子任务
     var onSupervisionResult: ((SupervisionResult) -> Unit)? = null  // 监督结果
-    
+
     // 流式输出回调 - 用于打字机效果
     var onStreamToken: ((String) -> Unit)? = null       // 流式token回调
     var onStreamStart: (() -> Unit)? = null             // 流式输出开始
@@ -75,11 +76,48 @@ class SmartCoordinator(
             onPlanningStart?.invoke()
             onStreamStart?.invoke()
 
+            // 用于流式解析子任务
+            val streamBuffer = StringBuilder()
+            val generatedSubTasks = mutableListOf<PlannedSubTask>()
+            var subTaskIndex = 1
+
             val response = withTimeout(config.planningTimeout) {
                 coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
                     override fun onToken(token: String) {
-                        // 将token传递给UI以实现打字机效果
-                        onStreamToken?.invoke(token)
+                        // 累积token用于解析子任务
+                        streamBuffer.append(token)
+
+                        // 检测是否有完整的子任务（以 ---SUBTASK--- 分隔）
+                        val currentText = streamBuffer.toString()
+                        val subtaskMarker = "---SUBTASK---"
+                        var markerIndex = currentText.indexOf(subtaskMarker)
+
+                        while (markerIndex != -1) {
+                            // 提取子任务JSON
+                            val subtaskJson = currentText.substring(0, markerIndex).trim()
+
+                            if (subtaskJson.isNotBlank()) {
+                                try {
+                                    // 解析子任务
+                                    val subTask = parseSubTask(subtaskJson, subTaskIndex, userTask)
+                                    if (subTask != null) {
+                                        generatedSubTasks.add(subTask)
+                                        // 立即回调UI显示这个子任务
+                                        onSubTaskGenerated?.invoke(subTask)
+                                        Logger.i(Logger.AGENT, "Stream generated sub-task $subTaskIndex: ${subTask.goal}")
+                                        subTaskIndex++
+                                    }
+                                } catch (e: Exception) {
+                                    Logger.w(Logger.AGENT, "Failed to parse streamed sub-task: ${e.message}")
+                                }
+                            }
+
+                            // 清除已处理的部分
+                            streamBuffer.clear()
+                            streamBuffer.append(currentText.substring(markerIndex + subtaskMarker.length))
+                            markerIndex = streamBuffer.toString().indexOf(subtaskMarker)
+                        }
+
                         Logger.d(Logger.AGENT, "Coordinator planning token: $token")
                     }
 
@@ -89,6 +127,21 @@ class SmartCoordinator(
                     }
 
                     override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
+                        // 处理最后剩余的内容（可能是最后一个子任务）
+                        val remaining = streamBuffer.toString().trim()
+                        if (remaining.isNotBlank()) {
+                            try {
+                                val subTask = parseSubTask(remaining, subTaskIndex, userTask)
+                                if (subTask != null) {
+                                    generatedSubTasks.add(subTask)
+                                    onSubTaskGenerated?.invoke(subTask)
+                                    Logger.i(Logger.AGENT, "Stream generated final sub-task $subTaskIndex: ${subTask.goal}")
+                                }
+                            } catch (e: Exception) {
+                                Logger.w(Logger.AGENT, "Failed to parse final sub-task: ${e.message}")
+                            }
+                        }
+
                         Logger.i(Logger.AGENT, "[COORDINATOR] Planning TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
                         onStreamEnd?.invoke()
                     }
@@ -102,18 +155,27 @@ class SmartCoordinator(
 
             val planningTime = Logger.endTimer("coordinator_planning_request", Logger.AGENT)
             Logger.i(Logger.AGENT, "Planning completed in ${planningTime}ms")
-            Logger.i(Logger.AGENT, "[COORDINATOR] Raw action response (${response.action.length} chars): ${response.action.take(500)}...")
-            
-            val taskPlan = parsePlanningResponse(response.action, userTask)
 
-            if (taskPlan != null) {
-                Logger.i(Logger.AGENT, "Task plan created: ${taskPlan.subTasks.size} sub-tasks")
-                Logger.i(Logger.AGENT, "Analysis: ${taskPlan.analysis}")
-                taskPlan.subTasks.forEachIndexed { index, task ->
+            // 如果流式解析生成了子任务，使用它们
+            val taskPlan = if (generatedSubTasks.isNotEmpty()) {
+                Logger.i(Logger.AGENT, "Task plan created from stream: ${generatedSubTasks.size} sub-tasks")
+                generatedSubTasks.forEachIndexed { index, task ->
                     Logger.i(Logger.AGENT, "  Sub-task ${index + 1}: ${task.goal}")
                 }
+                TaskPlan(
+                    originalTask = userTask,
+                    analysis = "流式生成的任务计划",
+                    subTasks = generatedSubTasks,
+                    estimatedDuration = generatedSubTasks.size * 30
+                )
             } else {
-                Logger.e(Logger.AGENT, "Failed to parse task plan")
+                // 回退：如果流式解析失败，使用原来的完整解析
+                Logger.w(Logger.AGENT, "Stream parsing yielded no tasks, falling back to full parse")
+                parsePlanningResponse(response.action, userTask)
+            }
+
+            if (taskPlan == null) {
+                Logger.e(Logger.AGENT, "Failed to create task plan")
             }
 
             val totalTime = Logger.endTimer("smart_planning", Logger.AGENT)
@@ -126,6 +188,27 @@ class SmartCoordinator(
 
         } catch (e: Exception) {
             Logger.e(Logger.AGENT, "Task planning failed", e)
+            return null
+        }
+    }
+
+    /**
+     * 解析单个子任务JSON
+     */
+    private fun parseSubTask(jsonText: String, index: Int, originalTask: String): PlannedSubTask? {
+        try {
+            // 尝试解析为SubTaskResponse对象
+            val subTaskResponse = gson.fromJson(jsonText, SubTaskResponse::class.java)
+            return PlannedSubTask(
+                index = index,
+                goal = subTaskResponse.goal ?: originalTask,
+                currentState = subTaskResponse.currentState ?: "待开始",
+                actions = subTaskResponse.actions ?: "",
+                context = subTaskResponse.context ?: "",
+                dependencies = subTaskResponse.dependencies ?: emptyList()
+            )
+        } catch (e: Exception) {
+            Logger.w(Logger.AGENT, "Failed to parse sub-task JSON: ${e.message}, json: $jsonText")
             return null
         }
     }

@@ -20,6 +20,8 @@ class PromptOptimizer(
     var onOptimizing: (() -> Unit)? = null
     var onOptimized: ((String) -> Unit)? = null
     var onStreamToken: ((String) -> Unit)? = null
+    var onSummarizing: (() -> Unit)? = null
+    var onSummarized: ((String) -> Unit)? = null
 
     /**
      * 优化用户prompt
@@ -131,6 +133,114 @@ $contextSection
     }
 
     /**
+     * 生成任务总结
+     * @param originalTask 原始任务描述
+     * @param conversationContext 对话上下文（包含执行过程）
+     * @param language 语言 cn/en
+     * @return 任务总结，如果生成失败则返回默认消息
+     */
+    suspend fun summarize(
+        originalTask: String,
+        conversationContext: List<Pair<String, String>>,
+        language: String = "cn"
+    ): String {
+        Logger.i(Logger.AGENT, "========== TASK SUMMARIZER: START ==========")
+        Logger.i(Logger.AGENT, "Original task: $originalTask")
+        Logger.i(Logger.AGENT, "Context messages: ${conversationContext.size}")
+        Logger.startTimer("task_summary")
+
+        onSummarizing?.invoke()
+
+        try {
+            val systemPrompt = if (language == "en") SUMMARY_SYSTEM_PROMPT_EN else SUMMARY_SYSTEM_PROMPT_CN
+            val userMessage = buildSummaryPrompt(originalTask, language, conversationContext)
+
+            val messages = listOf(
+                Message.System(systemPrompt),
+                Message.User(userMessage)
+            )
+
+            Logger.i(Logger.AGENT, "Calling summarizer model: ${modelConfig.modelName}")
+
+            val response = withTimeout(30000L) {
+                client.chat(messages, object : ModelClient.StreamCallback {
+                    override fun onToken(token: String) {
+                        onStreamToken?.invoke(token)
+                    }
+
+                    override fun onThinkingComplete(thinking: String) {
+                        Logger.d(Logger.AGENT, "[SUMMARIZER] Thinking: ${thinking.take(100)}...")
+                    }
+
+                    override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
+                        Logger.i(Logger.AGENT, "[SUMMARIZER] Complete in ${response.totalTime}ms")
+                    }
+
+                    override fun onError(error: String) {
+                        Logger.e(Logger.AGENT, "[SUMMARIZER] Error: $error")
+                    }
+                })
+            }
+
+            val rawContent = response.rawContent.trim()
+            val summary = stripThinkingTags(rawContent)
+            val time = Logger.endTimer("task_summary", Logger.AGENT)
+            Logger.i(Logger.AGENT, "Task summary (${time}ms): $summary")
+            Logger.i(Logger.AGENT, "========== TASK SUMMARIZER: END ==========")
+
+            if (summary.isBlank()) {
+                Logger.w(Logger.AGENT, "Summary is blank, using default message")
+                val defaultMsg = if (language == "en") "Task completed" else "任务已完成"
+                onSummarized?.invoke(defaultMsg)
+                return defaultMsg
+            }
+
+            onSummarized?.invoke(summary)
+            return summary
+
+        } catch (e: Exception) {
+            Logger.e(Logger.AGENT, "Task summary failed", e)
+            Logger.endTimer("task_summary", Logger.AGENT)
+            val defaultMsg = if (language == "en") "Task completed" else "任务已完成"
+            onSummarized?.invoke(defaultMsg)
+            return defaultMsg
+        }
+    }
+
+    private fun buildSummaryPrompt(originalTask: String, language: String, conversationContext: List<Pair<String, String>>): String {
+        // 只取最近的对话上下文（避免太长）
+        val recentContext = conversationContext.takeLast(10).joinToString("\n\n") { (role, content) ->
+            val roleLabel = if (language == "en") {
+                if (role == "user") "User" else "Assistant"
+            } else {
+                if (role == "user") "用户" else "助手"
+            }
+            val shortContent = if (content.length > 500) content.take(500) + "..." else content
+            "$roleLabel: $shortContent"
+        }
+
+        return if (language == "en") {
+            """
+Original task: "$originalTask"
+
+Recent execution context:
+$recentContext
+
+Please summarize what was accomplished in this task execution.
+            """.trimIndent()
+        } else {
+            """
+原始任务："$originalTask"
+
+最近的执行上下文：
+$recentContext
+
+请总结这次任务执行中完成了什么。
+            """.trimIndent()
+        }
+    }
+
+    /**
      * 移除模型可能输出的思考标签
      * 支持 <think>...</think> 和 <thinking>...</thinking> 格式
      */
@@ -177,7 +287,7 @@ $contextSection
 2. **广告处理**：很多App打开后会弹出广告或启动页，提醒Agent遇到广告要点击关闭（通常在右上角）或等待广告跳过后再继续
 3. **导航路径**：如果目标功能不在主界面，明确说明如何到达：
    - 例如："在首页底部点击'我的'标签，进入个人中心，然后找到'设置'按钮"
-4. **异常返回**：如果进入了错误的界面或广告页，提醒Agent使用返回键退回到之前的界面
+4. **异常返回**：如果进入了错误的应用、界面或广告页，提醒Agent使用返回键退回到所需的应用、界面
 5. **弹窗处理**：遇到权限请求、通知弹窗等，根据任务需要选择允许或拒绝
 
 **指令解释示例：**
@@ -241,6 +351,52 @@ Optimize to: Open Messages or WhatsApp (handle any startup ads), confirm you're 
 
 User says: "book a ride to work"
 Optimize to: Open Uber or Lyft app (handle any ads), confirm you're on home screen and check pickup location is current location, search for "Work" in destination field or select from saved addresses, choose UberX or similar service type, tap request button, let user confirm ride details and payment
+"""
+
+        val SUMMARY_SYSTEM_PROMPT_CN = """你是一个任务总结专家。根据任务执行的对话上下文，生成简洁、清晰的任务完成总结。
+
+**输出要求：**
+1. **简洁明了**：1-3句话总结任务完成情况
+2. **重点突出**：说明完成了什么核心操作
+3. **避免技术细节**：不要提及坐标、点击等底层操作，而是描述用户层面的结果
+4. **自然语言**：使用用户容易理解的口语化表达
+
+**示例：**
+
+原始任务：打开美团外卖搜索咖啡
+总结：已在美团外卖搜索"咖啡"，找到了附近的咖啡店列表
+
+原始任务：给小王发微信说我到了
+总结：已向小王发送微信消息"我到了"
+
+原始任务：查一下明天天气
+总结：已查看明天天气，温度20-25度，晴天
+
+原始任务：打开抖音刷视频
+总结：已打开抖音，进入推荐页面
+"""
+
+        val SUMMARY_SYSTEM_PROMPT_EN = """You are a task summarization expert. Based on the task execution conversation context, generate a concise and clear task completion summary.
+
+**Output Requirements:**
+1. **Concise and clear**: Summarize task completion in 1-3 sentences
+2. **Highlight key points**: Explain what core operations were completed
+3. **Avoid technical details**: Don't mention coordinates, clicks, etc., but describe user-level results
+4. **Natural language**: Use colloquial expressions that users can easily understand
+
+**Examples:**
+
+Original task: Open Meituan and search for coffee
+Summary: Searched for "coffee" on Meituan and found a list of nearby coffee shops
+
+Original task: Send WeChat message to John saying I'm here
+Summary: Sent WeChat message "I'm here" to John
+
+Original task: Check tomorrow's weather
+Summary: Checked tomorrow's weather: 20-25°C, sunny
+
+Original task: Open TikTok and browse videos
+Summary: Opened TikTok and entered the recommendation feed
 """
     }
 }

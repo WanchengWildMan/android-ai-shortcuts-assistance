@@ -34,6 +34,7 @@ class PreferenceManager(context: Context) {
         private const val KEY_OPTIMIZER_API_URL = "optimizer_api_url"
         private const val KEY_OPTIMIZER_API_KEY = "optimizer_api_key"
         private const val KEY_OPTIMIZER_MODEL_NAME = "optimizer_model_name"
+        private const val KEY_TASK_SUMMARY_ENABLED = "task_summary_enabled"
 
         // Shell settings
         private const val KEY_USE_ROOT_MODE = "use_root_mode"
@@ -130,6 +131,11 @@ class PreferenceManager(context: Context) {
     var optimizerModelName: String
         get() = prefs.getString(KEY_OPTIMIZER_MODEL_NAME, DEFAULT_OPTIMIZER_MODEL_NAME) ?: DEFAULT_OPTIMIZER_MODEL_NAME
         set(value) = prefs.edit { putString(KEY_OPTIMIZER_MODEL_NAME, value) }
+
+    // 是否启用任务完成后的自动总结（使用优化器模型）
+    var taskSummaryEnabled: Boolean
+        get() = prefs.getBoolean(KEY_TASK_SUMMARY_ENABLED, false)  // 默认关闭
+        set(value) = prefs.edit { putBoolean(KEY_TASK_SUMMARY_ENABLED, value) }
 
     // Shell settings - 是否使用 Root 模式执行命令
     var useRootMode: Boolean

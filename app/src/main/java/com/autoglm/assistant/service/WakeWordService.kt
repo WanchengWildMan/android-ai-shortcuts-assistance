@@ -66,9 +66,12 @@ class WakeWordService : Service() {
         OPTIMIZER_COMPLETE,     // 优化完成
         PLANNING_STREAMING,     // 规划流式输出中
         PLAN_COMPLETE,          // 规划完成
-        SUBTASK_START,          // 子任务开始
+        SUBTASK_CARD,           // 子任务卡片（流式生成时立即显示）
+        SUBTASK_START,          // 子任务开始执行
         SUPERVISION_RESULT,     // 监督结果
         COORDINATOR_THINKING,   // 协调器思考
+        SUMMARY_STREAMING,      // 任务总结流式输出中
+        SUMMARY_COMPLETE,       // 任务总结完成
         CLEAR                   // 清除消息
     }
 
@@ -189,9 +192,10 @@ class WakeWordService : Service() {
             )
             PromptOptimizerConfig(
                 enabled = true,
-                modelConfig = optimizerModelConfig
+                modelConfig = optimizerModelConfig,
+                enableTaskSummary = prefs.taskSummaryEnabled
             ).also {
-                android.util.Log.i("AutoGLM", "PromptOptimizer enabled: model=${prefs.optimizerModelName}")
+                android.util.Log.i("AutoGLM", "PromptOptimizer enabled: model=${prefs.optimizerModelName}, taskSummary=${prefs.taskSummaryEnabled}")
             }
         } else {
             android.util.Log.i("AutoGLM", "PromptOptimizer disabled")
@@ -221,6 +225,8 @@ class WakeWordService : Service() {
             // Prompt优化器回调 - 支持流式输出
             var optimizerStreamingContent = StringBuilder()
             var isOptimizing = false
+            var summaryStreamingContent = StringBuilder()
+            var isSummarizing = false
 
             onPromptOptimizing = {
                 isOptimizing = true
@@ -239,6 +245,23 @@ class WakeWordService : Service() {
                 )
             }
 
+            onTaskSummarizing = {
+                isSummarizing = true
+                summaryStreamingContent.clear()
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUMMARY_STREAMING,
+                    content = ""
+                )
+            }
+
+            onTaskSummary = { summary ->
+                isSummarizing = false
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUMMARY_COMPLETE,
+                    content = summary
+                )
+            }
+
             // SmartCoordinator结构化回调 - 显示格式化内容
             var plannerStreamingContent = StringBuilder()
             var isPlanning = false
@@ -253,7 +276,7 @@ class WakeWordService : Service() {
             }
 
             onStreamToken = { token ->
-                // 流式显示内容 - 根据当前状态决定是优化器还是规划器
+                // 流式显示内容 - 根据当前状态决定是优化器、规划器还是总结器
                 if (isOptimizing) {
                     optimizerStreamingContent.append(token)
                     _coordinatorMessage.value = CoordinatorMessage(
@@ -265,6 +288,12 @@ class WakeWordService : Service() {
                     _coordinatorMessage.value = CoordinatorMessage(
                         type = CoordinatorMessageType.PLANNING_STREAMING,
                         content = plannerStreamingContent.toString()
+                    )
+                } else if (isSummarizing) {
+                    summaryStreamingContent.append(token)
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.SUMMARY_STREAMING,
+                        content = summaryStreamingContent.toString()
                     )
                 }
             }
@@ -295,6 +324,28 @@ class WakeWordService : Service() {
                         content = "任务规划失败，将直接执行"
                     )
                 }
+            }
+
+            onSubTaskGenerated = { subTask ->
+                // 子任务生成时立即显示卡片
+                val cardText = buildString {
+                    appendLine("**步骤 ${subTask.index}**")
+                    appendLine()
+                    appendLine("**目标：**${subTask.goal}")
+                    if (subTask.currentState.isNotBlank()) {
+                        appendLine()
+                        appendLine("**当前状态：**${subTask.currentState}")
+                    }
+                    if (subTask.actions.isNotBlank()) {
+                        appendLine()
+                        appendLine("**操作：**${subTask.actions}")
+                    }
+                }
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUBTASK_CARD,
+                    content = cardText.trim()
+                )
+                android.util.Log.i("AutoGLM", "[COORDINATOR] SubTask ${subTask.index} card displayed: ${subTask.goal}")
             }
 
             onSubTaskStart = { subTask ->

@@ -338,21 +338,25 @@ class ActionExecutor(
 
     private suspend fun executeFinish(action: ParsedAction): ActionResult {
         val message = action.params["message"] as? String
+        returnToAutoGLM()
+        return ActionResult(success = true, message = message)
+    }
 
-        // 返回 AutoGLM app
+    /**
+     * 返回 AutoGLM app 界面
+     * 可以在子任务完成、失败或需要用户确认时调用
+     * 使用 REORDER_TO_FRONT 保持当前导航栈，不会跳转到主页
+     */
+    suspend fun returnToAutoGLM() {
         try {
-            val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                context.startActivity(intent)
-                delay(500)
-                Logger.d(Logger.ACTION, "Returned to AutoGLM app after finishing task")
-            }
+            val intent = Intent(context, com.autoglm.assistant.MainActivity::class.java)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            context.startActivity(intent)
+            delay(500)
+            Logger.d(Logger.ACTION, "Returned to AutoGLM app")
         } catch (e: Exception) {
             Logger.e(Logger.ACTION, "Failed to return to AutoGLM app", e)
         }
-
-        return ActionResult(success = true, message = message)
     }
 
     private fun convertRelativeToAbsolute(relX: Float, relY: Float): Pair<Int, Int> {

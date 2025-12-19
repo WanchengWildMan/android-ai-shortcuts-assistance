@@ -331,9 +331,10 @@ fun MainScreen(
     }
 
     // 观察Coordinator消息 - 基于消息类型处理
-    // 跟踪当前正在流式更新的消息索引（优化器和规划器各自独立）
+    // 跟踪当前正在流式更新的消息索引（优化器、规划器、总结器各自独立）
     var optimizerMessageIndex by remember { mutableStateOf(-1) }
     var plannerMessageIndex by remember { mutableStateOf(-1) }
+    var summaryMessageIndex by remember { mutableStateOf(-1) }
 
     LaunchedEffect(coordinatorMessage?.value) {
         val msg = coordinatorMessage?.value ?: return@LaunchedEffect
@@ -344,6 +345,7 @@ fun MainScreen(
             lastCoordinatorContent = null
             optimizerMessageIndex = -1
             plannerMessageIndex = -1
+            summaryMessageIndex = -1
             return@LaunchedEffect
         }
 
@@ -365,6 +367,9 @@ fun MainScreen(
             WakeWordService.CoordinatorMessageType.PLAN_COMPLETE -> {
                 msg.content  // 已经包含格式化内容
             }
+            WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
+                "📋 ${msg.content}"
+            }
             WakeWordService.CoordinatorMessageType.SUBTASK_START -> {
                 "🎯 ${msg.content}"
             }
@@ -384,6 +389,13 @@ fun MainScreen(
             }
             WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> {
                 "💭 协调器思考：\n${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING -> {
+                if (msg.content.isBlank()) "📝 正在生成任务总结..."
+                else "📝 正在总结...\n\n${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {
+                "📝 **任务总结：**\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.CLEAR -> ""
         }
@@ -410,6 +422,20 @@ fun MainScreen(
                 } else {
                     addMessage(ChatMessage(content = displayContent, isUser = false))
                     plannerMessageIndex = messages.size - 1
+                }
+            }
+            WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
+                // 子任务卡片：每个都是独立的新消息
+                addMessage(ChatMessage(content = displayContent, isUser = false))
+            }
+            WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING,
+            WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {
+                // 总结消息：流式更新同一条（与优化器和规划器消息分开）
+                if (summaryMessageIndex >= 0 && summaryMessageIndex < messages.size) {
+                    messages[summaryMessageIndex] = ChatMessage(content = displayContent, isUser = false)
+                } else {
+                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    summaryMessageIndex = messages.size - 1
                 }
             }
             else -> {
@@ -673,6 +699,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalOptimizerApiUrl = remember { prefs.optimizerApiUrl }
     val originalOptimizerApiKey = remember { prefs.optimizerApiKey }
     val originalOptimizerModelName = remember { prefs.optimizerModelName }
+    val originalTaskSummaryEnabled = remember { prefs.taskSummaryEnabled }
 
     var apiUrl by remember { mutableStateOf(prefs.apiUrl) }
     var apiKey by remember { mutableStateOf(prefs.apiKey) }
@@ -696,6 +723,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var optimizerApiKey by remember { mutableStateOf(prefs.optimizerApiKey) }
     var optimizerModelName by remember { mutableStateOf(prefs.optimizerModelName) }
     var optimizerModelDropdownExpanded by remember { mutableStateOf(false) }
+    var taskSummaryEnabled by remember { mutableStateOf(prefs.taskSummaryEnabled) }
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check if any setting has changed
@@ -716,7 +744,8 @@ fun SettingsScreen(onBack: () -> Unit) {
             promptOptimizerEnabled != originalPromptOptimizerEnabled ||
             optimizerApiUrl != originalOptimizerApiUrl ||
             optimizerApiKey != originalOptimizerApiKey ||
-            optimizerModelName != originalOptimizerModelName
+            optimizerModelName != originalOptimizerModelName ||
+            taskSummaryEnabled != originalTaskSummaryEnabled
 
     // Available wake words
     val availableWakeWords = listOf(
@@ -808,7 +837,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                 promptOptimizerEnabled != originalPromptOptimizerEnabled ||
                 optimizerApiUrl != originalOptimizerApiUrl ||
                 optimizerApiKey != originalOptimizerApiKey ||
-                optimizerModelName != originalOptimizerModelName
+                optimizerModelName != originalOptimizerModelName ||
+                taskSummaryEnabled != originalTaskSummaryEnabled
 
         // 保存所有设置
         prefs.apiUrl = apiUrl
@@ -830,6 +860,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.optimizerApiUrl = optimizerApiUrl
         prefs.optimizerApiKey = optimizerApiKey
         prefs.optimizerModelName = optimizerModelName
+        prefs.taskSummaryEnabled = taskSummaryEnabled
 
         // 如果关键配置变化，重启服务使其生效
         if (needsRestart) {
@@ -1191,6 +1222,31 @@ fun SettingsScreen(onBack: () -> Unit) {
                             )
                         }
                     }
+                }
+
+                // Task Summary Toggle (只在启用优化器时显示)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (isChinese) "任务完成后自动总结" else "Auto-summarize on task completion",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            if (isChinese) "任务完成或终止后自动生成总结说明" else "Automatically generate summary when task completes or stops",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = taskSummaryEnabled,
+                        onCheckedChange = { taskSummaryEnabled = it }
+                    )
                 }
             }
 
