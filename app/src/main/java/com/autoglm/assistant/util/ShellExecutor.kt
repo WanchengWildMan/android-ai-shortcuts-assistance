@@ -22,6 +22,10 @@ object ShellExecutor {
     @Volatile
     private var selinuxDisabled: Boolean = false
 
+    // 全局 Root 模式开关（可通过设置控制）
+    @Volatile
+    var globalUseRoot: Boolean = true
+
     // 静态初始化 libsu Shell 配置
     init {
         Shell.enableVerboseLogging = false
@@ -89,12 +93,14 @@ object ShellExecutor {
      * @return 命令执行结果
      */
     suspend fun execute(command: String, useRoot: Boolean = false): Result = withContext(Dispatchers.IO) {
+        // 实际是否使用 root：全局开关 AND 参数
+        val effectiveUseRoot = globalUseRoot && useRoot
         val cmdPreview = if (command.length > 80) command.take(80) + "..." else command
-        Logger.d(TAG, "[CMD] root=$useRoot, cmd=$cmdPreview")
+        Logger.d(TAG, "[CMD] root=$effectiveUseRoot (global=$globalUseRoot, param=$useRoot), cmd=$cmdPreview")
         val startTime = System.currentTimeMillis()
 
         try {
-            val result = if (useRoot) {
+            val result = if (effectiveUseRoot) {
                 executeWithLibsu(command)
             } else {
                 executeWithRuntime(command)
@@ -211,7 +217,12 @@ object ShellExecutor {
     }
 
     suspend fun launchApp(packageName: String): Boolean {
-        val result = execute("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
+        // 优先使用 am start（更可靠）
+        var result = execute("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p $packageName", useRoot = true)
+        if (result.success) return true
+
+        // 回退到 monkey 命令
+        result = execute("monkey -p $packageName -c android.intent.category.LAUNCHER 1", useRoot = true)
         return result.success
     }
 

@@ -793,6 +793,24 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     // Save function
     val saveSettings = {
+        // 检测关键配置是否变化（影响 Agent/Coordinator/Optimizer）
+        val needsRestart = apiUrl != originalApiUrl ||
+                apiKey != originalApiKey ||
+                modelName != originalModelName ||
+                language != originalLanguage ||
+                maxSteps != originalMaxSteps ||
+                smartCoordinatorEnabled != originalSmartCoordinatorEnabled ||
+                coordinatorApiUrl != originalCoordinatorApiUrl ||
+                coordinatorApiKey != originalCoordinatorApiKey ||
+                coordinatorModelName != originalCoordinatorModelName ||
+                supervisionEnabled != originalSupervisionEnabled ||
+                maxCorrections != originalMaxCorrections ||
+                promptOptimizerEnabled != originalPromptOptimizerEnabled ||
+                optimizerApiUrl != originalOptimizerApiUrl ||
+                optimizerApiKey != originalOptimizerApiKey ||
+                optimizerModelName != originalOptimizerModelName
+
+        // 保存所有设置
         prefs.apiUrl = apiUrl
         prefs.apiKey = apiKey
         prefs.modelName = modelName
@@ -812,7 +830,24 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.optimizerApiUrl = optimizerApiUrl
         prefs.optimizerApiKey = optimizerApiKey
         prefs.optimizerModelName = optimizerModelName
-        Toast.makeText(context, strings.saved, Toast.LENGTH_SHORT).show()
+
+        // 如果关键配置变化，重启服务使其生效
+        if (needsRestart) {
+            // 停止服务
+            context.stopService(Intent(context, WakeWordService::class.java))
+            // 延迟后重启（给服务时间完全停止）
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                val serviceIntent = Intent(context, WakeWordService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+            }, 500)
+            Toast.makeText(context, if (language == "cn") "设置已保存，服务重启中..." else "Settings saved, restarting service...", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, strings.saved, Toast.LENGTH_SHORT).show()
+        }
     }
 
     Scaffold(
@@ -1154,6 +1189,94 @@ fun SettingsScreen(onBack: () -> Unit) {
                                     { Icon(Icons.Default.Check, contentDescription = null) }
                                 } else null
                             )
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            // Root Mode Toggle
+            var useRootMode by remember { mutableStateOf(prefs.useRootMode) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(if (isChinese) "Root 模式" else "Root Mode", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (isChinese) "使用 Root 权限执行命令（需要设备已 Root）" else "Execute commands with root (requires rooted device)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = useRootMode,
+                    onCheckedChange = {
+                        useRootMode = it
+                        prefs.useRootMode = it
+                        com.autoglm.assistant.util.ShellExecutor.globalUseRoot = it
+                    }
+                )
+            }
+
+            // 非 Root 模式下的辅助功能提示
+            if (!useRootMode) {
+                var accessibilityEnabled by remember { mutableStateOf(
+                    com.autoglm.assistant.util.PermissionHelper.isAccessibilityServiceEnabled(context)
+                ) }
+                // 实时检测辅助功能状态
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        kotlinx.coroutines.delay(1000)
+                        accessibilityEnabled = com.autoglm.assistant.util.PermissionHelper.isAccessibilityServiceEnabled(context)
+                    }
+                }
+                if (!accessibilityEnabled) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    if (isChinese) "需要辅助功能权限" else "Accessibility Service Required",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    if (isChinese) "非 Root 模式需要启用辅助功能才能执行点击、滑动等操作" else "Non-root mode requires accessibility service for tap/swipe actions",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            TextButton(
+                                onClick = {
+                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                                }
+                            ) {
+                                Text(if (isChinese) "去开启" else "Enable")
+                            }
                         }
                     }
                 }

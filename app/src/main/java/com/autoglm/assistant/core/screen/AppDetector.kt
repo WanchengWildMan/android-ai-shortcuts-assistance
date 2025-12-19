@@ -224,8 +224,11 @@ object AppDetector {
             val pm = context.packageManager
             val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
 
+            com.autoglm.assistant.util.Logger.d("AppDetector", "Searching for '$appName' in ${packages.size} packages")
+
             val searchName = appName.lowercase()
             var bestMatch: Pair<String, Int>? = null  // packageName to score
+            val candidates = mutableListOf<Triple<String, String, Int>>() // label, pkg, score
 
             for (appInfo in packages) {
                 try {
@@ -241,19 +244,39 @@ object AppDetector {
                         labelLower.contains(searchName) -> 80
                         // 搜索词包含应用名
                         searchName.contains(labelLower) && labelLower.length >= 2 -> 70
-                        // 包名包含搜索词
+                        // 包名包含搜索词（中文也支持）
                         pkgLower.contains(searchName) -> 50
+                        // 包名中的关键词匹配（如 weather, gallery, note）
+                        pkgLower.contains("weather") && searchName.contains("天气") -> 60
+                        pkgLower.contains("gallery") && (searchName.contains("相册") || searchName.contains("图库")) -> 60
+                        pkgLower.contains("note") && searchName.contains("笔记") -> 60
+                        pkgLower.contains("camera") && searchName.contains("相机") -> 60
+                        pkgLower.contains("calendar") && searchName.contains("日历") -> 60
+                        pkgLower.contains("clock") && (searchName.contains("时钟") || searchName.contains("闹钟")) -> 60
+                        pkgLower.contains("calculator") && searchName.contains("计算") -> 60
+                        pkgLower.contains("music") && searchName.contains("音乐") -> 60
+                        pkgLower.contains("video") && searchName.contains("视频") -> 60
+                        pkgLower.contains("file") && searchName.contains("文件") -> 60
                         // 部分匹配
                         labelLower.split(" ", "·", "-").any { it.contains(searchName) || searchName.contains(it) } -> 40
                         else -> 0
                     }
 
-                    if (score > 0 && (bestMatch == null || score > bestMatch.second)) {
-                        bestMatch = appInfo.packageName to score
+                    if (score > 0) {
+                        candidates.add(Triple(label, appInfo.packageName, score))
+                        if (bestMatch == null || score > bestMatch.second) {
+                            bestMatch = appInfo.packageName to score
+                        }
                     }
                 } catch (e: Exception) {
                     // Skip this app
                 }
+            }
+
+            // 打印所有候选
+            if (candidates.isNotEmpty()) {
+                val top5 = candidates.sortedByDescending { it.third }.take(5)
+                com.autoglm.assistant.util.Logger.d("AppDetector", "Top candidates for '$appName': ${top5.map { "${it.first}(${it.third})" }}")
             }
 
             // 只返回分数足够高的匹配
@@ -262,7 +285,7 @@ object AppDetector {
                 return@withContext bestMatch.first
             }
 
-            com.autoglm.assistant.util.Logger.w("AppDetector", "App not found: $appName")
+            com.autoglm.assistant.util.Logger.w("AppDetector", "App not found: $appName (no candidates matched)")
             return@withContext null
         } catch (e: Exception) {
             com.autoglm.assistant.util.Logger.e("AppDetector", "Error finding app: $appName", e)

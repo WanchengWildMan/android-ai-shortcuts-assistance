@@ -58,7 +58,7 @@ class ActionExecutor(
             ActionType.TAKE_OVER -> executeTakeOver(action)
             ActionType.NOTE -> executeNote(action)
             ActionType.CALL_API -> executeCallApi(action)
-            ActionType.FINISH -> ActionResult(success = true, message = action.params["message"] as? String)
+            ActionType.FINISH -> executeFinish(action)
             ActionType.UNKNOWN -> ActionResult(success = false, message = "Unknown action type")
         }
 
@@ -75,9 +75,38 @@ class ActionExecutor(
 
         return when (getEffectiveMode()) {
             Mode.SHELL_INPUT -> {
-                val success = ShellExecutor.launchApp(packageName)
-                delay(DELAY_LAUNCH)
-                ActionResult(success, if (success) "Launched $appName" else "Failed to launch $appName")
+                // 在非root模式下，直接使用 Intent（shell 命令需要 root）
+                if (!ShellExecutor.globalUseRoot) {
+                    Logger.d(Logger.ACTION, "Non-root mode, using Intent to launch")
+                    val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+                    if (intent != null) {
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                        delay(DELAY_LAUNCH)
+                        ActionResult(true, "Launched $appName via Intent")
+                    } else {
+                        ActionResult(false, "App not found: $appName")
+                    }
+                } else {
+                    // Root 模式：优先用 shell 命令
+                    val success = ShellExecutor.launchApp(packageName)
+                    if (success) {
+                        delay(DELAY_LAUNCH)
+                        ActionResult(true, "Launched $appName")
+                    } else {
+                        // Shell 失败，回退到 Intent
+                        Logger.d(Logger.ACTION, "Shell launch failed, fallback to Intent")
+                        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+                        if (intent != null) {
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                            delay(DELAY_LAUNCH)
+                            ActionResult(true, "Launched $appName via Intent")
+                        } else {
+                            ActionResult(false, "App not found: $appName")
+                        }
+                    }
+                }
             }
             Mode.ACCESSIBILITY -> {
                 val intent = context.packageManager.getLaunchIntentForPackage(packageName)
@@ -305,6 +334,25 @@ class ActionExecutor(
         val instruction = action.params["message"] as? String ?: ""
         // This would typically call an API for content summarization
         return ActionResult(true, "Call API: $instruction")
+    }
+
+    private suspend fun executeFinish(action: ParsedAction): ActionResult {
+        val message = action.params["message"] as? String
+
+        // 返回 AutoGLM app
+        try {
+            val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                context.startActivity(intent)
+                delay(500)
+                Logger.d(Logger.ACTION, "Returned to AutoGLM app after finishing task")
+            }
+        } catch (e: Exception) {
+            Logger.e(Logger.ACTION, "Failed to return to AutoGLM app", e)
+        }
+
+        return ActionResult(success = true, message = message)
     }
 
     private fun convertRelativeToAbsolute(relX: Float, relY: Float): Pair<Int, Int> {

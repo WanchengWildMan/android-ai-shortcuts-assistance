@@ -35,6 +35,9 @@ class PreferenceManager(context: Context) {
         private const val KEY_OPTIMIZER_API_KEY = "optimizer_api_key"
         private const val KEY_OPTIMIZER_MODEL_NAME = "optimizer_model_name"
 
+        // Shell settings
+        private const val KEY_USE_ROOT_MODE = "use_root_mode"
+
         // Default values - BigModel API
         const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱 custom wake word
         const val DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4"
@@ -127,4 +130,9 @@ class PreferenceManager(context: Context) {
     var optimizerModelName: String
         get() = prefs.getString(KEY_OPTIMIZER_MODEL_NAME, DEFAULT_OPTIMIZER_MODEL_NAME) ?: DEFAULT_OPTIMIZER_MODEL_NAME
         set(value) = prefs.edit { putString(KEY_OPTIMIZER_MODEL_NAME, value) }
+
+    // Shell settings - 是否使用 Root 模式执行命令
+    var useRootMode: Boolean
+        get() = prefs.getBoolean(KEY_USE_ROOT_MODE, true)  // 默认开启
+        set(value) = prefs.edit { putBoolean(KEY_USE_ROOT_MODE, value) }
 }
