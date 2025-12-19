@@ -400,11 +400,19 @@ ${subTask.context}
 
             while (!result.finished && subTaskSteps < maxSubTaskSteps && currentStep < agentConfig.maxSteps) {
                 if (stopRequested) {
-                    break
+                    // 用户停止任务，立即返回AutoGLM显示停止状态
+                    actionExecutor.returnToAutoGLM()
+                    return result.copy(
+                        success = false,
+                        finished = true,
+                        message = if (agentConfig.language == "en") "Task stopped by user" else "任务已停止"
+                    )
                 }
 
                 if (result.needsHumanIntervention) {
-                    break
+                    // 需要人工介入，立即返回AutoGLM让用户看到提示
+                    actionExecutor.returnToAutoGLM()
+                    return result
                 }
 
                 result = executeStep(isNewTask = false)
