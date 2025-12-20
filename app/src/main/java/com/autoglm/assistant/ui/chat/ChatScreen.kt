@@ -52,81 +52,75 @@ fun ChatScreen(
     val listState = rememberLazyListState()
 
     var previousMessageCount by remember { mutableIntStateOf(0) }
-    var isInitialLoad by remember { mutableStateOf(true) }
     var userScrolledUp by remember { mutableStateOf(false) }
     var isAutoScrolling by remember { mutableStateOf(false) }
-    val currentMessages by rememberUpdatedState(messages)
-    val scope = rememberCoroutineScope()
 
-    // 检查是否在底部的函数
-    fun isAtBottom(): Boolean {
-        val layoutInfo = listState.layoutInfo
-        val visibleItems = layoutInfo.visibleItemsInfo
-        if (visibleItems.isEmpty() || currentMessages.isEmpty()) return true
-
-        val lastVisibleItem = visibleItems.lastOrNull() ?: return false
-        val totalItems = layoutInfo.totalItemsCount
-
-        // 最后一个可见项是否是最后一项，且完全可见
-        return lastVisibleItem.index >= totalItems - 1
-    }
-
-    // 监听用户主动滚动行为
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            listState.isScrollInProgress to listState.firstVisibleItemIndex
-        }.collect { (isScrolling, _) ->
-            // 只在非自动滚动时更新状态
-            if (isScrolling && !isAutoScrolling) {
-                // 如果在底部，说明用户滚回来了 -> false
-                // 如果不在底部，说明用户滚上去了 -> true
-                userScrolledUp = !isAtBottom()
+    // 监听全局设置变化，同步到聊天页面开关
+    LaunchedEffect(Unit) {
+        snapshotFlow { prefs.smartCoordinatorEnabled }
+            .collect { globalEnabled ->
+                enablePlanning = globalEnabled
             }
-        }
     }
 
-    // 自动滚动逻辑：像 QQ/微信 一样
+    // 判断是否在底部（带容差，允许最后2项范围内）
+    fun isNearBottom(): Boolean {
+        val layoutInfo = listState.layoutInfo
+        val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return true
+        val totalItems = layoutInfo.totalItemsCount
+        return lastVisibleIndex >= totalItems - 2
+    }
+
+    // 监听用户主动滚动
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { isScrolling ->
+                // 只在非自动滚动时更新状态
+                if (isScrolling && !isAutoScrolling) {
+                    // 用户滚动中，检查是否离开底部
+                    if (!isNearBottom()) {
+                        userScrolledUp = true
+                        android.util.Log.d("ChatScroll", "User scrolled up")
+                    }
+                }
+                // 滚动停止时，如果回到底部，清除标记
+                if (!isScrolling && userScrolledUp && isNearBottom()) {
+                    userScrolledUp = false
+                    android.util.Log.d("ChatScroll", "User back to bottom")
+                }
+            }
+    }
+
+    // 自动滚动：收到消息或内容更新就滚到底
     LaunchedEffect(messages.size, messages.lastOrNull()?.content) {
         if (messages.isEmpty()) return@LaunchedEffect
 
         val currentCount = messages.size
         val lastIndex = messages.size - 1
-        val lastMessage = messages.last()
+        val lastMessage = messages.lastOrNull() ?: return@LaunchedEffect
         val isUserMessage = lastMessage.isUser
-
-        // 初始加载：直接滚到底部
-        if (isInitialLoad) {
-            delay(50)  // 等待布局完成
-            listState.scrollToItem(lastIndex)
-            isInitialLoad = false
-            previousMessageCount = currentCount
-            userScrolledUp = false
-            return@LaunchedEffect
-        }
-
         val isNewMessage = currentCount > previousMessageCount
 
         // 决定是否自动滚动
         val shouldAutoScroll = when {
-            isUserMessage -> true  // 用户发送的消息：总是滚到底部
-            !userScrolledUp -> true  // 用户没有上滑：自动滚到底部
-            else -> false  // 用户正在查看历史：不打扰
+            isUserMessage -> true  // 用户发消息：总是滚
+            !userScrolledUp -> true  // AI消息+用户在底部：滚
+            else -> false  // AI消息+用户在查看历史：不滚
         }
 
         if (shouldAutoScroll) {
             isAutoScrolling = true
-            try {
-                if (isNewMessage) {
-                    // 新消息：使用动画滚动
-                    userScrolledUp = false
-                    listState.animateScrollToItem(lastIndex)
-                } else {
-                    // 流式更新：平滑滚动（避免频繁动画）
-                    listState.scrollToItem(lastIndex)
-                }
-            } finally {
-                isAutoScrolling = false
+            if (isUserMessage) {
+                userScrolledUp = false  // 用户发消息时重置标记
             }
+            // 直接滚到底部
+            if (isNewMessage) {
+                listState.animateScrollToItem(lastIndex)
+            } else {
+                listState.scrollToItem(lastIndex)
+            }
+            delay(50)
+            isAutoScrolling = false
         }
 
         previousMessageCount = currentCount
