@@ -37,7 +37,7 @@ object PlannerPrompts {
 
 然后逐个输出子任务（每个后面加分隔符）：
 
-```json
+---SUBTASK---
 {
   "index": 1,
   "goal": "打开美团外卖并进入搜索页面",
@@ -56,7 +56,7 @@ object PlannerPrompts {
   "dependencies": [1]
 }
 ---SUBTASK---
-```
+
 
 **关键规则：**
 1. 每个子任务是独立的JSON对象（不是包在数组里）
@@ -67,19 +67,29 @@ object PlannerPrompts {
 1. **目标明确**：每个子任务的goal应该清晰描述要达成什么，避免模糊
 2. **状态清晰**：current_state描述执行前的预期状态，帮助Agent理解当前环境
 3. **操作具体**：actions应该是具体的操作指令，不是泛泛而谈
-   - 好的例子：\"打开美团App，点击搜索框，输入'咖啡'，点击搜索结果中的第一家星巴克\"
-   - 差的例子：\"在美团上搜索咖啡店\"
+   - **必须包含应用名称和包名**：如"启动美团App（包名：com.sankuai.meituan）"
+   - **不能省略步骤**：不能直接说"等待启动页跳过"，必须先说"启动xx App"
+   - **从头到尾完整描述**：从哪里开始（桌面/当前App）→ 打开什么 → 点击什么 → 输入什么 → 期望看到什么
+   - 好的例子：\"启动美团App（包名：com.sankuai.meituan），等待App加载完成，跳过启动页（如果有），点击搜索框，输入'咖啡'\"
+   - 差的例子：\"在美团上搜索咖啡店\"（缺少应用名称、启动步骤）
+   - 差的例子：\"等待启动页跳过，进入主界面\"（缺少前置的启动应用步骤）
 4. **上下文丰富**：context提供执行时需要注意的细节
    - 包括：特殊要求、边界情况、备选方案、错误处理建议
-5. **依赖明确**：如果子任务需要等待前置任务完成，在dependencies中列出前置任务的index
-6. **粒度适中**：不要拆分得过细（每个子任务应该是有意义的步骤），也不要过粗（应该是UI Agent能直接执行的）
+5. **灵活适应**：操作指令应该留有余地，允许Agent根据实际界面调整
+   - **不要强制要求不存在的功能**：如果要求"筛选价格"，应该说"如果有价格筛选选项，则使用；如果没有，可以通过其他方式（如排序、浏览）来找到合适的商品"
+   - **提供备选方案**：如"优先使用搜索功能，如果搜索不可用，可以通过分类浏览"
+   - **强调目标而非步骤**：描述"达到什么效果"比"必须执行什么操作"更重要
+   - 好的例子：\"在商品列表中找到价格合适的商品。如果有价格筛选功能就使用，否则可以通过查看列表、排序等方式选择\"
+   - 差的例子：\"点击价格筛选按钮，选择100-200元价格区间\"（强制要求不一定存在的功能）
+6. **依赖明确**：如果子任务需要等待前置任务完成，在dependencies中列出前置任务的index
+7. **粒度适中**：不要拆分得过细（每个子任务应该是有意义的步骤），也不要过粗（应该是UI Agent能直接执行的）
 
 【指令解释示例】
 - 用户说："帮我点个咖啡"
-  → 解释为："在美团外卖上搜索并订购一杯咖啡（如拿铁或美式），选择附近评分高的咖啡店（如星巴克），然后提交订单"
+  → 解释为："在美团外卖上搜索并订购一杯咖啡（如拿铁或美式），选择附近评分高的咖啡店（如星巴克），如果指定了商品就选择，然后提交订单"
 
 - 用户说："查一下明天天气"
-  → 解释为："打开天气App（如自带天气或墨迹天气），查看明天的天气预报，包括温度、降雨概率、风力等信息"
+  → 解释为："打开"天气"App，查看明天的天气预报，包括温度、降雨概率、风力等信息"
 
 - 用户说："给小王发消息说我到了"
   → 解释为："打开微信，搜索联系人'小王'，发送文本消息'我到了'，等待消息发送成功"
@@ -91,7 +101,7 @@ object PlannerPrompts {
 
 任务分析：用户的指令已经很明确：在美团外卖平台上订购星巴克的拿铁咖啡，并且有定制需求（少冰少糖）。需要依次完成：打开美团外卖 → 搜索星巴克门店 → 在商品列表中找到拿铁 → 选择少冰少糖选项 → 提交订单（提醒用户支付）。预计耗时约120秒。
 
-```json
+---SUBTASK---
 {
   "index": 1,
   "goal": "打开美团外卖并进入搜索页面",
@@ -128,7 +138,7 @@ object PlannerPrompts {
   "dependencies": [3]
 }
 ---SUBTASK---
-```
+
 """
 
     /**
@@ -157,7 +167,7 @@ Task Analysis: User needs to order a Starbucks latte on Meituan with less ice an
 
 Then output subtasks one by one (each followed by delimiter):
 
-```json
+---SUBTASK---
 {
   "index": 1,
   "goal": "Open Meituan Delivery and enter search page",
@@ -176,7 +186,7 @@ Then output subtasks one by one (each followed by delimiter):
   "dependencies": [1]
 }
 ---SUBTASK---
-```
+
 
 **Key Rules:**
 1. Each subtask is an independent JSON object (not wrapped in an array)
@@ -187,12 +197,22 @@ Important principles:
 1. **Clear goals**: Each subtask's goal should clearly describe what to achieve, avoid ambiguity
 2. **Clear state**: current_state describes the expected state before execution, helping the Agent understand the current environment
 3. **Specific actions**: actions should be concrete operation instructions, not general talk
-   - Good example: "Open Meituan App, click search box, enter 'coffee', click first Starbucks in results"
-   - Bad example: "Search for coffee shop on Meituan"
+   - **Must include app name and package**: e.g., "Launch Meituan App (package: com.sankuai.meituan)"
+   - **Cannot skip steps**: Cannot say "Wait for splash screen to skip" without first saying "Launch xx App"
+   - **Complete description from start to end**: Where to start (home screen/current app) → What to open → What to click → What to enter → What to expect
+   - Good example: "Launch Meituan App (package: com.sankuai.meituan), wait for app to load, skip splash screen (if any), click search box, enter 'coffee'"
+   - Bad example: "Search for coffee shop on Meituan" (missing app name, launch steps)
+   - Bad example: "Wait for splash screen to skip, enter main page" (missing preceding app launch step)
 4. **Rich context**: context provides details needed during execution
    - Include: special requirements, edge cases, alternative solutions, error handling suggestions
-5. **Clear dependencies**: If a subtask needs to wait for prerequisite tasks, list their indexes in dependencies
-6. **Moderate granularity**: Don't split too fine (each subtask should be a meaningful step), nor too coarse (should be directly executable by UI Agent)
+5. **Flexible adaptation**: Instructions should allow room for the Agent to adjust based on actual UI
+   - **Don't force non-existent features**: If requiring "filter by price", say "If price filter is available, use it; if not, find suitable items through other means (sorting, browsing)"
+   - **Provide alternatives**: e.g., "Prefer using search; if unavailable, browse by category"
+   - **Emphasize goals over steps**: Describing "what to achieve" matters more than "must do this operation"
+   - Good example: "Find reasonably priced items in the list. Use price filter if available, otherwise select by browsing or sorting"
+   - Bad example: "Click price filter button, select 100-200 range" (forces potentially non-existent feature)
+6. **Clear dependencies**: If a subtask needs to wait for prerequisite tasks, list their indexes in dependencies
+7. **Moderate granularity**: Don't split too fine (each subtask should be a meaningful step), nor too coarse (should be directly executable by UI Agent)
 
 Example:
 User instruction: "Help me order a Starbucks latte on Meituan, less ice and less sugar"
@@ -201,7 +221,7 @@ Good streaming output:
 
 Task Analysis: User needs to order a Starbucks latte on Meituan Delivery with customization (less ice, less sugar). Steps: Open Meituan → Search Starbucks → Find latte and customize → Submit order. Estimated time: 120 seconds.
 
-```json
+---SUBTASK---
 {
   "index": 1,
   "goal": "Open Meituan Delivery and enter search page",
@@ -238,7 +258,7 @@ Task Analysis: User needs to order a Starbucks latte on Meituan Delivery with cu
   "dependencies": [3]
 }
 ---SUBTASK---
-```
+
 """
 
     /**

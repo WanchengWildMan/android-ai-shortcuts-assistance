@@ -202,7 +202,10 @@ class PhoneAgent(
         stopRequested = false
 
         // 使用Prompt优化器优化任务描述（如果启用）
-        val effectiveTask = if (promptOptimizer != null) {
+        // 注意：如果启用了任务规划（SmartCoordinator），则不使用PromptOptimizer
+        // 因为SmartCoordinator已经会对任务进行理解和分解，避免优化后的详细指令影响子任务执行
+        val shouldOptimizePrompt = promptOptimizer != null && smartCoordinator == null
+        val effectiveTask = if (shouldOptimizePrompt) {
             Logger.i(Logger.AGENT, "[PhoneAgent] Optimizing prompt with PromptOptimizer...")
             // 将对话上下文转换为优化器需要的格式
             val conversationContext = context.map { msg -> msg.role to msg.content }
@@ -210,6 +213,9 @@ class PhoneAgent(
             Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Prompt optimized: $optimized")
             optimized
         } else {
+            if (promptOptimizer != null && smartCoordinator != null) {
+                Logger.i(Logger.AGENT, "[PhoneAgent] Skipping PromptOptimizer because SmartCoordinator is enabled")
+            }
             task
         }
 
@@ -687,16 +693,37 @@ ${supervision.correctionInstruction}
             Logger.i(Logger.AGENT, "[PhoneAgent] Generating task summary...")
             val summary = promptOptimizer!!.summarize(originalTask, conversationContext, agentConfig.language)
 
-            // 如果任务被停止，在总结前面加上说明
-            return if (stopped) {
-                if (agentConfig.language == "en") {
-                    "Task stopped. $summary"
-                } else {
-                    "任务已停止。$summary"
+            // 获取SmartCoordinator收集到的信息
+            val gatheredInfo = smartCoordinator?.getInfoSummary()
+
+            // 构建最终总结消息
+            val finalSummary = buildString {
+                // 任务停止说明
+                if (stopped) {
+                    if (agentConfig.language == "en") {
+                        append("Task stopped. ")
+                    } else {
+                        append("任务已停止。")
+                    }
                 }
-            } else {
-                summary
+
+                // 添加总结
+                append(summary)
+
+                // 添加收集到的信息
+                if (!gatheredInfo.isNullOrBlank() && gatheredInfo != "无收集到的信息") {
+                    append("\n\n")
+                    if (agentConfig.language == "en") {
+                        append("**Gathered Information:**\n")
+                    } else {
+                        append("**收集到的信息：**\n")
+                    }
+                    append(gatheredInfo)
+                }
             }
+
+            return finalSummary
+
         } catch (e: Exception) {
             Logger.e(Logger.AGENT, "Failed to generate task summary", e)
             return null

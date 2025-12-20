@@ -43,12 +43,28 @@ fun ShortcutEditDialog(
     var selectedColor by remember { mutableStateOf(shortcut?.colorHex ?: 0xFF64B5F6) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showAddParamDialog by remember { mutableStateOf(false) }
+    var showUnsavedConfirm by remember { mutableStateOf(false) }
     var newParamName by remember { mutableStateOf("") }
     var isOptimizing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val prefs = App.instance.preferenceManager
 
-    Dialog(onDismissRequest = onDismiss) {
+    // 检查是否有未保存的修改
+    val hasUnsavedChanges = remember(title, prompt, selectedIcon, selectedColor) {
+        title != (shortcut?.title ?: "") ||
+        prompt != (shortcut?.prompt ?: "") ||
+        selectedIcon != (shortcut?.iconName ?: "Star") ||
+        selectedColor != (shortcut?.colorHex ?: 0xFF64B5F6)
+    }
+
+    Dialog(onDismissRequest = {
+        // 如果有未保存的修改，显示确认对话框
+        if (hasUnsavedChanges && (title.isNotBlank() || prompt.isNotBlank())) {
+            showUnsavedConfirm = true
+        } else {
+            onDismiss()
+        }
+    }) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -333,6 +349,44 @@ fun ShortcutEditDialog(
                     newParamName = ""
                 }) {
                     Text("取消")
+                }
+            }
+        )
+    }
+
+    // Unsaved changes confirmation dialog
+    if (showUnsavedConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnsavedConfirm = false },
+            title = { Text("保存修改") },
+            text = { Text("是否保存对快捷指令的修改？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (title.isNotBlank() && prompt.isNotBlank()) {
+                            onSave(
+                                ShortcutData(
+                                    id = shortcut?.id ?: UUID.randomUUID().toString(),
+                                    title = title,
+                                    prompt = prompt,
+                                    iconName = selectedIcon,
+                                    colorHex = selectedColor
+                                )
+                            )
+                        }
+                        showUnsavedConfirm = false
+                    },
+                    enabled = title.isNotBlank() && prompt.isNotBlank()
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showUnsavedConfirm = false
+                    onDismiss()
+                }) {
+                    Text("放弃")
                 }
             }
         )
