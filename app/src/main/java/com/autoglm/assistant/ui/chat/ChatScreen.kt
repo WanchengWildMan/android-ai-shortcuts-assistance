@@ -96,7 +96,6 @@ fun ChatScreen(
         if (messages.isEmpty()) return@LaunchedEffect
 
         val currentCount = messages.size
-        val lastIndex = messages.size - 1
         val lastMessage = messages.lastOrNull() ?: return@LaunchedEffect
         val isUserMessage = lastMessage.isUser
         val isNewMessage = currentCount > previousMessageCount
@@ -110,17 +109,20 @@ fun ChatScreen(
 
         if (shouldAutoScroll) {
             isAutoScrolling = true
-            if (isUserMessage) {
-                userScrolledUp = false  // 用户发消息时重置标记
+            try {
+                if (isUserMessage) {
+                    userScrolledUp = false  // 用户发消息时重置标记
+                }
+                // 直接滚到底部：用 Int.MAX_VALUE 确保总是滚到最底
+                if (isNewMessage) {
+                    listState.animateScrollToItem(Int.MAX_VALUE)
+                } else {
+                    listState.scrollToItem(Int.MAX_VALUE)
+                }
+            } finally {
+                delay(50)
+                isAutoScrolling = false
             }
-            // 直接滚到底部
-            if (isNewMessage) {
-                listState.animateScrollToItem(lastIndex)
-            } else {
-                listState.scrollToItem(lastIndex)
-            }
-            delay(50)
-            isAutoScrolling = false
         }
 
         previousMessageCount = currentCount
