@@ -18,6 +18,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -51,6 +53,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import com.autoglm.assistant.core.agent.SerializableMessage
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 
 class MainActivity : ComponentActivity() {
 
@@ -100,7 +104,7 @@ class MainActivity : ComponentActivity() {
                     onStopService = { stopWakeWordService() },
                     onOpenSettings = { openSettings() },
                     onRequestScreenCapture = { requestScreenCapturePermission() },
-                    onExecuteTask = { task, resetHistory, messages -> executeTask(task, resetHistory, messages) },
+                    onExecuteTask = { task, enablePlanning, enableOptimizer, messages -> executeTask(task, enablePlanning, enableOptimizer, messages) },
                     onStopTask = { stopCurrentTask() },
                     getServiceState = { wakeWordService?.serviceState },
                     getLastRecognizedText = { wakeWordService?.lastRecognizedText },
@@ -178,7 +182,7 @@ class MainActivity : ComponentActivity() {
         stopService(Intent(this, WakeWordService::class.java))
     }
 
-    private fun executeTask(task: String, resetHistory: Boolean = true, messages: List<ChatMessage> = emptyList()) {
+    private fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, messages: List<ChatMessage> = emptyList()) {
         // 确保服务作为前台服务启动，这样即使 Activity 进入后台也不会被销毁
         val serviceIntent = Intent(this, WakeWordService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -193,7 +197,7 @@ class MainActivity : ComponentActivity() {
                 content = it.content
             )
         }
-        wakeWordService?.executeTask(task, resetHistory, context)
+        wakeWordService?.executeTask(task, enablePlanning, enableOptimizer, context)
     }
 
     private fun stopCurrentTask() {
@@ -234,7 +238,7 @@ fun MainScreen(
     onStopService: () -> Unit,
     onOpenSettings: () -> Unit,
     onRequestScreenCapture: () -> Unit,
-    onExecuteTask: (String, Boolean, List<ChatMessage>) -> Unit,
+        onExecuteTask: (String, Boolean, Boolean, List<ChatMessage>) -> Unit,
     onStopTask: () -> Unit,
     getServiceState: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.ServiceState>?,
     getLastRecognizedText: () -> kotlinx.coroutines.flow.StateFlow<String>?,
@@ -318,14 +322,25 @@ fun MainScreen(
         }
     }
 
+    fun updateMessage(index: Int, message: ChatMessage) {
+        if (index >= 0 && index < messages.size) {
+            messages[index] = message
+            // Update current conversation
+            val conv = currentConversation
+            if (conv != null && index < conv.messages.size) {
+                conv.messages[index] = message
+                conv.timestamp = System.currentTimeMillis()
+                scope.launch {
+                    messageManager.saveConversation(conv)
+                }
+            }
+        }
+    }
+
     LaunchedEffect(lastRecognizedText?.value) {
         lastRecognizedText?.value?.let { text ->
-            if (text.isNotBlank()) {
+            if (text.isNotBlank() && currentRoute == "chat") {
                 addMessage(ChatMessage(content = text, isUser = true))
-                // If we receive a voice command, make sure we are on the chat screen
-                if (navController.currentDestination?.route != "chat") {
-                    navController.navigate("chat")
-                }
             }
         }
     }
@@ -351,6 +366,9 @@ fun MainScreen(
             hasShownSubtaskCards = false
             return@LaunchedEffect
         }
+
+        // 只有在 chat 页面时才处理消息
+        if (currentRoute != "chat") return@LaunchedEffect
 
         if (!showProcess) return@LaunchedEffect
 
@@ -411,7 +429,13 @@ fun MainScreen(
             WakeWordService.CoordinatorMessageType.OPTIMIZER_COMPLETE -> {
                 // 优化器消息：流式更新同一条
                 if (optimizerMessageIndex >= 0 && optimizerMessageIndex < messages.size) {
-                    messages[optimizerMessageIndex] = ChatMessage(content = displayContent, isUser = false)
+                    val oldMsg = messages[optimizerMessageIndex]
+                    updateMessage(optimizerMessageIndex, ChatMessage(
+                        id = oldMsg.id,
+                        content = displayContent,
+                        isUser = false,
+                        timestamp = oldMsg.timestamp
+                    ))
                 } else {
                     addMessage(ChatMessage(content = displayContent, isUser = false))
                     optimizerMessageIndex = messages.size - 1
@@ -428,7 +452,13 @@ fun MainScreen(
                 }
 
                 if (plannerMessageIndex >= 0 && plannerMessageIndex < messages.size) {
-                    messages[plannerMessageIndex] = ChatMessage(content = content, isUser = false)
+                    val oldMsg = messages[plannerMessageIndex]
+                    updateMessage(plannerMessageIndex, ChatMessage(
+                        id = oldMsg.id,
+                        content = content,
+                        isUser = false,
+                        timestamp = oldMsg.timestamp
+                    ))
                 } else {
                     addMessage(ChatMessage(content = content, isUser = false))
                     plannerMessageIndex = messages.size - 1
@@ -443,7 +473,13 @@ fun MainScreen(
             WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {
                 // 总结消息：流式更新同一条（与优化器和规划器消息分开）
                 if (summaryMessageIndex >= 0 && summaryMessageIndex < messages.size) {
-                    messages[summaryMessageIndex] = ChatMessage(content = displayContent, isUser = false)
+                    val oldMsg = messages[summaryMessageIndex]
+                    updateMessage(summaryMessageIndex, ChatMessage(
+                        id = oldMsg.id,
+                        content = displayContent,
+                        isUser = false,
+                        timestamp = oldMsg.timestamp
+                    ))
                 } else {
                     addMessage(ChatMessage(content = displayContent, isUser = false))
                     summaryMessageIndex = messages.size - 1
@@ -466,6 +502,9 @@ fun MainScreen(
 
     LaunchedEffect(agentMessage?.value) {
         agentMessage?.value?.let { msg ->
+            // 只有在 chat 页面时才处理消息
+            if (currentRoute != "chat") return@LaunchedEffect
+
             // Read setting dynamically each time
             val showProcess = App.instance.preferenceManager.showAgentProcess
             val shouldShow = when (msg.type) {
@@ -473,19 +512,24 @@ fun MainScreen(
                 WakeWordService.AgentMessageType.THINKING,
                 WakeWordService.AgentMessageType.ACTION -> showProcess  // Only show if setting enabled
             }
-            // Coordinator/Optimizer消息现在通过coordinatorMessage处理，这里不会收到重复消息
-            if (shouldShow && msg.content.isNotBlank()) {
-                when (msg.type) {
-                    WakeWordService.AgentMessageType.THINKING -> {
-                        // 缓存thinking内容，等待与action合并
-                        lastThinkingContent = msg.content
-                        // 先添加一条thinking消息，记录其索引
+
+            when (msg.type) {
+                WakeWordService.AgentMessageType.THINKING -> {
+                    // 始终缓存thinking内容（即使是空的），以便与action合并
+                    lastThinkingContent = msg.content
+                    // 只有在应该显示且内容不为空时才添加临时消息
+                    if (shouldShow && msg.content.isNotBlank()) {
                         addMessage(ChatMessage(content = "**思考：**\n${msg.content}", isUser = false))
                         lastThinkingMessageIndex = messages.size - 1
+                    } else {
+                        // 内容为空或不应显示，但仍需标记索引为null
+                        lastThinkingMessageIndex = null
                     }
-                    WakeWordService.AgentMessageType.ACTION -> {
+                }
+                WakeWordService.AgentMessageType.ACTION -> {
+                    if (shouldShow && msg.content.isNotBlank()) {
                         // 如果有缓存的thinking，合并显示
-                        val content = if (lastThinkingContent != null) {
+                        val content = if (!lastThinkingContent.isNullOrBlank()) {
                             buildString {
                                 append("**思考：**\n")
                                 append(lastThinkingContent)
@@ -498,21 +542,29 @@ fun MainScreen(
 
                         // 如果之前添加了thinking消息，替换它；否则添加新消息
                         if (lastThinkingMessageIndex != null && lastThinkingMessageIndex!! < messages.size) {
-                            messages[lastThinkingMessageIndex!!] = ChatMessage(content = content, isUser = false)
+                            val oldMsg = messages[lastThinkingMessageIndex!!]
+                            updateMessage(lastThinkingMessageIndex!!, ChatMessage(
+                                id = oldMsg.id,
+                                content = content,
+                                isUser = false,
+                                timestamp = oldMsg.timestamp
+                            ))
                         } else {
                             addMessage(ChatMessage(content = content, isUser = false))
                         }
+                    }
 
-                        // 清空缓存
-                        lastThinkingContent = null
-                        lastThinkingMessageIndex = null
-                    }
-                    WakeWordService.AgentMessageType.RESULT -> {
+                    // 清空缓存
+                    lastThinkingContent = null
+                    lastThinkingMessageIndex = null
+                }
+                WakeWordService.AgentMessageType.RESULT -> {
+                    if (shouldShow || msg.type == WakeWordService.AgentMessageType.RESULT) {
                         addMessage(ChatMessage(content = msg.content, isUser = false))
-                        // 清空thinking缓存
-                        lastThinkingContent = null
-                        lastThinkingMessageIndex = null
                     }
+                    // 清空thinking缓存
+                    lastThinkingContent = null
+                    lastThinkingMessageIndex = null
                 }
             }
         }
@@ -630,18 +682,23 @@ fun MainScreen(
             }
 
             NavHost(navController = navController, startDestination = "home", modifier = Modifier.weight(1f)) {
-                composable("home") {
+                composable(
+                    route = "home",
+                    enterTransition = { slideInHorizontally(initialOffsetX = { -it }) + fadeIn() },
+                    exitTransition = { slideOutHorizontally(targetOffsetX = { -it }) + fadeOut() },
+                    popEnterTransition = { slideInHorizontally(initialOffsetX = { -it }) + fadeIn() },
+                    popExitTransition = { slideOutHorizontally(targetOffsetX = { -it }) + fadeOut() }
+                ) {
                     HomeScreen(
-                        onShortcutClick = { prompt ->
+                        onShortcutClick = { prompt, enablePlanning, enableOptimizer ->
                             // Create new conversation for new task
-                            android.util.Log.d("AutoGLM", "Shortcut clicked: $prompt, current state = ${serviceState?.value}")
+                            android.util.Log.d("AutoGLM", "Shortcut clicked: $prompt, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer")
                             createNewConversation()
                             addMessage(ChatMessage(content = prompt, isUser = true))
                             // Navigate first, then execute task
                             navController.navigate("chat")
                             // Execute task after navigation to ensure UI is ready
-                            onExecuteTask(prompt, true, emptyList())
-                            android.util.Log.d("AutoGLM", "After executeTask: state = ${serviceState?.value}")
+                            onExecuteTask(prompt, enablePlanning, enableOptimizer, emptyList())
                         },
                         onHistoryClick = {
                             navController.navigate("conversations")
@@ -649,7 +706,13 @@ fun MainScreen(
                         onSettingsClick = onOpenSettings
                     )
                 }
-                composable("chat") {
+                composable(
+                    route = "chat",
+                    enterTransition = { slideInHorizontally(initialOffsetX = { it }) + fadeIn() },
+                    exitTransition = { slideOutHorizontally(targetOffsetX = { it }) + fadeOut() },
+                    popEnterTransition = { slideInHorizontally(initialOffsetX = { it }) + fadeIn() },
+                    popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) + fadeOut() }
+                ) {
                     // Use mutableState + LaunchedEffect to manually collect StateFlow
                     var isAgentRunning by remember { mutableStateOf(false) }
                     val stateFlow = getServiceState()
@@ -674,29 +737,31 @@ fun MainScreen(
                     ChatScreen(
                         messages = messages,
                         isAgentRunning = isAgentRunning,
-                        onSendMessage = { text ->
-                            onExecuteTask(text, false, messages)
+                        onSendMessage = { text, enablePlanning, enableOptimizer ->
+                            onExecuteTask(text, enablePlanning, enableOptimizer, messages)
                             addMessage(ChatMessage(content = text, isUser = true))
                         },
                         onStopTask = onStopTask,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
-                composable("conversations") {
+                composable(
+                    route = "conversations",
+                    enterTransition = { slideInHorizontally(initialOffsetX = { it }) + fadeIn() },
+                    exitTransition = { slideOutHorizontally(targetOffsetX = { -it }) + fadeOut() },
+                    popEnterTransition = { slideInHorizontally(initialOffsetX = { -it }) + fadeIn() },
+                    popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) + fadeOut() }
+                ) {
                     ConversationListScreen(
                         conversations = conversations,
                         currentConversationId = currentConversation?.id,
                         onSelectConversation = { conv ->
                             selectConversation(conv)
-                            navController.navigate("chat") {
-                                popUpTo("conversations") { inclusive = true }
-                            }
+                            navController.navigate("chat")
                         },
                         onNewConversation = {
                             createNewConversation()
-                            navController.navigate("chat") {
-                                popUpTo("conversations") { inclusive = true }
-                            }
+                            navController.navigate("chat")
                         },
                         onDeleteConversation = { id -> deleteConversation(id) },
                         modifier = Modifier.fillMaxSize()
@@ -837,8 +902,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         val showProcess = if (isChinese) "显示执行过程" else "Show Agent Process"
         val showProcessDesc = if (isChinese) "在对话中显示思考和操作步骤" else "Display thinking and action steps in chat"
         val smartCoordinatorSettings = if (isChinese) "智能协调器设置" else "Smart Coordinator Settings"
-        val enableSmartCoordinator = if (isChinese) "启用智能协调器" else "Enable Smart Coordinator"
-        val smartCoordinatorDesc = if (isChinese) "使用更强模型解释指令和监督执行" else "Use stronger model to interpret instructions and supervise execution"
+        val enableSmartCoordinator = if (isChinese) "默认启用规划" else "Enable Planning by Default"
+        val smartCoordinatorDesc = if (isChinese) "新建快捷指令和手动输入任务时默认启用规划（各任务可独立控制）" else "Enable planning by default for new shortcuts and manual tasks (each task can be controlled independently)"
         val coordinatorApiUrlLabel = if (isChinese) "协调器 API URL" else "Coordinator API URL"
         val coordinatorApiKeyLabel = if (isChinese) "协调器 API Key" else "Coordinator API Key"
         val coordinatorModelLabel = if (isChinese) "协调器模型" else "Coordinator Model"
@@ -1089,7 +1154,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(strings.enableSmartCoordinator, style = MaterialTheme.typography.bodyMedium)
+                    Text(if (isChinese) "启用智能协调器 (全局)" else "Enable Smart Coordinator (Global)", style = MaterialTheme.typography.bodyMedium)
                     Text(
                         strings.smartCoordinatorDesc,
                         style = MaterialTheme.typography.bodySmall,
@@ -1102,92 +1167,90 @@ fun SettingsScreen(onBack: () -> Unit) {
                 )
             }
 
-            if (smartCoordinatorEnabled) {
-                OutlinedTextField(
-                    value = coordinatorApiUrl,
-                    onValueChange = { coordinatorApiUrl = it },
-                    label = { Text(strings.coordinatorApiUrlLabel) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    supportingText = { Text("DeepSeek: https://api.deepseek.com/v1") }
-                )
+            OutlinedTextField(
+                value = coordinatorApiUrl,
+                onValueChange = { coordinatorApiUrl = it },
+                label = { Text(strings.coordinatorApiUrlLabel) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                supportingText = { Text("DeepSeek: https://api.deepseek.com/v1") }
+            )
 
+            OutlinedTextField(
+                value = coordinatorApiKey,
+                onValueChange = { coordinatorApiKey = it },
+                label = { Text(strings.coordinatorApiKeyLabel) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            // Model selection dropdown
+            val coordinatorModels = listOf(
+                "deepseek-chat" to "DeepSeek Chat",
+                "glm-4-plus" to "智谱 GLM-4 Plus",
+                "glm-4" to "智谱 GLM-4"
+            )
+
+            ExposedDropdownMenuBox(
+                expanded = coordinatorModelDropdownExpanded,
+                onExpandedChange = { coordinatorModelDropdownExpanded = it }
+            ) {
                 OutlinedTextField(
-                    value = coordinatorApiKey,
-                    onValueChange = { coordinatorApiKey = it },
-                    label = { Text(strings.coordinatorApiKeyLabel) },
+                    value = coordinatorModels.find { it.first == coordinatorModelName }?.second ?: coordinatorModelName,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text(strings.coordinatorModelLabel) },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = coordinatorModelDropdownExpanded) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor()
+                )
+                ExposedDropdownMenu(
+                    expanded = coordinatorModelDropdownExpanded,
+                    onDismissRequest = { coordinatorModelDropdownExpanded = false }
+                ) {
+                    coordinatorModels.forEach { (model, displayName) ->
+                        DropdownMenuItem(
+                            text = { Text(displayName) },
+                            onClick = {
+                                coordinatorModelName = model
+                                coordinatorModelDropdownExpanded = false
+                            },
+                            leadingIcon = if (coordinatorModelName == model) {
+                                { Icon(Icons.Default.Check, contentDescription = null) }
+                            } else null
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(strings.enableSupervision, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        strings.supervisionDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = supervisionEnabled,
+                    onCheckedChange = { supervisionEnabled = it }
+                )
+            }
+
+            if (supervisionEnabled) {
+                OutlinedTextField(
+                    value = maxCorrections,
+                    onValueChange = { maxCorrections = it },
+                    label = { Text(strings.maxCorrectionsLabel) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
-
-                // Model selection dropdown
-                val coordinatorModels = listOf(
-                    "deepseek-chat" to "DeepSeek Chat",
-                    "glm-4-plus" to "智谱 GLM-4 Plus",
-                    "glm-4" to "智谱 GLM-4"
-                )
-
-                ExposedDropdownMenuBox(
-                    expanded = coordinatorModelDropdownExpanded,
-                    onExpandedChange = { coordinatorModelDropdownExpanded = it }
-                ) {
-                    OutlinedTextField(
-                        value = coordinatorModels.find { it.first == coordinatorModelName }?.second ?: coordinatorModelName,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text(strings.coordinatorModelLabel) },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = coordinatorModelDropdownExpanded) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .menuAnchor()
-                    )
-                    ExposedDropdownMenu(
-                        expanded = coordinatorModelDropdownExpanded,
-                        onDismissRequest = { coordinatorModelDropdownExpanded = false }
-                    ) {
-                        coordinatorModels.forEach { (model, displayName) ->
-                            DropdownMenuItem(
-                                text = { Text(displayName) },
-                                onClick = {
-                                    coordinatorModelName = model
-                                    coordinatorModelDropdownExpanded = false
-                                },
-                                leadingIcon = if (coordinatorModelName == model) {
-                                    { Icon(Icons.Default.Check, contentDescription = null) }
-                                } else null
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(strings.enableSupervision, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            strings.supervisionDesc,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = supervisionEnabled,
-                        onCheckedChange = { supervisionEnabled = it }
-                    )
-                }
-
-                if (supervisionEnabled) {
-                    OutlinedTextField(
-                        value = maxCorrections,
-                        onValueChange = { maxCorrections = it },
-                        label = { Text(strings.maxCorrectionsLabel) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                }
             }
 
             Divider()

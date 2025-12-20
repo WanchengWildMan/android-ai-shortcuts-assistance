@@ -8,8 +8,9 @@ import com.autoglm.assistant.ai.ModelConfig
  */
 data class TaskPlannerConfig(
     /**
-     * 是否启用任务规划器
-     * 当启用时，用户指令会先由规划模型分解为多个子任务，再交给UI Agent执行
+     * 是否默认启用规划
+     * 控制新建快捷指令和手动输入任务时的默认规划开关状态
+     * 注意：这不影响SmartCoordinator的初始化，具体任务是否使用规划由任务级别的enablePlanning参数决定
      */
     val enabled: Boolean = false,
 

@@ -11,7 +11,9 @@ data class AgentConfig(
     val verbose: Boolean = true,
     /**
      * 任务规划器配置
-     * 如果启用，用户指令会先由更强的模型分解为多个子任务
+     * 只要配置了协调器API信息，就会初始化SmartCoordinator
+     * enabled字段控制"默认启用规划"，不影响协调器的初始化
+     * 具体任务是否使用规划由任务级别的enablePlanning参数决定
      */
     val plannerConfig: TaskPlannerConfig? = null,
     /**

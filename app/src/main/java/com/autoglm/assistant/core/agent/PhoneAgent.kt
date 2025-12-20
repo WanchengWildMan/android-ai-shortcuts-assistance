@@ -113,9 +113,11 @@ class PhoneAgent(
             screenCapture.screenHeight
         )
 
-        // 初始化智能协调器（如果配置了）
+        // 初始化智能协调器（如果配置了API信息）
+        // 只要配置了plannerConfig且有有效的模型配置，就初始化SmartCoordinator
+        // 具体是否使用由每个任务的enablePlanning参数决定
         agentConfig.plannerConfig?.let { config ->
-            if (config.enabled) {
+            if (config.plannerModelConfig != null) {
                 smartCoordinator = SmartCoordinator(config).apply {
                     // 设置结构化回调 - 用于显示格式化内容
                     onPlanningStart = {
@@ -134,7 +136,7 @@ class PhoneAgent(
                     onSupervisionResult = { result ->
                         this@PhoneAgent.onSupervisionResult?.invoke(result)
                     }
-                    
+
                     // 连接流式输出回调 - 用于打字机效果
                     onStreamToken = { token ->
                         Logger.d(Logger.AGENT, "[COORDINATOR->UI] Token: $token")
@@ -153,7 +155,9 @@ class PhoneAgent(
                         this@PhoneAgent.onCoordinatorThinking?.invoke(thinking)
                     }
                 }
-                Logger.i(Logger.AGENT, "SmartCoordinator initialized with model: ${config.plannerModelConfig?.modelName}")
+                Logger.i(Logger.AGENT, "SmartCoordinator initialized with model: ${config.plannerModelConfig.modelName}")
+            } else {
+                Logger.i(Logger.AGENT, "SmartCoordinator not initialized: model config is null")
             }
         }
 
@@ -187,7 +191,16 @@ class PhoneAgent(
         screenCapture.initMediaProjection(resultCode, data)
     }
 
-    suspend fun run(task: String, resetHistory: Boolean = true, context: List<SerializableMessage> = emptyList()): String {
+    suspend fun executeTask(
+        task: String,
+        enablePlanning: Boolean = true,
+        enableOptimizer: Boolean = true,
+        contextMessages: List<SerializableMessage> = emptyList()
+    ): String {
+        return run(task, true, contextMessages, enablePlanning, enableOptimizer)
+    }
+
+    suspend fun run(task: String, resetHistory: Boolean = true, context: List<SerializableMessage> = emptyList(), enablePlanning: Boolean = true, enableOptimizer: Boolean = true): String {
         if (_isRunning.value) {
             Logger.agent("Agent is already running, ignoring task: $task")
             return "Agent is already running"
@@ -195,16 +208,30 @@ class PhoneAgent(
 
         Logger.i(Logger.AGENT, "========== START TASK ==========")
         Logger.i(Logger.AGENT, "Task: $task")
+        Logger.i(Logger.AGENT, "enablePlanning: $enablePlanning, smartCoordinator: ${if (smartCoordinator != null) "available" else "null"}")
         Logger.agent("Max steps: ${agentConfig.maxSteps}, Language: ${agentConfig.language}")
 
         _isRunning.value = true
         _currentTask.value = task
         stopRequested = false
 
+        val shouldUseCoordinator = smartCoordinator != null && enablePlanning
+
+        // 如果用户想使用规划但协调器未配置，给出提示
+        if (enablePlanning && smartCoordinator == null) {
+            val warningMsg = if (agentConfig.language == "cn") {
+                "⚠️ 规划功能未生效：请在设置中配置智能协调器的 API 信息"
+            } else {
+                "⚠️ Planning not available: Please configure Smart Coordinator API in settings"
+            }
+            Logger.w(Logger.AGENT, warningMsg)
+            onThinking?.invoke(warningMsg)
+        }
+
         // 使用Prompt优化器优化任务描述（如果启用）
         // 注意：如果启用了任务规划（SmartCoordinator），则不使用PromptOptimizer
         // 因为SmartCoordinator已经会对任务进行理解和分解，避免优化后的详细指令影响子任务执行
-        val shouldOptimizePrompt = promptOptimizer != null && smartCoordinator == null
+        val shouldOptimizePrompt = promptOptimizer != null && !shouldUseCoordinator
         val effectiveTask = if (shouldOptimizePrompt) {
             Logger.i(Logger.AGENT, "[PhoneAgent] Optimizing prompt with PromptOptimizer...")
             // 将对话上下文转换为优化器需要的格式
@@ -213,7 +240,7 @@ class PhoneAgent(
             Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Prompt optimized: $optimized")
             optimized
         } else {
-            if (promptOptimizer != null && smartCoordinator != null) {
+            if (promptOptimizer != null && shouldUseCoordinator) {
                 Logger.i(Logger.AGENT, "[PhoneAgent] Skipping PromptOptimizer because SmartCoordinator is enabled")
             }
             task
@@ -245,7 +272,7 @@ class PhoneAgent(
 
         try {
             // 尝试使用SmartCoordinator分解任务（如果启用）
-            if (smartCoordinator != null && currentTaskPlan == null) {
+            if (shouldUseCoordinator && currentTaskPlan == null) {
                 Logger.i(Logger.AGENT, "[PhoneAgent] Attempting to plan task with SmartCoordinator...")
                 currentTaskPlan = smartCoordinator?.planTask(effectiveTask, agentConfig.language)
 

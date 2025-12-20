@@ -162,24 +162,27 @@ class WakeWordService : Service() {
             modelName = prefs.modelName
         )
 
-        // 创建SmartCoordinator配置（如果启用）
-        val plannerConfig = if (prefs.smartCoordinatorEnabled) {
+        // 创建SmartCoordinator配置（只要配置了API信息就创建）
+        // 全局开关现在控制"默认启用规划"，不影响是否初始化协调器
+        val plannerConfig = if (prefs.coordinatorApiUrl.isNotBlank() &&
+                                prefs.coordinatorApiKey.isNotBlank() &&
+                                prefs.coordinatorModelName.isNotBlank()) {
             val coordinatorModelConfig = ModelConfig(
                 baseUrl = prefs.coordinatorApiUrl,
                 apiKey = prefs.coordinatorApiKey,
                 modelName = prefs.coordinatorModelName
             )
             TaskPlannerConfig(
-                enabled = true,
+                enabled = prefs.smartCoordinatorEnabled,  // 这个字段现在表示"默认启用规划"
                 plannerModelConfig = coordinatorModelConfig,
                 enableSupervision = prefs.supervisionEnabled,
                 supervisorModelConfig = coordinatorModelConfig,
                 maxCorrections = prefs.maxCorrections
             ).also {
-                android.util.Log.i("AutoGLM", "SmartCoordinator enabled: model=${prefs.coordinatorModelName}, supervision=${prefs.supervisionEnabled}")
+                android.util.Log.i("AutoGLM", "SmartCoordinator available: model=${prefs.coordinatorModelName}, defaultEnabled=${prefs.smartCoordinatorEnabled}, supervision=${prefs.supervisionEnabled}")
             }
         } else {
-            android.util.Log.i("AutoGLM", "SmartCoordinator disabled")
+            android.util.Log.i("AutoGLM", "SmartCoordinator not configured (missing API info)")
             null
         }
 
@@ -227,6 +230,7 @@ class WakeWordService : Service() {
             var isOptimizing = false
             var summaryStreamingContent = StringBuilder()
             var isSummarizing = false
+            var summaryAlreadySent = false  // Flag to track if summary was sent via SUMMARY_COMPLETE
 
             onPromptOptimizing = {
                 isOptimizing = true
@@ -247,6 +251,7 @@ class WakeWordService : Service() {
 
             onTaskSummarizing = {
                 isSummarizing = true
+                summaryAlreadySent = false  // Reset flag for new summary generation
                 summaryStreamingContent.clear()
                 _coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.SUMMARY_STREAMING,
@@ -256,6 +261,7 @@ class WakeWordService : Service() {
 
             onTaskSummary = { summary ->
                 isSummarizing = false
+                summaryAlreadySent = true  // Mark that summary was sent via SUMMARY_COMPLETE
                 _coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.SUMMARY_COMPLETE,
                     content = summary
@@ -396,8 +402,14 @@ class WakeWordService : Service() {
                     type = CoordinatorMessageType.CLEAR,
                     content = ""
                 )
-                // Emit final result message
-                _agentMessage.value = AgentMessage(message, AgentMessageType.RESULT)
+                // Emit final result message only if summary wasn't already sent
+                // This avoids duplicate messages when task summary is enabled
+                if (!summaryAlreadySent) {
+                    _agentMessage.value = AgentMessage(message, AgentMessageType.RESULT)
+                } else {
+                    // Reset the flag for next task
+                    summaryAlreadySent = false
+                }
                 speak(message)
                 startWakeWordListening()
             }
@@ -522,8 +534,8 @@ class WakeWordService : Service() {
         phoneAgent?.setScreenCaptureData(resultCode, data)
     }
 
-    fun executeTask(task: String, resetHistory: Boolean = true, context: List<SerializableMessage> = emptyList()) {
-        android.util.Log.d("AutoGLM", "WakeWordService.executeTask called: task=$task, currentState=${_serviceState.value}")
+    fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, context: List<SerializableMessage> = emptyList()) {
+        android.util.Log.d("AutoGLM", "WakeWordService.executeTask called: task=$task, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer, currentState=${_serviceState.value}")
         if (_serviceState.value == ServiceState.EXECUTING_TASK) {
             onError?.invoke("Already executing a task")
             android.util.Log.d("AutoGLM", "Already executing, returning")
@@ -540,7 +552,7 @@ class WakeWordService : Service() {
             try {
                 // 使用 NonCancellable 防止任务被取消
                 withContext(NonCancellable) {
-                    phoneAgent?.run(task, resetHistory, context)
+                        phoneAgent?.run(task, true, context, enablePlanning, enableOptimizer)
                 }
             } catch (e: Exception) {
                 onError?.invoke("Task error: ${e.message}")

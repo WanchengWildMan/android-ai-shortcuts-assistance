@@ -1,10 +1,16 @@
 package com.autoglm.assistant.ui.home
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -13,12 +19,17 @@ import androidx.compose.ui.window.Dialog
 fun ParameterInputDialog(
     shortcut: ShortcutData,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit  // Returns the filled prompt
+    onConfirm: (String, Boolean, Boolean) -> Unit  // Returns (filled prompt, enablePlanning, enableOptimizer)
 ) {
     val parameterNames = shortcut.getParameterNames()
     val parameterValues = remember { mutableStateMapOf<String, String>().apply {
         parameterNames.forEach { put(it, "") }
     }}
+    var enablePlanning by remember { mutableStateOf(shortcut.enablePlanning) }
+    var enableOptimizer by remember { mutableStateOf(true) }
+
+    // 调试日志：显示快捷指令的规划设置
+    android.util.Log.d("AutoGLM", "ParameterInputDialog: shortcut.enablePlanning=${shortcut.enablePlanning}, initial enablePlanning=$enablePlanning")
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -63,6 +74,66 @@ fun ParameterInputDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
+                // Planning switch
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (enablePlanning) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .clickable { enablePlanning = !enablePlanning }
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AccountTree,
+                                contentDescription = null,
+                                tint = if (enablePlanning) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "启用协调器",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (enablePlanning) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (enableOptimizer) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .clickable { enableOptimizer = !enableOptimizer }
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoFixHigh,
+                                contentDescription = null,
+                                tint = if (enableOptimizer) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "启用优化",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (enableOptimizer) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+
                 // Preview
                 val filledPrompt = shortcut.fillParameters(parameterValues)
                 if (parameterValues.values.any { it.isNotBlank() }) {
@@ -98,7 +169,8 @@ fun ParameterInputDialog(
                     Button(
                         onClick = {
                             val result = shortcut.fillParameters(parameterValues)
-                            onConfirm(result)
+                            android.util.Log.d("AutoGLM", "ParameterInputDialog confirm: enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer")
+                            onConfirm(result, enablePlanning, enableOptimizer)
                         },
                         enabled = parameterValues.values.all { it.isNotBlank() }
                     ) {

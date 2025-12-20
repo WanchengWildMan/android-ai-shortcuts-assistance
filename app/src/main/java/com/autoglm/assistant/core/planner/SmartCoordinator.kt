@@ -46,8 +46,11 @@ class SmartCoordinator(
      * 规划任务 - 将用户指令分解为子任务
      */
     suspend fun planTask(userTask: String, language: String = "cn"): TaskPlan? {
-        if (!config.enabled || coordinatorClient == null) {
-            Logger.w(Logger.AGENT, "SmartCoordinator not enabled or model not configured")
+        // SmartCoordinator初始化后即可使用，不再检查config.enabled
+        // config.enabled现在只表示"默认启用规划"，不影响实际运行
+        // 是否使用规划由任务级别的enablePlanning参数控制
+        if (coordinatorClient == null) {
+            Logger.w(Logger.AGENT, "SmartCoordinator model not configured")
             return null
         }
 
