@@ -449,6 +449,10 @@ fun MainScreen(
     }
 
     // Observe agent messages and add to chat based on setting
+    // 缓存最后一条thinking消息，与action合并显示
+    var lastThinkingContent by remember { mutableStateOf<String?>(null) }
+    var lastThinkingMessageIndex by remember { mutableStateOf<Int?>(null) }
+
     LaunchedEffect(agentMessage?.value) {
         agentMessage?.value?.let { msg ->
             // Read setting dynamically each time
@@ -460,12 +464,45 @@ fun MainScreen(
             }
             // Coordinator/Optimizer消息现在通过coordinatorMessage处理，这里不会收到重复消息
             if (shouldShow && msg.content.isNotBlank()) {
-                val prefix = when (msg.type) {
-                    WakeWordService.AgentMessageType.THINKING -> "[Thinking] "
-                    WakeWordService.AgentMessageType.ACTION -> "[Action] "
-                    WakeWordService.AgentMessageType.RESULT -> ""
+                when (msg.type) {
+                    WakeWordService.AgentMessageType.THINKING -> {
+                        // 缓存thinking内容，等待与action合并
+                        lastThinkingContent = msg.content
+                        // 先添加一条thinking消息，记录其索引
+                        addMessage(ChatMessage(content = "**思考：**\n${msg.content}", isUser = false))
+                        lastThinkingMessageIndex = messages.size - 1
+                    }
+                    WakeWordService.AgentMessageType.ACTION -> {
+                        // 如果有缓存的thinking，合并显示
+                        val content = if (lastThinkingContent != null) {
+                            buildString {
+                                append("**思考：**\n")
+                                append(lastThinkingContent)
+                                append("\n\n**操作：**\n")
+                                append(msg.content)
+                            }
+                        } else {
+                            "**操作：**\n${msg.content}"
+                        }
+
+                        // 如果之前添加了thinking消息，替换它；否则添加新消息
+                        if (lastThinkingMessageIndex != null && lastThinkingMessageIndex!! < messages.size) {
+                            messages[lastThinkingMessageIndex!!] = ChatMessage(content = content, isUser = false)
+                        } else {
+                            addMessage(ChatMessage(content = content, isUser = false))
+                        }
+
+                        // 清空缓存
+                        lastThinkingContent = null
+                        lastThinkingMessageIndex = null
+                    }
+                    WakeWordService.AgentMessageType.RESULT -> {
+                        addMessage(ChatMessage(content = msg.content, isUser = false))
+                        // 清空thinking缓存
+                        lastThinkingContent = null
+                        lastThinkingMessageIndex = null
+                    }
                 }
-                addMessage(ChatMessage(content = prefix + msg.content, isUser = false))
             }
         }
     }
