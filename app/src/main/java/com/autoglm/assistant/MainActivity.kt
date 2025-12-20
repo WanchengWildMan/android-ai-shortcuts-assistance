@@ -335,6 +335,8 @@ fun MainScreen(
     var optimizerMessageIndex by remember { mutableStateOf(-1) }
     var plannerMessageIndex by remember { mutableStateOf(-1) }
     var summaryMessageIndex by remember { mutableStateOf(-1) }
+    // 跟踪是否已经显示了subtask卡片
+    var hasShownSubtaskCards by remember { mutableStateOf(false) }
 
     LaunchedEffect(coordinatorMessage?.value) {
         val msg = coordinatorMessage?.value ?: return@LaunchedEffect
@@ -346,6 +348,7 @@ fun MainScreen(
             optimizerMessageIndex = -1
             plannerMessageIndex = -1
             summaryMessageIndex = -1
+            hasShownSubtaskCards = false
             return@LaunchedEffect
         }
 
@@ -417,15 +420,23 @@ fun MainScreen(
             WakeWordService.CoordinatorMessageType.PLANNING_STREAMING,
             WakeWordService.CoordinatorMessageType.PLAN_COMPLETE -> {
                 // 规划器消息：流式更新同一条（与优化器消息分开）
-                if (plannerMessageIndex >= 0 && plannerMessageIndex < messages.size) {
-                    messages[plannerMessageIndex] = ChatMessage(content = displayContent, isUser = false)
+                // 如果是PLAN_COMPLETE且已经显示了subtask卡片，则只显示简单的完成提示
+                val content = if (msg.type == WakeWordService.CoordinatorMessageType.PLAN_COMPLETE && hasShownSubtaskCards) {
+                    "✅ 任务规划完成，开始执行"
                 } else {
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    displayContent
+                }
+
+                if (plannerMessageIndex >= 0 && plannerMessageIndex < messages.size) {
+                    messages[plannerMessageIndex] = ChatMessage(content = content, isUser = false)
+                } else {
+                    addMessage(ChatMessage(content = content, isUser = false))
                     plannerMessageIndex = messages.size - 1
                 }
             }
             WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
                 // 子任务卡片：每个都是独立的新消息
+                hasShownSubtaskCards = true
                 addMessage(ChatMessage(content = displayContent, isUser = false))
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING,
