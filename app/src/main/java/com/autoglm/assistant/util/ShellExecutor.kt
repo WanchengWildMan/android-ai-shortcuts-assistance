@@ -18,6 +18,14 @@ object ShellExecutor {
     @Volatile
     private var rootAvailable: Boolean? = null
 
+    // SELinux 是否已关闭
+    @Volatile
+    private var selinuxDisabled: Boolean = false
+
+    // 全局 Root 模式开关（可通过设置控制）
+    @Volatile
+    var globalUseRoot: Boolean = true
+
     // 静态初始化 libsu Shell 配置
     init {
         Shell.enableVerboseLogging = false
@@ -27,6 +35,37 @@ object ShellExecutor {
                 .setTimeout(10)
         )
         Logger.d(TAG, "libsu Shell initialized")
+    }
+
+    /**
+     * 确保 SELinux 已关闭（仅执行一次）
+     * 某些设备上 input 命令需要关闭 SELinux 才能正常工作
+     */
+    private fun ensureSELinuxDisabled() {
+        if (selinuxDisabled) return
+
+        try {
+            // 检查当前 SELinux 状态
+            val checkResult = Shell.cmd("getenforce").exec()
+            val currentStatus = checkResult.out.joinToString("").trim()
+            Logger.d(TAG, "Current SELinux status: $currentStatus")
+
+            if (currentStatus.equals("Enforcing", ignoreCase = true)) {
+                // 关闭 SELinux
+                val disableResult = Shell.cmd("setenforce 0").exec()
+                if (disableResult.code == 0) {
+                    Logger.i(TAG, "SELinux disabled successfully (setenforce 0)")
+                    selinuxDisabled = true
+                } else {
+                    Logger.w(TAG, "Failed to disable SELinux: ${disableResult.err.joinToString()}")
+                }
+            } else {
+                Logger.d(TAG, "SELinux already in Permissive mode")
+                selinuxDisabled = true
+            }
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error disabling SELinux", e)
+        }
     }
 
     /**
@@ -54,12 +93,14 @@ object ShellExecutor {
      * @return 命令执行结果
      */
     suspend fun execute(command: String, useRoot: Boolean = false): Result = withContext(Dispatchers.IO) {
+        // 实际是否使用 root：全局开关 AND 参数
+        val effectiveUseRoot = globalUseRoot && useRoot
         val cmdPreview = if (command.length > 80) command.take(80) + "..." else command
-        Logger.d(TAG, "[CMD] root=$useRoot, cmd=$cmdPreview")
+        Logger.d(TAG, "[CMD] root=$effectiveUseRoot (global=$globalUseRoot, param=$useRoot), cmd=$cmdPreview")
         val startTime = System.currentTimeMillis()
 
         try {
-            val result = if (useRoot) {
+            val result = if (effectiveUseRoot) {
                 executeWithLibsu(command)
             } else {
                 executeWithRuntime(command)
@@ -84,6 +125,9 @@ object ShellExecutor {
      * 使用 libsu 执行 Root 命令
      */
     private fun executeWithLibsu(command: String): Result {
+        // 确保 SELinux 已关闭（首次执行时）
+        ensureSELinuxDisabled()
+
         val shellResult = Shell.cmd(command).exec()
         return Result(
             success = shellResult.code == 0,
@@ -173,7 +217,12 @@ object ShellExecutor {
     }
 
     suspend fun launchApp(packageName: String): Boolean {
-        val result = execute("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
+        // 优先使用 am start（更可靠）
+        var result = execute("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p $packageName", useRoot = true)
+        if (result.success) return true
+
+        // 回退到 monkey 命令
+        result = execute("monkey -p $packageName -c android.intent.category.LAUNCHER 1", useRoot = true)
         return result.success
     }
 

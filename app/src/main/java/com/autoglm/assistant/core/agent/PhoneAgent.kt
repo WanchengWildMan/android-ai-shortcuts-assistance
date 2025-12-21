@@ -8,6 +8,11 @@ import com.autoglm.assistant.ai.ModelConfig
 import com.autoglm.assistant.core.action.ActionExecutor
 import com.autoglm.assistant.core.action.ActionParser
 import com.autoglm.assistant.core.action.ActionType
+import com.autoglm.assistant.core.planner.PromptOptimizer
+import com.autoglm.assistant.core.planner.SmartCoordinator
+import com.autoglm.assistant.core.planner.TaskPlan
+import com.autoglm.assistant.core.planner.PlannedSubTask
+import com.autoglm.assistant.core.planner.SupervisionStatus
 import com.autoglm.assistant.core.screen.AppDetector
 import com.autoglm.assistant.core.screen.ScreenCapture
 import com.autoglm.assistant.util.Logger
@@ -45,11 +50,19 @@ class PhoneAgent(
     private lateinit var modelClient: ModelClient
     private lateinit var screenCapture: ScreenCapture
     private lateinit var actionExecutor: ActionExecutor
+    private var smartCoordinator: SmartCoordinator? = null
+    private var promptOptimizer: PromptOptimizer? = null
 
     private val conversationHistory = mutableListOf<Message>()
     private var currentStep = 0
     private var currentTaskId: String? = null
     private var stopRequested = false  // 用于检测停止请求
+
+    // 任务规划相关状态
+    private var currentTaskPlan: TaskPlan? = null
+    private var currentSubTaskIndex: Int = 0
+    private var lastAgentThinking: String = ""  // 保存最后一次执行的thinking
+    private var lastAgentAction: String = ""    // 保存最后一次执行的action
 
     // Callbacks
     var onStepStart: ((Int) -> Unit)? = null
@@ -61,6 +74,22 @@ class PhoneAgent(
     var onHumanInterventionNeeded: ((String) -> Unit)? = null
     var onMaxStepsReached: ((Int, String) -> Unit)? = null  // (步数, 任务ID) 达到最大步数时回调
     var onTaskSaved: ((String) -> Unit)? = null  // 任务保存时回调
+    // SmartCoordinator结构化回调 - 显示格式化内容而非原始JSON
+    var onPlanningStart: (() -> Unit)? = null           // 开始规划
+    var onPlanningComplete: ((TaskPlan?) -> Unit)? = null  // 规划完成
+    var onSubTaskGenerated: ((PlannedSubTask) -> Unit)? = null  // 子任务生成（流式）
+    var onSubTaskStart: ((PlannedSubTask) -> Unit)? = null  // 开始执行子任务
+    var onSupervisionResult: ((com.autoglm.assistant.core.planner.SupervisionResult) -> Unit)? = null  // 监督结果
+    var onCoordinatorThinking: ((String) -> Unit)? = null  // 协调器思考过程
+    // 流式输出回调 - 用于打字机效果（如果需要）
+    var onStreamToken: ((String) -> Unit)? = null       // 流式token回调
+    var onStreamStart: (() -> Unit)? = null             // 流式输出开始
+    var onStreamEnd: (() -> Unit)? = null               // 流式输出结束
+    // Prompt优化器回调
+    var onPromptOptimizing: (() -> Unit)? = null        // 正在优化prompt
+    var onPromptOptimized: ((String) -> Unit)? = null   // prompt优化完成
+    var onTaskSummarizing: (() -> Unit)? = null         // 正在生成任务总结
+    var onTaskSummary: ((String) -> Unit)? = null       // 任务总结完成
 
     // State
     private val _isRunning = MutableStateFlow(false)
@@ -83,13 +112,95 @@ class PhoneAgent(
             screenCapture.screenWidth,
             screenCapture.screenHeight
         )
+
+        // 初始化智能协调器（如果配置了API信息）
+        // 只要配置了plannerConfig且有有效的模型配置，就初始化SmartCoordinator
+        // 具体是否使用由每个任务的enablePlanning参数决定
+        agentConfig.plannerConfig?.let { config ->
+            if (config.plannerModelConfig != null) {
+                smartCoordinator = SmartCoordinator(config).apply {
+                    // 设置结构化回调 - 用于显示格式化内容
+                    onPlanningStart = {
+                        this@PhoneAgent.onPlanningStart?.invoke()
+                    }
+                    onPlanningComplete = { taskPlan ->
+                        this@PhoneAgent.onPlanningComplete?.invoke(taskPlan)
+                    }
+                    onSubTaskGenerated = { subTask ->
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] SubTask generated: ${subTask.goal}")
+                        this@PhoneAgent.onSubTaskGenerated?.invoke(subTask)
+                    }
+                    onSubTaskStart = { subTask ->
+                        this@PhoneAgent.onSubTaskStart?.invoke(subTask)
+                    }
+                    onSupervisionResult = { result ->
+                        this@PhoneAgent.onSupervisionResult?.invoke(result)
+                    }
+
+                    // 连接流式输出回调 - 用于打字机效果
+                    onStreamToken = { token ->
+                        Logger.d(Logger.AGENT, "[COORDINATOR->UI] Token: $token")
+                        this@PhoneAgent.onStreamToken?.invoke(token)
+                    }
+                    onStreamStart = {
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream start")
+                        this@PhoneAgent.onStreamStart?.invoke()
+                    }
+                    onStreamEnd = {
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream end")
+                        this@PhoneAgent.onStreamEnd?.invoke()
+                    }
+                    onCoordinatorThinking = { thinking ->
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Thinking: ${thinking.take(100)}...")
+                        this@PhoneAgent.onCoordinatorThinking?.invoke(thinking)
+                    }
+                }
+                Logger.i(Logger.AGENT, "SmartCoordinator initialized with model: ${config.plannerModelConfig.modelName}")
+            } else {
+                Logger.i(Logger.AGENT, "SmartCoordinator not initialized: model config is null")
+            }
+        }
+
+        // 初始化Prompt优化器（如果配置了）
+        agentConfig.optimizerConfig?.let { config ->
+            if (config.enabled && config.modelConfig != null) {
+                promptOptimizer = PromptOptimizer(config.modelConfig).apply {
+                    onOptimizing = {
+                        this@PhoneAgent.onPromptOptimizing?.invoke()
+                    }
+                    onOptimized = { optimizedPrompt ->
+                        this@PhoneAgent.onPromptOptimized?.invoke(optimizedPrompt)
+                    }
+                    onStreamToken = { token ->
+                        Logger.d(Logger.AGENT, "[OPTIMIZER->UI] Token: $token")
+                        this@PhoneAgent.onStreamToken?.invoke(token)
+                    }
+                    onSummarizing = {
+                        this@PhoneAgent.onTaskSummarizing?.invoke()
+                    }
+                    onSummarized = { summary ->
+                        this@PhoneAgent.onTaskSummary?.invoke(summary)
+                    }
+                }
+                Logger.i(Logger.AGENT, "PromptOptimizer initialized with model: ${config.modelConfig.modelName}")
+            }
+        }
     }
 
     fun setScreenCaptureData(resultCode: Int, data: android.content.Intent) {
         screenCapture.initMediaProjection(resultCode, data)
     }
 
-    suspend fun run(task: String, resetHistory: Boolean = true, context: List<SerializableMessage> = emptyList()): String {
+    suspend fun executeTask(
+        task: String,
+        enablePlanning: Boolean = true,
+        enableOptimizer: Boolean = true,
+        contextMessages: List<SerializableMessage> = emptyList()
+    ): String {
+        return run(task, true, contextMessages, enablePlanning, enableOptimizer)
+    }
+
+    suspend fun run(task: String, resetHistory: Boolean = true, context: List<SerializableMessage> = emptyList(), enablePlanning: Boolean = true, enableOptimizer: Boolean = true): String {
         if (_isRunning.value) {
             Logger.agent("Agent is already running, ignoring task: $task")
             return "Agent is already running"
@@ -97,22 +208,65 @@ class PhoneAgent(
 
         Logger.i(Logger.AGENT, "========== START TASK ==========")
         Logger.i(Logger.AGENT, "Task: $task")
+        Logger.i(Logger.AGENT, "enablePlanning: $enablePlanning, smartCoordinator: ${if (smartCoordinator != null) "available" else "null"}")
         Logger.agent("Max steps: ${agentConfig.maxSteps}, Language: ${agentConfig.language}")
 
         _isRunning.value = true
         _currentTask.value = task
         stopRequested = false
 
+        val shouldUseCoordinator = smartCoordinator != null && enablePlanning
+
+        // 如果用户想使用规划但协调器未配置，给出提示
+        if (enablePlanning && smartCoordinator == null) {
+            val warningMsg = if (agentConfig.language == "cn") {
+                "⚠️ 规划功能未生效：请在设置中配置智能协调器的 API 信息"
+            } else {
+                "⚠️ Planning not available: Please configure Smart Coordinator API in settings"
+            }
+            Logger.w(Logger.AGENT, warningMsg)
+            onThinking?.invoke(warningMsg)
+        }
+
+        // 使用Prompt优化器优化任务描述（如果启用）
+        // 用户需求：允许协调器使用指令优化器来规划
+        val shouldOptimizePrompt = promptOptimizer != null && enableOptimizer
+        val effectiveTask = if (shouldOptimizePrompt) {
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user before optimization")
+                return "Task stopped by user"
+            }
+            Logger.i(Logger.AGENT, "[PhoneAgent] Optimizing prompt with PromptOptimizer...")
+            // 将对话上下文转换为优化器需要的格式
+            val conversationContext = context.map { msg -> msg.role to msg.content }
+            val optimized = promptOptimizer!!.optimize(task, agentConfig.language, conversationContext)
+            
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user after optimization")
+                return "Task stopped by user"
+            }
+
+            Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Prompt optimized: $optimized")
+            optimized
+        } else {
+            if (promptOptimizer != null && shouldUseCoordinator) {
+                Logger.i(Logger.AGENT, "[PhoneAgent] Skipping PromptOptimizer because SmartCoordinator is enabled")
+            }
+            task
+        }
+
         if (resetHistory) {
             conversationHistory.clear()
             currentStep = 0
+            currentTaskPlan = null
+            currentSubTaskIndex = 0
         }
 
         if (conversationHistory.isEmpty()) {
             conversationHistory.add(
                 Message.System(agentConfig.getEffectiveSystemPrompt())
             )
-            
+
             // Restore context if provided
             if (context.isNotEmpty()) {
                 context.forEach { msg ->
@@ -126,30 +280,38 @@ class PhoneAgent(
         }
 
         try {
-            // First step: initialize conversation with task
-            var result = executeStep(task, isNewTask = true)
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user before planning")
+                return "Task stopped by user"
+            }
 
-            // Continue until finished or max steps reached
-            while (!result.finished && currentStep < agentConfig.maxSteps) {
+            // 尝试使用SmartCoordinator分解任务（如果启用）
+            if (shouldUseCoordinator && currentTaskPlan == null) {
+                Logger.i(Logger.AGENT, "[PhoneAgent] Attempting to plan task with SmartCoordinator...")
+                currentTaskPlan = smartCoordinator?.planTask(effectiveTask, agentConfig.language)
+
                 if (stopRequested) {
-                    Logger.i(Logger.AGENT, "Task stopped by user (stopRequested=true)")
+                    Logger.i(Logger.AGENT, "Task stopped by user after planning")
                     return "Task stopped by user"
                 }
 
-                if (result.needsHumanIntervention) {
-                    Logger.w(Logger.AGENT, "Human intervention needed: ${result.message}")
-                    onHumanInterventionNeeded?.invoke(result.message ?: "Human intervention needed")
-                    break
+                if (currentTaskPlan != null) {
+                    Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Task successfully planned into ${currentTaskPlan!!.subTasks.size} sub-tasks")
+                    Logger.i(Logger.AGENT, "[PhoneAgent] Task analysis: ${currentTaskPlan!!.analysis}")
+                    Logger.i(Logger.AGENT, "[PhoneAgent] Formatted plan:\n${currentTaskPlan!!.toReadableText()}")
+                    currentSubTaskIndex = 0
+                } else {
+                    Logger.w(Logger.AGENT, "[PhoneAgent] ⚠ Task planning failed, falling back to direct execution")
                 }
-
-                result = executeStep(isNewTask = false)
             }
 
-            val finalMessage = result.message ?: "Task completed"
-            Logger.i(Logger.AGENT, "========== TASK COMPLETED ==========")
-            Logger.i(Logger.AGENT, "Result: $finalMessage (steps: $currentStep)")
-            onTaskComplete?.invoke(finalMessage)
-            return finalMessage
+            // 如果有任务规划，按照规划执行子任务
+            if (currentTaskPlan != null) {
+                return executeWithPlan(currentTaskPlan!!)
+            }
+
+            // 否则按原来的方式直接执行
+            return executeDirectly(effectiveTask)
 
         } catch (e: Exception) {
             val error = "Error: ${e.message}"
@@ -160,6 +322,273 @@ class PhoneAgent(
             _isRunning.value = false
             _currentTask.value = null
         }
+    }
+
+    /**
+     * 按照任务规划执行（有规划模型分解的子任务）
+     */
+    private suspend fun executeWithPlan(plan: TaskPlan): String {
+        Logger.i(Logger.AGENT, "========== EXECUTING WITH TASK PLAN ==========")
+        Logger.i(Logger.AGENT, "Total sub-tasks: ${plan.subTasks.size}")
+
+        val results = mutableListOf<String>()
+
+        for ((index, subTask) in plan.subTasks.withIndex()) {
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user")
+                return "Task stopped by user at sub-task ${index + 1}"
+            }
+
+            Logger.i(Logger.AGENT, "---------- Executing Sub-task ${index + 1}/${plan.subTasks.size} ----------")
+            Logger.i(Logger.AGENT, "Goal: ${subTask.goal}")
+
+            currentSubTaskIndex = index
+
+            // 通知UI开始执行子任务（显示指令内容）
+            onSubTaskStart?.invoke(subTask)
+
+            // 构建子任务的详细prompt
+            val subTaskPrompt = buildSubTaskPrompt(subTask, plan.originalTask)
+
+            // 执行子任务
+            val result = executeSubTask(subTaskPrompt, subTask)
+
+            if (result.finished) {
+                Logger.i(Logger.AGENT, "Sub-task ${index + 1} completed: ${result.message}")
+                results.add("Sub-task ${index + 1}: ${result.message}")
+            } else if (result.needsHumanIntervention) {
+                Logger.w(Logger.AGENT, "Human intervention needed at sub-task ${index + 1}")
+                onHumanInterventionNeeded?.invoke(result.message ?: "Human intervention needed")
+                return "Task paused at sub-task ${index + 1}: ${result.message}"
+            } else {
+                Logger.w(Logger.AGENT, "Sub-task ${index + 1} not finished, continuing...")
+            }
+        }
+
+        val finalMessage = "All ${plan.subTasks.size} sub-tasks completed successfully"
+        Logger.i(Logger.AGENT, "========== TASK PLAN COMPLETED ==========")
+        Logger.i(Logger.AGENT, finalMessage)
+
+        // 生成任务总结（如果启用）
+        val summaryMessage = generateTaskSummaryIfEnabled(plan.originalTask, stopped = false) ?: finalMessage
+
+        onTaskComplete?.invoke(summaryMessage)
+        return summaryMessage
+    }
+
+    /**
+     * 直接执行任务（不使用任务规划）
+     */
+    private suspend fun executeDirectly(task: String): String {
+        if (stopRequested) {
+            Logger.i(Logger.AGENT, "Task stopped by user before execution")
+            return "Task stopped by user"
+        }
+
+        // First step: initialize conversation with task
+        var result = executeStep(task, isNewTask = true)
+
+        // Continue until finished or max steps reached
+        while (!result.finished && currentStep < agentConfig.maxSteps) {
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user (stopRequested=true)")
+                return generateTaskSummaryIfEnabled(task, stopped = true) ?: "Task stopped by user"
+            }
+
+            if (result.needsHumanIntervention) {
+                Logger.w(Logger.AGENT, "Human intervention needed: ${result.message}")
+                onHumanInterventionNeeded?.invoke(result.message ?: "Human intervention needed")
+                break
+            }
+
+            result = executeStep(isNewTask = false)
+        }
+
+        val finalMessage = result.message ?: "Task completed"
+        Logger.i(Logger.AGENT, "========== TASK COMPLETED ==========")
+        Logger.i(Logger.AGENT, "Result: $finalMessage (steps: $currentStep)")
+
+        // 生成任务总结（如果启用）
+        val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
+
+        onTaskComplete?.invoke(summaryMessage)
+        return summaryMessage
+    }
+
+    /**
+     * 为子任务构建详细的prompt
+     */
+    private fun buildSubTaskPrompt(subTask: PlannedSubTask, originalTask: String): String {
+        return """
+原始任务：$originalTask
+
+当前子任务 ${subTask.index}：
+
+【目标】
+${subTask.goal}
+
+【当前状态】
+${subTask.currentState}
+
+【需要执行的操作】
+${subTask.actions}
+
+【上下文和注意事项】
+${subTask.context}
+
+请根据以上信息完成当前子任务。
+        """.trimIndent()
+    }
+
+    /**
+     * 执行单个子任务（带监督和纠正）
+     */
+    private suspend fun executeSubTask(prompt: String, subTask: PlannedSubTask): StepResult {
+        val maxCorrections = agentConfig.plannerConfig?.maxCorrections ?: 2
+        var correctionAttempts = 0
+
+        while (correctionAttempts <= maxCorrections) {
+            // 执行子任务
+            var result = executeStep(prompt, isNewTask = (correctionAttempts == 0))
+
+            // Continue until sub-task is finished or max steps reached
+            var subTaskSteps = 1
+            val maxSubTaskSteps = 20  // 每个子任务最多20步
+
+            while (!result.finished && subTaskSteps < maxSubTaskSteps && currentStep < agentConfig.maxSteps) {
+                if (stopRequested) {
+                    // 用户停止任务，立即返回AutoGLM显示停止状态
+                    actionExecutor.returnToAutoGLM()
+                    return result.copy(
+                        success = false,
+                        finished = true,
+                        message = if (agentConfig.language == "en") "Task stopped by user" else "任务已停止"
+                    )
+                }
+
+                if (result.needsHumanIntervention) {
+                    // 需要人工介入，立即返回AutoGLM让用户看到提示
+                    actionExecutor.returnToAutoGLM()
+                    return result
+                }
+
+                result = executeStep(isNewTask = false)
+                subTaskSteps++
+            }
+
+            // 如果有监督器，让协调器检查执行结果
+            if (smartCoordinator != null && agentConfig.plannerConfig?.enableSupervision == true) {
+                Logger.i(Logger.AGENT, "Requesting supervision for sub-task ${subTask.index}...")
+
+                // 获取最新的截图
+                val screenshot = screenCapture.capture()
+
+                val supervision = smartCoordinator!!.superviseExecution(
+                    subTask = subTask,
+                    agentThinking = lastAgentThinking,
+                    agentAction = lastAgentAction,
+                    screenshotBase64 = screenshot?.base64Data,
+                    language = agentConfig.language
+                )
+
+                when (supervision.status) {
+                    SupervisionStatus.SUCCESS -> {
+                        Logger.i(Logger.AGENT, "✓ Supervision: Sub-task ${subTask.index} completed successfully")
+                        Logger.i(Logger.AGENT, "Assessment: ${supervision.assessment}")
+
+                        // 返回 AutoGLM 界面，让用户看到子任务完成状态
+                        actionExecutor.returnToAutoGLM()
+
+                        // 成功，返回结果
+                        return result.copy(
+                            finished = true,
+                            message = supervision.assessment
+                        )
+                    }
+
+                    SupervisionStatus.NEEDS_CORRECTION -> {
+                        correctionAttempts++
+                        if (correctionAttempts <= maxCorrections) {
+                            Logger.w(Logger.AGENT, "⚠ Supervision: Needs correction (attempt $correctionAttempts/$maxCorrections)")
+                            Logger.w(Logger.AGENT, "Correction instruction: ${supervision.correctionInstruction}")
+
+                            // 构建纠正prompt
+                            val correctionPrompt = """
+前一次执行存在问题，需要纠正。
+
+**监督反馈：**
+${supervision.assessment}
+
+**纠正指令：**
+${supervision.correctionInstruction}
+
+请根据纠正指令重新执行操作，确保达成子任务目标：${subTask.goal}
+                            """.trimIndent()
+
+                            // 添加纠正指令到对话历史
+                            conversationHistory.add(Message.User(correctionPrompt))
+
+                            // 继续下一轮尝试（不返回AutoGLM，让用户看到正在重试）
+                            continue
+                        } else {
+                            Logger.e(Logger.AGENT, "✗ Max correction attempts reached for sub-task ${subTask.index}")
+
+                            // 返回 AutoGLM 界面显示失败状态
+                            actionExecutor.returnToAutoGLM()
+
+                            val failMessage = if (agentConfig.language == "en") {
+                                "Sub-task ${subTask.index} failed after $maxCorrections correction attempts.\n\nLast assessment: ${supervision.assessment}"
+                            } else {
+                                "子任务 ${subTask.index} 在 ${maxCorrections} 次纠正后仍未完成。\n\n最后评估：${supervision.assessment}"
+                            }
+                            return result.copy(
+                                success = false,
+                                message = failMessage
+                            )
+                        }
+                    }
+
+                    SupervisionStatus.FAILED -> {
+                        Logger.e(Logger.AGENT, "✗ Supervision: Sub-task ${subTask.index} failed")
+                        Logger.e(Logger.AGENT, "Assessment: ${supervision.assessment}")
+
+                        // 返回 AutoGLM 界面显示失败状态
+                        actionExecutor.returnToAutoGLM()
+
+                        val failMessage = if (agentConfig.language == "en") {
+                            "Sub-task ${subTask.index} failed.\n\nAssessment: ${supervision.assessment}"
+                        } else {
+                            "子任务 ${subTask.index} 执行失败。\n\n评估：${supervision.assessment}"
+                        }
+                        return result.copy(
+                            success = false,
+                            finished = true,
+                            message = failMessage
+                        )
+                    }
+
+                    SupervisionStatus.UNCERTAIN -> {
+                        Logger.w(Logger.AGENT, "? Supervision uncertain, assuming success")
+                        // 不确定时，返回AutoGLM并假设成功
+                        actionExecutor.returnToAutoGLM()
+                        return result
+                    }
+                }
+            } else {
+                // 没有监督器，直接返回AutoGLM界面并返回结果
+                actionExecutor.returnToAutoGLM()
+                return result
+            }
+        }
+
+        // 理论上不会到这里
+        return StepResult(
+            success = false,
+            finished = true,
+            action = null,
+            thinking = "",
+            message = "子任务执行异常结束"
+        )
     }
 
     private suspend fun executeStep(
@@ -228,6 +657,10 @@ class PhoneAgent(
         onThinking?.invoke(response.thinking)
         onAction?.invoke(response.action)
 
+        // 保存最后一次执行的thinking和action，供监督器使用
+        lastAgentThinking = response.thinking
+        lastAgentAction = response.action
+
         // 5. 移除最后一条用户消息中的图片（节省上下文长度，与Python一致）
         removeLastUserMessageImage()
         Logger.agent("Context messages: ${conversationHistory.size}")
@@ -282,7 +715,91 @@ class PhoneAgent(
         _isRunning.value = false
     }
 
+    /**
+     * 生成任务总结（如果启用）
+     */
+    private suspend fun generateTaskSummaryIfEnabled(originalTask: String, stopped: Boolean): String? {
+        // 检查是否启用总结功能
+        if (promptOptimizer == null || agentConfig.optimizerConfig?.enableTaskSummary != true) {
+            return null
+        }
+
+        try {
+            // 从对话历史中提取上下文（排除系统消息）
+            val conversationContext = conversationHistory
+                .filter { it !is Message.System }
+                .mapNotNull { message ->
+                    when (message) {
+                        is Message.User -> "user" to message.text
+                        is Message.Assistant -> "assistant" to message.content
+                        else -> null
+                    }
+                }
+
+            if (conversationContext.isEmpty()) {
+                Logger.w(Logger.AGENT, "No conversation context for summary, skipping")
+                return null
+            }
+
+            Logger.i(Logger.AGENT, "[PhoneAgent] Generating task summary...")
+            val summary = promptOptimizer!!.summarize(originalTask, conversationContext, agentConfig.language)
+
+            // 获取SmartCoordinator收集到的信息
+            val gatheredInfo = smartCoordinator?.getInfoSummary()
+
+            // 构建最终总结消息
+            val finalSummary = buildString {
+                // 任务停止说明
+                if (stopped) {
+                    if (agentConfig.language == "en") {
+                        append("Task stopped. ")
+                    } else {
+                        append("任务已停止。")
+                    }
+                }
+
+                // 添加总结
+                append(summary)
+
+                // 添加收集到的信息
+                if (!gatheredInfo.isNullOrBlank() && gatheredInfo != "无收集到的信息") {
+                    append("\n\n")
+                    if (agentConfig.language == "en") {
+                        append("**Gathered Information:**\n")
+                    } else {
+                        append("**收集到的信息：**\n")
+                    }
+                    append(gatheredInfo)
+                }
+            }
+
+            return finalSummary
+
+        } catch (e: Exception) {
+            Logger.e(Logger.AGENT, "Failed to generate task summary", e)
+            return null
+        }
+    }
+
+    /**
+     * 获取智能协调器收集到的所有信息
+     */
+    fun getGatheredInfo(): String? {
+        return smartCoordinator?.getInfoSummary()
+    }
+
+    /**
+     * 清空收集的信息
+     */
+    fun clearGatheredInfo() {
+        smartCoordinator?.clearGatheredInfo()
+    }
+
     fun release() {
         screenCapture.release()
+        smartCoordinator?.release()
+        smartCoordinator = null
+        promptOptimizer?.release()
+        promptOptimizer = null
     }
 }

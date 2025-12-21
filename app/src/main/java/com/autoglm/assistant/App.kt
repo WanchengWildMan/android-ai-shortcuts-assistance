@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import com.autoglm.assistant.util.PreferenceManager
+import com.autoglm.assistant.util.ShellExecutor
 
 class App : Application() {
 
@@ -23,6 +24,10 @@ class App : Application() {
         super.onCreate()
         instance = this
         preferenceManager = PreferenceManager(this)
+
+        // 初始化 Shell 全局设置
+        ShellExecutor.globalUseRoot = preferenceManager.useRootMode
+
         createNotificationChannel()
     }
 
