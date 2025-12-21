@@ -347,11 +347,20 @@ fun MainScreen(
 
     // 观察Coordinator消息 - 基于消息类型处理
     // 跟踪当前正在流式更新的消息索引（优化器、规划器、总结器各自独立）
-    var optimizerMessageIndex by remember { mutableStateOf(-1) }
-    var plannerMessageIndex by remember { mutableStateOf(-1) }
-    var summaryMessageIndex by remember { mutableStateOf(-1) }
+    var optimizerMessageIndex by remember { mutableIntStateOf(-1) }
+    var plannerMessageIndex by remember { mutableIntStateOf(-1) }
+    var summaryMessageIndex by remember { mutableIntStateOf(-1) }
     // 跟踪是否已经显示了subtask卡片
     var hasShownSubtaskCards by remember { mutableStateOf(false) }
+
+    // 当切换对话时，重置流式索引
+    LaunchedEffect(currentConversation?.id) {
+        optimizerMessageIndex = -1
+        plannerMessageIndex = -1
+        summaryMessageIndex = -1
+        hasShownSubtaskCards = false
+        lastCoordinatorContent = null
+    }
 
     LaunchedEffect(coordinatorMessage?.value) {
         val msg = coordinatorMessage?.value ?: return@LaunchedEffect
@@ -389,10 +398,12 @@ fun MainScreen(
                 msg.content  // 已经包含格式化内容
             }
             WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
-                "📋 ${msg.content}"
+                // 移除前缀，直接显示Markdown内容
+                msg.content
             }
             WakeWordService.CoordinatorMessageType.SUBTASK_START -> {
-                "🎯 ${msg.content}"
+                // 移除前缀，直接显示Markdown内容
+                msg.content
             }
             WakeWordService.CoordinatorMessageType.SUPERVISION_RESULT -> {
                 // content格式: "STATUS|内容"
@@ -703,7 +714,10 @@ fun MainScreen(
                         onHistoryClick = {
                             navController.navigate("conversations")
                         },
-                        onSettingsClick = onOpenSettings
+                        onSettingsClick = onOpenSettings,
+                        onRunningTaskClick = {
+                            navController.navigate("chat")
+                        }
                     )
                 }
                 composable(

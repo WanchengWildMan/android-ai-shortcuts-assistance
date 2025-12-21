@@ -229,14 +229,23 @@ class PhoneAgent(
         }
 
         // 使用Prompt优化器优化任务描述（如果启用）
-        // 注意：如果启用了任务规划（SmartCoordinator），则不使用PromptOptimizer
-        // 因为SmartCoordinator已经会对任务进行理解和分解，避免优化后的详细指令影响子任务执行
-        val shouldOptimizePrompt = promptOptimizer != null && !shouldUseCoordinator
+        // 用户需求：允许协调器使用指令优化器来规划
+        val shouldOptimizePrompt = promptOptimizer != null && enableOptimizer
         val effectiveTask = if (shouldOptimizePrompt) {
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user before optimization")
+                return "Task stopped by user"
+            }
             Logger.i(Logger.AGENT, "[PhoneAgent] Optimizing prompt with PromptOptimizer...")
             // 将对话上下文转换为优化器需要的格式
             val conversationContext = context.map { msg -> msg.role to msg.content }
             val optimized = promptOptimizer!!.optimize(task, agentConfig.language, conversationContext)
+            
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user after optimization")
+                return "Task stopped by user"
+            }
+
             Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Prompt optimized: $optimized")
             optimized
         } else {
@@ -271,10 +280,20 @@ class PhoneAgent(
         }
 
         try {
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user before planning")
+                return "Task stopped by user"
+            }
+
             // 尝试使用SmartCoordinator分解任务（如果启用）
             if (shouldUseCoordinator && currentTaskPlan == null) {
                 Logger.i(Logger.AGENT, "[PhoneAgent] Attempting to plan task with SmartCoordinator...")
                 currentTaskPlan = smartCoordinator?.planTask(effectiveTask, agentConfig.language)
+
+                if (stopRequested) {
+                    Logger.i(Logger.AGENT, "Task stopped by user after planning")
+                    return "Task stopped by user"
+                }
 
                 if (currentTaskPlan != null) {
                     Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Task successfully planned into ${currentTaskPlan!!.subTasks.size} sub-tasks")
@@ -361,6 +380,11 @@ class PhoneAgent(
      * 直接执行任务（不使用任务规划）
      */
     private suspend fun executeDirectly(task: String): String {
+        if (stopRequested) {
+            Logger.i(Logger.AGENT, "Task stopped by user before execution")
+            return "Task stopped by user"
+        }
+
         // First step: initialize conversation with task
         var result = executeStep(task, isNewTask = true)
 

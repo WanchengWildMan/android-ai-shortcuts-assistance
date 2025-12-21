@@ -64,11 +64,11 @@ fun ChatScreen(
     }
 
     // 判断是否在底部（带容差，允许最后2项范围内）
+    // 注意：reverseLayout=true时，index 0 是底部
     fun isNearBottom(): Boolean {
         val layoutInfo = listState.layoutInfo
-        val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return true
-        val totalItems = layoutInfo.totalItemsCount
-        return lastVisibleIndex >= totalItems - 2
+        val firstVisibleIndex = layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: return true
+        return firstVisibleIndex <= 1
     }
 
     // 监听用户主动滚动
@@ -92,40 +92,25 @@ fun ChatScreen(
     }
 
     // 自动滚动：收到消息或内容更新就滚到底
+    // 使用 reverseLayout=true，新消息在 index 0
     LaunchedEffect(messages.size, messages.lastOrNull()?.content) {
         if (messages.isEmpty()) return@LaunchedEffect
 
-        val currentCount = messages.size
         val lastMessage = messages.lastOrNull() ?: return@LaunchedEffect
         val isUserMessage = lastMessage.isUser
-        val isNewMessage = currentCount > previousMessageCount
-
-        // 决定是否自动滚动
-        val shouldAutoScroll = when {
-            isUserMessage -> true  // 用户发消息：总是滚
-            !userScrolledUp -> true  // AI消息+用户在底部：滚
-            else -> false  // AI消息+用户在查看历史：不滚
-        }
-
-        if (shouldAutoScroll) {
-            isAutoScrolling = true
+        
+        // 如果是用户消息，或者用户没有向上滚动，就自动滚动到底部
+        if (isUserMessage || !userScrolledUp) {
             try {
-                if (isUserMessage) {
-                    userScrolledUp = false  // 用户发消息时重置标记
-                }
-                // 直接滚到底部：用 Int.MAX_VALUE 确保总是滚到最底
-                if (isNewMessage) {
-                    listState.animateScrollToItem(Int.MAX_VALUE)
-                } else {
-                    listState.scrollToItem(Int.MAX_VALUE)
-                }
+                isAutoScrolling = true
+                // 滚动到底部 (index 0)
+                listState.animateScrollToItem(0)
+            } catch (e: Exception) {
+                // Ignore scroll errors
             } finally {
-                delay(50)
                 isAutoScrolling = false
             }
         }
-
-        previousMessageCount = currentCount
     }
 
     Column(
@@ -159,14 +144,16 @@ fun ChatScreen(
         } else {
             LazyColumn(
                 state = listState,
+                reverseLayout = true, // 关键修改：反向布局，底部为起点
                 modifier = Modifier
                     .weight(1f)
                     .padding(horizontal = 16.dp),
                 contentPadding = PaddingValues(vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // 注意：reverseLayout=true 时，列表顺序需要反转
                 items(
-                    items = messages,
+                    items = messages.reversed(),
                     key = { it.timestamp }
                 ) { message ->
                     AnimatedMessageItem(message = message)

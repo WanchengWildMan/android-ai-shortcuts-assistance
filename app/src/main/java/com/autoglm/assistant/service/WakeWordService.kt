@@ -29,6 +29,11 @@ import kotlinx.coroutines.flow.StateFlow
 
 class WakeWordService : Service() {
 
+    companion object {
+        var instance: WakeWordService? = null
+            private set
+    }
+
     private val binder = LocalBinder()
     // 使用 Default 而不是 Main，避免切后台时协程被取消
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -40,6 +45,7 @@ class WakeWordService : Service() {
 
     // WakeLock 防止 CPU 休眠
     private var wakeLock: PowerManager.WakeLock? = null
+    private var currentTaskJob: Job? = null
 
     private val _serviceState = MutableStateFlow(ServiceState.IDLE)
     val serviceState: StateFlow<ServiceState> = _serviceState
@@ -112,6 +118,7 @@ class WakeWordService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         initializeComponents()
     }
 
@@ -335,16 +342,16 @@ class WakeWordService : Service() {
             onSubTaskGenerated = { subTask ->
                 // 子任务生成时立即显示卡片
                 val cardText = buildString {
-                    appendLine("**步骤 ${subTask.index}**")
+                    appendLine("### 步骤 ${subTask.index}")
                     appendLine()
-                    appendLine("**目标：**${subTask.goal}")
+                    appendLine("**目标：** ${subTask.goal}")
                     if (subTask.currentState.isNotBlank()) {
                         appendLine()
-                        appendLine("**当前状态：**${subTask.currentState}")
+                        appendLine("**当前状态：** ${subTask.currentState}")
                     }
                     if (subTask.actions.isNotBlank()) {
                         appendLine()
-                        appendLine("**操作：**${subTask.actions}")
+                        appendLine("**操作：** ${subTask.actions}")
                     }
                 }
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -356,9 +363,9 @@ class WakeWordService : Service() {
 
             onSubTaskStart = { subTask ->
                 val subTaskText = buildString {
-                    appendLine("开始执行子任务 ${subTask.index}")
+                    appendLine("### ▶️ 开始执行子任务 ${subTask.index}")
                     appendLine()
-                    appendLine("**目标：**${subTask.goal}")
+                    appendLine("**目标：** ${subTask.goal}")
                     if (subTask.actions.isNotBlank()) {
                         appendLine()
                         appendLine("**操作指导：**")
@@ -366,7 +373,7 @@ class WakeWordService : Service() {
                     }
                     if (subTask.context.isNotBlank() && subTask.context != "协调器提供的任务指导") {
                         appendLine()
-                        appendLine("**注意事项：**${subTask.context}")
+                        appendLine("**注意事项：** ${subTask.context}")
                     }
                 }
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -546,14 +553,14 @@ class WakeWordService : Service() {
         android.util.Log.d("AutoGLM", "State changed to EXECUTING_TASK")
         onTaskStarted?.invoke(task)
 
-        scope.launch {
+        currentTaskJob = scope.launch {
             // 获取 WakeLock 防止 CPU 休眠
             acquireWakeLock()
             try {
-                // 使用 NonCancellable 防止任务被取消
-                withContext(NonCancellable) {
-                        phoneAgent?.run(task, true, context, enablePlanning, enableOptimizer)
-                }
+                phoneAgent?.run(task, true, context, enablePlanning, enableOptimizer)
+            } catch (e: CancellationException) {
+                android.util.Log.i("AutoGLM", "Task cancelled")
+                onError?.invoke("Task stopped by user")
             } catch (e: Exception) {
                 onError?.invoke("Task error: ${e.message}")
             } finally {
@@ -585,6 +592,7 @@ class WakeWordService : Service() {
     fun stopCurrentTask() {
         android.util.Log.w("AutoGLM", "=== WakeWordService.stopCurrentTask() called ===")
         Exception("stopCurrentTask trace").printStackTrace()
+        currentTaskJob?.cancel()
         phoneAgent?.stop()
         _serviceState.value = ServiceState.IDLE
     }
@@ -634,6 +642,7 @@ class WakeWordService : Service() {
 
     override fun onDestroy() {
         android.util.Log.w("AutoGLM", "=== WakeWordService.onDestroy() called - SERVICE IS BEING DESTROYED ===")
+        instance = null
         super.onDestroy()
         stopCurrentTask()
         scope.cancel()
