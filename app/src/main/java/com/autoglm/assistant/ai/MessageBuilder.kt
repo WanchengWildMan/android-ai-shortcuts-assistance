@@ -32,6 +32,12 @@ object MessageBuilder {
         screenHeight?.let { info["screen_height"] = it }
         extraInfo?.let { info.putAll(it) }
 
+        // 检测是否在 AutoGLM 应用中，如果是，添加警告
+        if (currentApp.contains("AutoGLM", ignoreCase = true) ||
+            currentApp.contains("Assistant", ignoreCase = true)) {
+            info["warning"] = "You are in AutoGLM Assistant app. DO NOT click on the shortcut cards! Launch the target app instead."
+        }
+
         return gson.toJson(info)
     }
 
@@ -108,8 +114,7 @@ $screenInfo"""
     finish是结束任务的操作，表示准确完整完成任务，message是终止信息。
 
 必须遵循的规则：
-0. **重要：不要在 AutoGLM Assistant（语音助手）APP 的对话框中操作，你应该去实际的目标应用中操作。如果当前在 AutoGLM Assistant 中，请先启动目标应用。**
-1. 在执行任何操作前，先检查当前app是否是目标app，如果不是，先执行 Launch。
+1. **关键提醒：不要将 AutoGLM Assistant 的对话界面误认为目标应用！** AutoGLM 是语音助手App，它的界面通常显示对话气泡、输入框、设置等。你的任务是去操作**其他应用**（如微信、美团、抖音等）完成用户指令，而不是在 AutoGLM 自己的界面中操作。**特别注意：当你看到 AutoGLM 界面中的快捷指令卡片（通常显示为带有图标和标题的方形卡片），绝对不要点击这些快捷指令！** 这些是用户配置的快捷方式，不是你执行任务时应该操作的目标。在执行任何操作前，先检查当前app是否是目标app：如果看到的是 AutoGLM 的对话界面，说明你还没有启动目标应用，请立即执行 Launch 启动目标应用。
 2. 如果进入到了无关页面，先执行 Back。如果执行Back后页面没有变化，请点击页面左上角的返回键进行返回，或者右上角的X号关闭。
 3. 如果页面未加载出内容，最多连续 Wait 三次，否则执行 Back重新进入。
 4. 如果页面显示网络问题，需要重新加载，请点击重新加载。
@@ -174,7 +179,7 @@ Operation instructions and their functions:
     finish is the operation to end the task, indicating accurate and complete task completion, with message being the termination information.
 
 Rules that must be followed:
-0. **IMPORTANT: Do NOT operate within the AutoGLM Assistant (voice assistant) APP dialog. You should operate in the actual target application. If you're currently in AutoGLM Assistant, launch the target app first.**
+0. **IMPORTANT: Do NOT operate within the AutoGLM Assistant (voice assistant) APP dialog. You should operate in the actual target application. If you're currently in AutoGLM Assistant, launch the target app first. SPECIAL WARNING: When you see shortcut cards in the AutoGLM interface (usually displayed as square cards with icons and titles), NEVER click on these shortcuts!** These are user-configured shortcuts, not targets you should interact with during task execution.
 1. Before executing any operation, check if the current app is the target app. If not, execute Launch first.
 2. If you enter an irrelevant page, execute Back first. If the page doesn't change after executing Back, click the back button in the top-left corner of the page to return, or the X in the top-right corner to close.
 3. If the page hasn't loaded content, Wait up to three consecutive times, otherwise execute Back to re-enter.

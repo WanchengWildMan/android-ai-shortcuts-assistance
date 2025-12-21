@@ -17,7 +17,9 @@ import com.autoglm.assistant.R
 import com.autoglm.assistant.ai.ModelConfig
 import com.autoglm.assistant.core.agent.AgentConfig
 import com.autoglm.assistant.core.agent.PhoneAgent
+import com.autoglm.assistant.core.agent.PromptOptimizerConfig
 import com.autoglm.assistant.core.agent.SerializableMessage
+import com.autoglm.assistant.core.planner.TaskPlannerConfig
 import com.autoglm.assistant.voice.SpeechRecognizer
 import com.autoglm.assistant.voice.TextToSpeech
 import com.autoglm.assistant.voice.WakeWordEngine
@@ -26,6 +28,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 class WakeWordService : Service() {
+
+    companion object {
+        var instance: WakeWordService? = null
+            private set
+    }
 
     private val binder = LocalBinder()
     // 使用 Default 而不是 Main，避免切后台时协程被取消
@@ -38,6 +45,7 @@ class WakeWordService : Service() {
 
     // WakeLock 防止 CPU 休眠
     private var wakeLock: PowerManager.WakeLock? = null
+    private var currentTaskJob: Job? = null
 
     private val _serviceState = MutableStateFlow(ServiceState.IDLE)
     val serviceState: StateFlow<ServiceState> = _serviceState
@@ -58,9 +66,34 @@ class WakeWordService : Service() {
         val timestamp: Long = System.currentTimeMillis()
     )
 
+    // Coordinator消息类型
+    enum class CoordinatorMessageType {
+        OPTIMIZER_STREAMING,    // 优化器流式输出中
+        OPTIMIZER_COMPLETE,     // 优化完成
+        PLANNING_STREAMING,     // 规划流式输出中
+        PLAN_COMPLETE,          // 规划完成
+        SUBTASK_CARD,           // 子任务卡片（流式生成时立即显示）
+        SUBTASK_START,          // 子任务开始执行
+        SUPERVISION_RESULT,     // 监督结果
+        COORDINATOR_THINKING,   // 协调器思考
+        SUMMARY_STREAMING,      // 任务总结流式输出中
+        SUMMARY_COMPLETE,       // 任务总结完成
+        CLEAR                   // 清除消息
+    }
+
+    data class CoordinatorMessage(
+        val type: CoordinatorMessageType,
+        val content: String,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+
     // Agent response message with type to filter by setting
     private val _agentMessage = MutableStateFlow<AgentMessage?>(null)
     val agentMessage: StateFlow<AgentMessage?> = _agentMessage
+
+    // Coordinator消息 - 使用类型标签区分
+    private val _coordinatorMessage = MutableStateFlow<CoordinatorMessage?>(null)
+    val coordinatorMessage: StateFlow<CoordinatorMessage?> = _coordinatorMessage
 
     // Callbacks for UI updates
     var onWakeWordDetected: (() -> Unit)? = null
@@ -85,6 +118,7 @@ class WakeWordService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         initializeComponents()
     }
 
@@ -135,9 +169,54 @@ class WakeWordService : Service() {
             modelName = prefs.modelName
         )
 
+        // 创建SmartCoordinator配置（只要配置了API信息就创建）
+        // 全局开关现在控制"默认启用规划"，不影响是否初始化协调器
+        val plannerConfig = if (prefs.coordinatorApiUrl.isNotBlank() &&
+                                prefs.coordinatorApiKey.isNotBlank() &&
+                                prefs.coordinatorModelName.isNotBlank()) {
+            val coordinatorModelConfig = ModelConfig(
+                baseUrl = prefs.coordinatorApiUrl,
+                apiKey = prefs.coordinatorApiKey,
+                modelName = prefs.coordinatorModelName
+            )
+            TaskPlannerConfig(
+                enabled = prefs.smartCoordinatorEnabled,  // 这个字段现在表示"默认启用规划"
+                plannerModelConfig = coordinatorModelConfig,
+                enableSupervision = prefs.supervisionEnabled,
+                supervisorModelConfig = coordinatorModelConfig,
+                maxCorrections = prefs.maxCorrections
+            ).also {
+                android.util.Log.i("AutoGLM", "SmartCoordinator available: model=${prefs.coordinatorModelName}, defaultEnabled=${prefs.smartCoordinatorEnabled}, supervision=${prefs.supervisionEnabled}")
+            }
+        } else {
+            android.util.Log.i("AutoGLM", "SmartCoordinator not configured (missing API info)")
+            null
+        }
+
+        // 创建Prompt优化器配置（如果启用）
+        val optimizerConfig = if (prefs.promptOptimizerEnabled) {
+            val optimizerModelConfig = ModelConfig(
+                baseUrl = prefs.optimizerApiUrl,
+                apiKey = prefs.optimizerApiKey,
+                modelName = prefs.optimizerModelName
+            )
+            PromptOptimizerConfig(
+                enabled = true,
+                modelConfig = optimizerModelConfig,
+                enableTaskSummary = prefs.taskSummaryEnabled
+            ).also {
+                android.util.Log.i("AutoGLM", "PromptOptimizer enabled: model=${prefs.optimizerModelName}, taskSummary=${prefs.taskSummaryEnabled}")
+            }
+        } else {
+            android.util.Log.i("AutoGLM", "PromptOptimizer disabled")
+            null
+        }
+
         val agentConfig = AgentConfig(
             maxSteps = prefs.maxSteps,
-            language = prefs.language
+            language = prefs.language,
+            plannerConfig = plannerConfig,
+            optimizerConfig = optimizerConfig
         )
 
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
@@ -153,11 +232,191 @@ class WakeWordService : Service() {
                 _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
             }
 
+            // Prompt优化器回调 - 支持流式输出
+            var optimizerStreamingContent = StringBuilder()
+            var isOptimizing = false
+            var summaryStreamingContent = StringBuilder()
+            var isSummarizing = false
+            var summaryAlreadySent = false  // Flag to track if summary was sent via SUMMARY_COMPLETE
+
+            onPromptOptimizing = {
+                isOptimizing = true
+                optimizerStreamingContent.clear()
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.OPTIMIZER_STREAMING,
+                    content = ""
+                )
+            }
+
+            onPromptOptimized = { optimizedPrompt ->
+                isOptimizing = false
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.OPTIMIZER_COMPLETE,
+                    content = optimizedPrompt
+                )
+            }
+
+            onTaskSummarizing = {
+                isSummarizing = true
+                summaryAlreadySent = false  // Reset flag for new summary generation
+                summaryStreamingContent.clear()
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUMMARY_STREAMING,
+                    content = ""
+                )
+            }
+
+            onTaskSummary = { summary ->
+                isSummarizing = false
+                summaryAlreadySent = true  // Mark that summary was sent via SUMMARY_COMPLETE
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUMMARY_COMPLETE,
+                    content = summary
+                )
+            }
+
+            // SmartCoordinator结构化回调 - 显示格式化内容
+            var plannerStreamingContent = StringBuilder()
+            var isPlanning = false
+
+            onPlanningStart = {
+                isPlanning = true
+                plannerStreamingContent.clear()
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.PLANNING_STREAMING,
+                    content = ""
+                )
+            }
+
+            onStreamToken = { token ->
+                // 流式显示内容 - 根据当前状态决定是优化器、规划器还是总结器
+                if (isOptimizing) {
+                    optimizerStreamingContent.append(token)
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.OPTIMIZER_STREAMING,
+                        content = optimizerStreamingContent.toString()
+                    )
+                } else if (isPlanning) {
+                    plannerStreamingContent.append(token)
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.PLANNING_STREAMING,
+                        content = plannerStreamingContent.toString()
+                    )
+                } else if (isSummarizing) {
+                    summaryStreamingContent.append(token)
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.SUMMARY_STREAMING,
+                        content = summaryStreamingContent.toString()
+                    )
+                }
+            }
+
+            onCoordinatorThinking = { thinking ->
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.COORDINATOR_THINKING,
+                    content = thinking
+                )
+            }
+
+            onStreamEnd = {
+                isPlanning = false
+            }
+
+            onPlanningComplete = { taskPlan ->
+                if (taskPlan != null) {
+                    // 使用TaskPlan的toReadableText方法，但去掉emoji前缀
+                    val planText = taskPlan.toReadableText()
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.PLAN_COMPLETE,
+                        content = planText
+                    )
+                    android.util.Log.i("AutoGLM", "[COORDINATOR] Task plan generated with ${taskPlan.subTasks.size} sub-tasks")
+                } else {
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.PLAN_COMPLETE,
+                        content = "任务规划失败，将直接执行"
+                    )
+                }
+            }
+
+            onSubTaskGenerated = { subTask ->
+                // 子任务生成时立即显示卡片
+                val cardText = buildString {
+                    appendLine("### 步骤 ${subTask.index}")
+                    appendLine()
+                    appendLine("**目标：** ${subTask.goal}")
+                    if (subTask.currentState.isNotBlank()) {
+                        appendLine()
+                        appendLine("**当前状态：** ${subTask.currentState}")
+                    }
+                    if (subTask.actions.isNotBlank()) {
+                        appendLine()
+                        appendLine("**操作：** ${subTask.actions}")
+                    }
+                }
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUBTASK_CARD,
+                    content = cardText.trim()
+                )
+                android.util.Log.i("AutoGLM", "[COORDINATOR] SubTask ${subTask.index} card displayed: ${subTask.goal}")
+            }
+
+            onSubTaskStart = { subTask ->
+                val subTaskText = buildString {
+                    appendLine("### ▶️ 开始执行子任务 ${subTask.index}")
+                    appendLine()
+                    appendLine("**目标：** ${subTask.goal}")
+                    if (subTask.actions.isNotBlank()) {
+                        appendLine()
+                        appendLine("**操作指导：**")
+                        appendLine(subTask.actions)
+                    }
+                    if (subTask.context.isNotBlank() && subTask.context != "协调器提供的任务指导") {
+                        appendLine()
+                        appendLine("**注意事项：** ${subTask.context}")
+                    }
+                }
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUBTASK_START,
+                    content = subTaskText.trim()
+                )
+            }
+
+            onSupervisionResult = { result ->
+                val resultText = buildString {
+                    appendLine("**评估：**${result.assessment}")
+                    if (result.correctionInstruction != null) {
+                        appendLine()
+                        appendLine("**纠正指令：**${result.correctionInstruction}")
+                    }
+                    if (result.gatheredInfo.isNotBlank()) {
+                        appendLine()
+                        appendLine("**收集信息：**${result.gatheredInfo}")
+                    }
+                }
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.SUPERVISION_RESULT,
+                    // 在content中存储状态和内容，用|分隔
+                    content = "${result.status.name}|${resultText.trim()}"
+                )
+            }
+
             onTaskComplete = { message ->
                 _serviceState.value = ServiceState.IDLE
                 onTaskCompleted?.invoke(message)
-                // Emit final result message
-                _agentMessage.value = AgentMessage(message, AgentMessageType.RESULT)
+                // 清理coordinator消息
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.CLEAR,
+                    content = ""
+                )
+                // Emit final result message only if summary wasn't already sent
+                // This avoids duplicate messages when task summary is enabled
+                if (!summaryAlreadySent) {
+                    _agentMessage.value = AgentMessage(message, AgentMessageType.RESULT)
+                } else {
+                    // Reset the flag for next task
+                    summaryAlreadySent = false
+                }
                 speak(message)
                 startWakeWordListening()
             }
@@ -165,6 +424,11 @@ class WakeWordService : Service() {
             onError = { error ->
                 _serviceState.value = ServiceState.IDLE
                 this@WakeWordService.onError?.invoke(error)
+                // 清理coordinator消息
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.CLEAR,
+                    content = ""
+                )
                 // Emit error as result
                 _agentMessage.value = AgentMessage(error, AgentMessageType.RESULT)
                 startWakeWordListening()
@@ -261,12 +525,24 @@ class WakeWordService : Service() {
         }
     }
 
+    /**
+     * 重新初始化PhoneAgent（当协调器设置改变时调用）
+     */
+    fun reinitializePhoneAgent() {
+        android.util.Log.i("AutoGLM", "Reinitializing PhoneAgent due to settings change")
+        // 释放旧的Agent
+        phoneAgent?.release()
+        // 重新初始化
+        initializePhoneAgent()
+        // 注意：屏幕截图权限需要重新授予
+    }
+
     fun setScreenCapturePermission(resultCode: Int, data: Intent) {
         phoneAgent?.setScreenCaptureData(resultCode, data)
     }
 
-    fun executeTask(task: String, resetHistory: Boolean = true, context: List<SerializableMessage> = emptyList()) {
-        android.util.Log.d("AutoGLM", "WakeWordService.executeTask called: task=$task, currentState=${_serviceState.value}")
+    fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, context: List<SerializableMessage> = emptyList()) {
+        android.util.Log.d("AutoGLM", "WakeWordService.executeTask called: task=$task, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer, currentState=${_serviceState.value}")
         if (_serviceState.value == ServiceState.EXECUTING_TASK) {
             onError?.invoke("Already executing a task")
             android.util.Log.d("AutoGLM", "Already executing, returning")
@@ -277,14 +553,14 @@ class WakeWordService : Service() {
         android.util.Log.d("AutoGLM", "State changed to EXECUTING_TASK")
         onTaskStarted?.invoke(task)
 
-        scope.launch {
+        currentTaskJob = scope.launch {
             // 获取 WakeLock 防止 CPU 休眠
             acquireWakeLock()
             try {
-                // 使用 NonCancellable 防止任务被取消
-                withContext(NonCancellable) {
-                    phoneAgent?.run(task, resetHistory, context)
-                }
+                phoneAgent?.run(task, true, context, enablePlanning, enableOptimizer)
+            } catch (e: CancellationException) {
+                android.util.Log.i("AutoGLM", "Task cancelled")
+                onError?.invoke("Task stopped by user")
             } catch (e: Exception) {
                 onError?.invoke("Task error: ${e.message}")
             } finally {
@@ -316,6 +592,7 @@ class WakeWordService : Service() {
     fun stopCurrentTask() {
         android.util.Log.w("AutoGLM", "=== WakeWordService.stopCurrentTask() called ===")
         Exception("stopCurrentTask trace").printStackTrace()
+        currentTaskJob?.cancel()
         phoneAgent?.stop()
         _serviceState.value = ServiceState.IDLE
     }
@@ -365,6 +642,7 @@ class WakeWordService : Service() {
 
     override fun onDestroy() {
         android.util.Log.w("AutoGLM", "=== WakeWordService.onDestroy() called - SERVICE IS BEING DESTROYED ===")
+        instance = null
         super.onDestroy()
         stopCurrentTask()
         scope.cancel()

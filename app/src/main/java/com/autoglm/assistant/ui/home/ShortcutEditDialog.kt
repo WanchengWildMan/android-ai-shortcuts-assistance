@@ -11,6 +11,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,9 +20,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.autoglm.assistant.App
+import com.autoglm.assistant.ai.Message
+import com.autoglm.assistant.ai.ModelClient
+import com.autoglm.assistant.ai.ModelConfig
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 @Composable
@@ -31,15 +40,42 @@ fun ShortcutEditDialog(
     onDelete: ((String) -> Unit)? = null
 ) {
     val isEditing = shortcut != null
+    val prefs = App.instance.preferenceManager
     var title by remember { mutableStateOf(shortcut?.title ?: "") }
-    var prompt by remember { mutableStateOf(shortcut?.prompt ?: "") }
+    var promptValue by remember {
+        mutableStateOf(TextFieldValue(
+            text = shortcut?.prompt ?: "",
+            selection = TextRange((shortcut?.prompt ?: "").length)
+        ))
+    }
     var selectedIcon by remember { mutableStateOf(shortcut?.iconName ?: "Star") }
     var selectedColor by remember { mutableStateOf(shortcut?.colorHex ?: 0xFF64B5F6) }
+    // 新建快捷指令时使用全局设置作为默认值，编辑时使用快捷指令自己的设置
+    var enablePlanning by remember { mutableStateOf(shortcut?.enablePlanning ?: prefs.smartCoordinatorEnabled) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showAddParamDialog by remember { mutableStateOf(false) }
+    var showUnsavedConfirm by remember { mutableStateOf(false) }
     var newParamName by remember { mutableStateOf("") }
+    var isOptimizing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
-    Dialog(onDismissRequest = onDismiss) {
+    // 检查是否有未保存的修改
+    val hasUnsavedChanges = remember(title, promptValue.text, selectedIcon, selectedColor, enablePlanning) {
+        title != (shortcut?.title ?: "") ||
+        promptValue.text != (shortcut?.prompt ?: "") ||
+        selectedIcon != (shortcut?.iconName ?: "Star") ||
+        selectedColor != (shortcut?.colorHex ?: 0xFF64B5F6) ||
+        enablePlanning != (shortcut?.enablePlanning ?: prefs.smartCoordinatorEnabled)
+    }
+
+    Dialog(onDismissRequest = {
+        // 如果有未保存的修改，显示确认对话框
+        if (hasUnsavedChanges && (title.isNotBlank() || promptValue.text.isNotBlank())) {
+            showUnsavedConfirm = true
+        } else {
+            onDismiss()
+        }
+    }) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -72,14 +108,55 @@ fun ShortcutEditDialog(
 
                 // Prompt input
                 OutlinedTextField(
-                    value = prompt,
-                    onValueChange = { prompt = it },
+                    value = promptValue,
+                    onValueChange = { promptValue = it },
                     label = { Text("指令内容") },
                     placeholder = { Text("例如: 帮我点一份{食物}") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    maxLines = 4
-                )
+                    trailingIcon = {
+                        if (isOptimizing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            IconButton(
+                                onClick = {
+                                    if (promptValue.text.isNotBlank()) {
+                                        isOptimizing = true
+                                        scope.launch {
+                                            try {
+                                                    val config = ModelConfig(
+                                                        apiKey = prefs.apiKey,
+                                                        baseUrl = prefs.apiUrl,
+                                                        modelName = prefs.modelName
+                                                    )
+                                                    val optimizer = com.autoglm.assistant.core.planner.PromptOptimizer(config)
+                                                val optimized = optimizer.optimize(promptValue.text)
+                                                promptValue = TextFieldValue(
+                                                    text = optimized,
+                                                    selection = TextRange(optimized.length)
+                                                )
+                                            } catch (e: Exception) {
+                                                e.printStackTrace()
+                                            } finally {
+                                                isOptimizing = false
+                                            }
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    Icons.Default.AutoAwesome,
+                                    contentDescription = "优化指令",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        maxLines = 4
+                    )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -106,6 +183,32 @@ fun ShortcutEditDialog(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("添加参数", style = MaterialTheme.typography.labelMedium)
                     }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Enable planning toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "启用规划",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "让AI先规划步骤再执行（更准确但更慢）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = enablePlanning,
+                        onCheckedChange = { enablePlanning = it }
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -200,7 +303,9 @@ fun ShortcutEditDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // Buttons
                 Row(
@@ -226,19 +331,20 @@ fun ShortcutEditDialog(
 
                     Button(
                         onClick = {
-                            if (title.isNotBlank() && prompt.isNotBlank()) {
+                            if (title.isNotBlank() && promptValue.text.isNotBlank()) {
                                 onSave(
                                     ShortcutData(
                                         id = shortcut?.id ?: UUID.randomUUID().toString(),
                                         title = title,
-                                        prompt = prompt,
+                                        prompt = promptValue.text,
                                         iconName = selectedIcon,
-                                        colorHex = selectedColor
+                                        colorHex = selectedColor,
+                                        enablePlanning = enablePlanning
                                     )
                                 )
                             }
                         },
-                        enabled = title.isNotBlank() && prompt.isNotBlank()
+                        enabled = title.isNotBlank() && promptValue.text.isNotBlank()
                     ) {
                         Text("保存")
                     }
@@ -304,11 +410,21 @@ fun ShortcutEditDialog(
                 TextButton(
                     onClick = {
                         if (newParamName.isNotBlank()) {
-                            prompt = if (prompt.isEmpty()) {
-                                "{$newParamName}"
-                            } else {
-                                "$prompt{$newParamName}"
-                            }
+                            val paramText = "{$newParamName}"
+                            val currentText = promptValue.text
+                            val cursorPos = promptValue.selection.start
+
+                            // Insert parameter at cursor position
+                            val newText = currentText.substring(0, cursorPos) +
+                                         paramText +
+                                         currentText.substring(cursorPos)
+
+                            // Update text field value with cursor after inserted parameter
+                            promptValue = TextFieldValue(
+                                text = newText,
+                                selection = TextRange(cursorPos + paramText.length)
+                            )
+
                             newParamName = ""
                             showAddParamDialog = false
                         }
@@ -324,6 +440,45 @@ fun ShortcutEditDialog(
                     newParamName = ""
                 }) {
                     Text("取消")
+                }
+            }
+        )
+    }
+
+    // Unsaved changes confirmation dialog
+    if (showUnsavedConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnsavedConfirm = false },
+            title = { Text("保存修改") },
+            text = { Text("是否保存对快捷指令的修改？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (title.isNotBlank() && promptValue.text.isNotBlank()) {
+                            onSave(
+                                ShortcutData(
+                                    id = shortcut?.id ?: UUID.randomUUID().toString(),
+                                    title = title,
+                                    prompt = promptValue.text,
+                                    iconName = selectedIcon,
+                                    colorHex = selectedColor,
+                                    enablePlanning = enablePlanning
+                                )
+                            )
+                        }
+                        showUnsavedConfirm = false
+                    },
+                    enabled = title.isNotBlank() && promptValue.text.isNotBlank()
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showUnsavedConfirm = false
+                    onDismiss()
+                }) {
+                    Text("放弃")
                 }
             }
         )

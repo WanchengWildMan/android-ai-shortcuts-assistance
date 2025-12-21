@@ -59,6 +59,12 @@ class ModelClient(private val config: ModelConfig) {
         val contentBuilder = StringBuilder()
         val reader = BufferedReader(response.body?.charStream())
 
+        // Buffer to detect markers in streaming content
+        val buffer = StringBuilder()
+        val actionMarkers = listOf("finish(message=", "do(action=")
+        var inActionPhase = false
+        var thinkingSent = false
+
         reader.use { br ->
             var line: String?
             while (br.readLine().also { line = it } != null) {
@@ -82,7 +88,35 @@ class ModelClient(private val config: ModelConfig) {
                                 timeToFirstToken = System.currentTimeMillis() - startTime
                             }
                             contentBuilder.append(content)
-                            callback?.onToken(content)
+
+                            // If already in action phase, just accumulate content
+                            if (inActionPhase) {
+                                continue
+                            }
+
+                            // Add to buffer for marker detection
+                            buffer.append(content)
+
+                            // Check if any marker is present in buffer
+                            var markerFound = false
+                            for (marker in actionMarkers) {
+                                if (buffer.contains(marker)) {
+                                    // Marker found! Extract thinking part
+                                    val thinkingPart = buffer.substring(0, buffer.indexOf(marker))
+                                    if (!thinkingSent) {
+                                        callback?.onThinkingComplete(thinkingPart)
+                                        thinkingSent = true
+                                    }
+                                    inActionPhase = true
+                                    markerFound = true
+                                    break
+                                }
+                            }
+
+                            if (!markerFound) {
+                                // Call onToken only for thinking phase
+                                callback?.onToken(content)
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -95,7 +129,10 @@ class ModelClient(private val config: ModelConfig) {
         val rawContent = contentBuilder.toString()
         val (thinking, action) = parseResponse(rawContent)
 
-        callback?.onThinkingComplete(thinking)
+        // Only call onThinkingComplete if we didn't already send it during streaming
+        if (!thinkingSent && thinking.isNotBlank()) {
+            callback?.onThinkingComplete(thinking)
+        }
 
         val modelResponse = ModelResponse(
             thinking = thinking,

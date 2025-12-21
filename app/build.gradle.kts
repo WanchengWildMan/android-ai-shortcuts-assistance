@@ -96,6 +96,12 @@ dependencies {
     // libsu - Root Shell Library (by topjohnwu/Magisk author)
     implementation("com.github.topjohnwu.libsu:core:6.0.0")
 
+    // Markdown rendering
+    implementation("com.github.jeziellago:compose-markdown:0.5.0")
+
+    // Drag and drop reorderable list
+    implementation("sh.calvin.reorderable:reorderable:2.4.0")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
