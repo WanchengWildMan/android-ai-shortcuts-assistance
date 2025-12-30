@@ -12,12 +12,14 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.autoglm.assistant.util.ImageUtils
 import com.autoglm.assistant.util.ShellExecutor
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -35,6 +37,12 @@ class ScreenCapture(private val context: Context) {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    
+    private var latestBitmap: Bitmap? = null
+    private val bitmapLock = Any()
+    
+    private val handlerThread = HandlerThread("ScreenCapture").apply { start() }
+    private val handler = Handler(handlerThread.looper)
 
     private val displayMetrics: DisplayMetrics by lazy {
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -73,6 +81,24 @@ class ScreenCapture(private val context: Context) {
             PixelFormat.RGBA_8888,
             2
         )
+        
+        imageReader?.setOnImageAvailableListener({ reader ->
+            try {
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    val bitmap = imageToBitmap(image)
+                    image.close()
+                    if (bitmap != null) {
+                        synchronized(bitmapLock) {
+                            latestBitmap?.recycle()
+                            latestBitmap = bitmap
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }, handler)
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenCapture",
@@ -82,12 +108,12 @@ class ScreenCapture(private val context: Context) {
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface,
             null,
-            Handler(Looper.getMainLooper())
+            handler
         )
     }
 
     suspend fun capture(): Screenshot? = withContext(Dispatchers.IO) {
-        // Try MediaProjection first if available
+        // 如果 MediaProjection 可用，优先使用它
         if (mediaProjection != null && imageReader != null) {
             var bitmap = captureViaMediaProjection()
             if (bitmap != null) {
@@ -111,31 +137,25 @@ class ScreenCapture(private val context: Context) {
             }
         }
 
-        // Fallback to shell screencap (requires root/shell access)
+        // 回退到 shell screencap（需要 root/shell 权限）
         return@withContext captureViaShell()
     }
 
-    private suspend fun captureViaMediaProjection(): Bitmap? = suspendCancellableCoroutine { continuation ->
-        val reader = imageReader ?: run {
-            continuation.resume(null)
-            return@suspendCancellableCoroutine
+    private suspend fun captureViaMediaProjection(): Bitmap? = withContext(Dispatchers.IO) {
+        // 如果需要，等待第一帧（最多 1 秒）
+        if (latestBitmap == null) {
+            for (i in 0..10) {
+                synchronized(bitmapLock) {
+                    if (latestBitmap != null) return@withContext latestBitmap!!.copy(latestBitmap!!.config, false)
+                }
+                delay(100)
+            }
+            return@withContext null
         }
 
-        val handler = Handler(Looper.getMainLooper())
-        handler.postDelayed({
-            try {
-                val image: Image? = reader.acquireLatestImage()
-                if (image != null) {
-                    val bitmap = imageToBitmap(image)
-                    image.close()
-                    continuation.resume(bitmap)
-                } else {
-                    continuation.resume(null)
-                }
-            } catch (e: Exception) {
-                continuation.resume(null)
-            }
-        }, 100)
+        synchronized(bitmapLock) {
+            return@withContext latestBitmap?.copy(latestBitmap!!.config, false)
+        }
     }
 
     private fun imageToBitmap(image: Image): Bitmap? {
@@ -153,7 +173,7 @@ class ScreenCapture(private val context: Context) {
             )
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // Crop to actual screen size if needed
+            // 如果需要，裁剪到实际屏幕尺寸
             if (bitmap.width != screenWidth || bitmap.height != screenHeight) {
                 Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
             } else {
@@ -171,7 +191,7 @@ class ScreenCapture(private val context: Context) {
 
         val result = ShellExecutor.screenshot(screenshotPath)
         if (!result) {
-            // Return black placeholder for sensitive screens
+            // 对于敏感屏幕返回黑色占位图
             val blackBitmap = ImageUtils.createBlackBitmap(MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT)
             val base64 = ImageUtils.bitmapToBase64(blackBitmap)
             blackBitmap.recycle()
@@ -202,7 +222,7 @@ class ScreenCapture(private val context: Context) {
         val height = bitmap.height
         bitmap.recycle()
 
-        // Clean up screenshot file
+        // 清理截图文件
         screenshotFile.delete()
 
         return if (base64 != null) {
@@ -221,5 +241,10 @@ class ScreenCapture(private val context: Context) {
         imageReader = null
         mediaProjection?.stop()
         mediaProjection = null
+        handlerThread.quitSafely()
+        synchronized(bitmapLock) {
+            latestBitmap?.recycle()
+            latestBitmap = null
+        }
     }
 }

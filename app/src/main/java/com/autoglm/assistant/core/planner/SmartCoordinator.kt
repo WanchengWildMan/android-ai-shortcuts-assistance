@@ -217,7 +217,7 @@ class SmartCoordinator(
     }
 
     /**
-     * 监督子任务执行 - 检查UI Agent的执行结果并提供反馈
+     * 监督子任务执行 - 检查 UI Agent 的执行结果并提供反馈
      */
     suspend fun superviseExecution(
         subTask: PlannedSubTask,
@@ -230,7 +230,7 @@ class SmartCoordinator(
             // 如果未启用监督，默认认为成功
             return SupervisionResult(
                 status = SupervisionStatus.SUCCESS,
-                assessment = "Supervision disabled",
+                assessment = "监督功能已禁用",
                 correctionInstruction = null,
                 gatheredInfo = ""
             )
@@ -248,13 +248,13 @@ class SmartCoordinator(
                 Message.User(userPrompt, screenshotBase64)
             )
 
-            Logger.i(Logger.AGENT, "Calling coordinator to supervise sub-task ${subTask.index}")
+            Logger.i(Logger.AGENT, "正在调用协调器监督子任务 ${subTask.index}")
             Logger.startTimer("coordinator_supervision_request")
             onStreamStart?.invoke()
 
             val response = coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
                 override fun onToken(token: String) {
-                    // 将token传递给UI以实现打字机效果
+                    // 将 token 传递给 UI 以实现打字机效果
                     onStreamToken?.invoke(token)
                     Logger.d(Logger.AGENT, "Supervision token: $token")
                 }
@@ -276,22 +276,22 @@ class SmartCoordinator(
             })
 
             val supervisionTime = Logger.endTimer("coordinator_supervision_request", Logger.AGENT)
-            Logger.i(Logger.AGENT, "Supervision completed in ${supervisionTime}ms")
-            Logger.i(Logger.AGENT, "[COORDINATOR] Raw supervision response (${response.action.length} chars): ${response.action.take(500)}...")
+            Logger.i(Logger.AGENT, "监督完成，耗时 ${supervisionTime}ms")
+            Logger.i(Logger.AGENT, "[COORDINATOR] 原始监督响应 (${response.action.length} 字符): ${response.action.take(500)}...")
             
             val result = parseSupervisionResponse(response.action)
 
             if (result != null) {
-                Logger.i(Logger.AGENT, "Supervision status: ${result.status}")
-                Logger.i(Logger.AGENT, "Assessment: ${result.assessment}")
+                Logger.i(Logger.AGENT, "监督状态: ${result.status}")
+                Logger.i(Logger.AGENT, "评估: ${result.assessment}")
 
                 if (result.status == SupervisionStatus.SUCCESS && result.gatheredInfo.isNotBlank()) {
                     gatheredInfo.add("[子任务${subTask.index}] ${result.gatheredInfo}")
-                    Logger.i(Logger.AGENT, "Gathered info: ${result.gatheredInfo}")
+                    Logger.i(Logger.AGENT, "收集到的信息: ${result.gatheredInfo}")
                 }
 
                 if (result.status == SupervisionStatus.NEEDS_CORRECTION) {
-                    Logger.w(Logger.AGENT, "Correction needed: ${result.correctionInstruction}")
+                    Logger.w(Logger.AGENT, "需要纠正: ${result.correctionInstruction}")
                 }
             }
 
@@ -595,21 +595,37 @@ ${subTask.context}
 4. 如果有问题，提供清晰的纠正指令
 5. 提取和总结获取到的有用信息
 
+**关键判断原则：**
+1. **success判断**（非常重要）：
+   - ✅ 界面已改变且新界面符合子任务目标
+   - ✅ 操作已完成且无进行中的加载动画
+   - ✅ 用户能在截图中清楚看到任务已完成的视觉反馈
+   - ❌ 不要过度谨慎！如果目标明确达成就标记为success，不要因为"可能需要确认"就标记为uncertain
+
+2. **needs_correction判断**：
+   - 操作方向正确但有小偏差（如点击位置不精准）
+   - 找到的是相似但不完全正确的目标
+   - Agent找到了目标但遗漏了额外要求（如"少冰少糖"）
+
+3. **避免过度使用uncertain**：
+   - 只有在完全无法判断时才用uncertain（如图片不清楚、加载中等）
+   - 不要因为"还需要后续步骤"就标记为uncertain，每个子任务独立判断
+
 请严格按照以下JSON格式输出监督结果：
 
 ```json
 {
   "status": "success | needs_correction | failed | uncertain",
-  "assessment": "对执行情况的详细评估",
+  "assessment": "对执行情况的详细评估（必须明确说明达成情况）",
   "correction_instruction": "纠正指令（如果status是needs_correction）",
   "gathered_info": "从当前截图或执行过程中获取到的有用信息"
 }```
 
 **状态说明：**
-- **success**: 子任务已正确完成，达成了预期目标
-- **needs_correction**: 操作方向正确但有偏差，需要纠正
-- **failed**: 操作完全错误，未能达成目标
-- **uncertain**: 无法判断，需要继续观察
+- **success**: 子任务已正确完成，达成了预期目标。即使还有后续步骤，只要这个子任务的目标达成就标记为success
+- **needs_correction**: 操作方向正确但有偏差，需要纠正。Agent需要调整才能正确达成目标
+- **failed**: 操作完全错误或进入了错误的应用/界面，完全未能达成目标
+- **uncertain**: 无法判断当前状态（如加载中、图片不清楚等）。谨慎使用此状态，优先选择success或needs_correction
 
 **纠正指令原则：**
 1. 指令要具体、可执行

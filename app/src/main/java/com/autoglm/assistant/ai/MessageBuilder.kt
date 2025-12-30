@@ -35,7 +35,7 @@ object MessageBuilder {
         // 检测是否在 AutoGLM 应用中，如果是，添加警告
         if (currentApp.contains("AutoGLM", ignoreCase = true) ||
             currentApp.contains("Assistant", ignoreCase = true)) {
-            info["warning"] = "You are in AutoGLM Assistant app. DO NOT click on the shortcut cards! Launch the target app instead."
+            info["warning"] = "你当前在 AutoGLM 助手应用中。请勿点击快捷指令卡片！请直接启动目标应用。"
         }
 
         return gson.toJson(info)
@@ -44,12 +44,12 @@ object MessageBuilder {
     fun buildTaskPrompt(task: String, screenInfo: String): String {
         return """$task
 
-** Screen Info **
+** 屏幕信息 **
 $screenInfo"""
     }
 
     fun buildContinuePrompt(screenInfo: String): String {
-        return """** Screen Info **
+        return """** 屏幕信息 **
 $screenInfo"""
     }
 

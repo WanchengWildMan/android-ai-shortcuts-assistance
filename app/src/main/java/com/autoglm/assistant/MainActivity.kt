@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
         if (allGranted) {
             startWakeWordService()
         } else {
-            Toast.makeText(this, "Permissions required", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "需要必要权限才能运行", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -155,21 +155,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startWakeWordService() {
-        // Check accessibility service
+        // 检查无障碍服务
         if (!isAccessibilityServiceEnabled()) {
-            Toast.makeText(this, "Please enable accessibility service", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "请启用无障碍服务", Toast.LENGTH_LONG).show()
             openAccessibilitySettings()
             return
         }
 
-        // Check overlay permission
+        // 检查悬浮窗权限
         if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Please grant overlay permission", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "请授予悬浮窗权限", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             return
         }
 
-        // Start service
+        // 启动服务
         val serviceIntent = Intent(this, WakeWordService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
@@ -201,10 +201,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopCurrentTask() {
-        android.util.Log.w("AutoGLM", "=== MainActivity.stopCurrentTask() called - UI requested stop ===")
+        android.util.Log.w("AutoGLM", "=== MainActivity.stopCurrentTask() 被调用 - UI 请求停止 ===")
         Exception("MainActivity stopCurrentTask trace").printStackTrace()
         wakeWordService?.stopCurrentTask()
-        Toast.makeText(this, "Task stopped", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "任务已停止", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestScreenCapturePermission() {
@@ -226,7 +226,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openSettings() {
-        // Navigate to settings screen
+        // 跳转到设置界面
         startActivity(Intent(this, SettingsActivity::class.java))
     }
 }
@@ -264,12 +264,12 @@ fun MainScreen(
     val messageManager = remember { MessageManager(context) }
     val scope = rememberCoroutineScope()
 
-    // Load conversations on start
+    // 启动时加载对话
     LaunchedEffect(Unit) {
         val loaded = messageManager.loadConversations()
         conversations.clear()
         conversations.addAll(loaded)
-        // Auto-select the most recent conversation or create new one
+        // 自动选择最近的对话或创建新对话
         if (loaded.isNotEmpty()) {
             currentConversation = loaded.first()
             messages.clear()
@@ -305,15 +305,15 @@ fun MainScreen(
 
     fun addMessage(message: ChatMessage) {
         messages.add(message)
-        // Update current conversation
+        // 更新当前对话
         val conv = currentConversation ?: createNewConversation()
         conv.messages.add(message)
         conv.timestamp = System.currentTimeMillis()
-        // Auto-generate title from first user message
-        if (conv.title == "New Chat" && message.isUser) {
+        // 从第一条用户消息自动生成标题
+        if (conv.title == "新对话" && message.isUser) {
             conv.title = message.content.take(30) + if (message.content.length > 30) "..." else ""
         }
-        // Update list order
+        // 更新列表顺序
         conversations.remove(conv)
         conversations.add(0, conv)
         currentConversation = conv
@@ -325,7 +325,7 @@ fun MainScreen(
     fun updateMessage(index: Int, message: ChatMessage) {
         if (index >= 0 && index < messages.size) {
             messages[index] = message
-            // Update current conversation
+            // 更新当前对话
             val conv = currentConversation
             if (conv != null && index < conv.messages.size) {
                 conv.messages[index] = message
@@ -588,37 +588,37 @@ fun MainScreen(
                     TopAppBar(
                         title = {
                             Text(
-                                currentConversation?.title ?: "New Chat",
+                                currentConversation?.title ?: "新对话",
                                 style = MaterialTheme.typography.titleLarge,
                                 maxLines = 1
                             )
                         },
                         actions = {
                             IconButton(onClick = { navController.navigate("conversations") }) {
-                                Icon(Icons.Default.List, contentDescription = "Conversations")
+                                Icon(Icons.Default.List, contentDescription = "对话列表")
                             }
                             IconButton(onClick = onOpenSettings) {
-                                Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                Icon(Icons.Default.Settings, contentDescription = "设置")
                             }
                         },
                         navigationIcon = {
                             IconButton(onClick = { navController.popBackStack() }) {
-                                Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                                Icon(Icons.Default.ArrowBack, contentDescription = "返回")
                             }
                         }
                     )
                 }
                 "conversations" -> {
                     TopAppBar(
-                        title = { Text("Conversations", style = MaterialTheme.typography.titleLarge) },
+                        title = { Text("对话历史", style = MaterialTheme.typography.titleLarge) },
                         navigationIcon = {
                             IconButton(onClick = { navController.popBackStack() }) {
-                                Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                                Icon(Icons.Default.ArrowBack, contentDescription = "返回")
                             }
                         },
                         actions = {
                             IconButton(onClick = onOpenSettings) {
-                                Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                Icon(Icons.Default.Settings, contentDescription = "设置")
                             }
                         }
                     )
@@ -643,14 +643,14 @@ fun MainScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // Status Indicator
+                    // 状态指示器
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val (icon, color, text) = when (serviceState?.value) {
-                            WakeWordService.ServiceState.LISTENING_WAKE_WORD -> Triple(Icons.Default.Mic, MaterialTheme.colorScheme.primary, "Listening")
-                            WakeWordService.ServiceState.LISTENING_COMMAND -> Triple(Icons.Default.RecordVoiceOver, MaterialTheme.colorScheme.tertiary, "Listening Command")
-                            WakeWordService.ServiceState.EXECUTING_TASK -> Triple(Icons.Default.PlayArrow, MaterialTheme.colorScheme.secondary, "Executing")
-                            WakeWordService.ServiceState.PROCESSING -> Triple(Icons.Default.Pending, MaterialTheme.colorScheme.primary, "Processing")
-                            else -> Triple(Icons.Default.PowerSettingsNew, MaterialTheme.colorScheme.outline, "Idle")
+                            WakeWordService.ServiceState.LISTENING_WAKE_WORD -> Triple(Icons.Default.Mic, MaterialTheme.colorScheme.primary, "正在监听唤醒词")
+                            WakeWordService.ServiceState.LISTENING_COMMAND -> Triple(Icons.Default.RecordVoiceOver, MaterialTheme.colorScheme.tertiary, "正在监听指令")
+                            WakeWordService.ServiceState.EXECUTING_TASK -> Triple(Icons.Default.PlayArrow, MaterialTheme.colorScheme.secondary, "正在执行")
+                            WakeWordService.ServiceState.PROCESSING -> Triple(Icons.Default.Pending, MaterialTheme.colorScheme.primary, "正在处理")
+                            else -> Triple(Icons.Default.PowerSettingsNew, MaterialTheme.colorScheme.outline, "空闲")
                         }
                         
                         Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
@@ -658,12 +658,12 @@ fun MainScreen(
                         Text(text, style = MaterialTheme.typography.labelLarge, color = color)
                     }
 
-                    // Controls
+                    // 控制按钮
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         IconButton(onClick = onRequestScreenCapture) {
                             Icon(
                                 Icons.Default.ScreenShare,
-                                contentDescription = "Screen Permission",
+                                contentDescription = "屏幕权限",
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
@@ -685,7 +685,7 @@ fun MainScreen(
                         ) {
                             Icon(
                                 imageVector = if (isServiceRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                                contentDescription = if (isServiceRunning) "Stop" else "Start"
+                                contentDescription = if (isServiceRunning) "停止" else "启动"
                             )
                         }
                     }
@@ -817,14 +817,30 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalShowAgentProcess = remember { prefs.showAgentProcess }
     val originalSmartCoordinatorEnabled = remember { prefs.smartCoordinatorEnabled }
     val originalCoordinatorApiUrl = remember { prefs.coordinatorApiUrl }
-    val originalCoordinatorApiKey = remember { prefs.coordinatorApiKey }
+    val originalCoordinatorApiKey = remember {
+        val model = prefs.coordinatorModelName
+        when {
+            model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
+            model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
+            model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+            else -> prefs.coordinatorApiKey
+        }
+    }
     val originalCoordinatorModelName = remember { prefs.coordinatorModelName }
     val originalSupervisionEnabled = remember { prefs.supervisionEnabled }
     val originalMaxCorrections = remember { prefs.maxCorrections.toString() }
     // Prompt Optimizer originals
     val originalPromptOptimizerEnabled = remember { prefs.promptOptimizerEnabled }
     val originalOptimizerApiUrl = remember { prefs.optimizerApiUrl }
-    val originalOptimizerApiKey = remember { prefs.optimizerApiKey }
+    val originalOptimizerApiKey = remember {
+        val model = prefs.optimizerModelName
+        when {
+            model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
+            model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
+            model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
+            else -> prefs.optimizerApiKey
+        }
+    }
     val originalOptimizerModelName = remember { prefs.optimizerModelName }
     val originalTaskSummaryEnabled = remember { prefs.taskSummaryEnabled }
 
@@ -839,7 +855,17 @@ fun SettingsScreen(onBack: () -> Unit) {
     var showAgentProcess by remember { mutableStateOf(prefs.showAgentProcess) }
     var smartCoordinatorEnabled by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
     var coordinatorApiUrl by remember { mutableStateOf(prefs.coordinatorApiUrl) }
-    var coordinatorApiKey by remember { mutableStateOf(prefs.coordinatorApiKey) }
+    var coordinatorApiKey by remember {
+        val model = prefs.coordinatorModelName
+        mutableStateOf(
+            when {
+                model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
+                model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
+                model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+                else -> prefs.coordinatorApiKey
+            }
+        )
+    }
     var coordinatorModelName by remember { mutableStateOf(prefs.coordinatorModelName) }
     var coordinatorModelDropdownExpanded by remember { mutableStateOf(false) }
     var supervisionEnabled by remember { mutableStateOf(prefs.supervisionEnabled) }
@@ -847,7 +873,17 @@ fun SettingsScreen(onBack: () -> Unit) {
     // Prompt Optimizer states
     var promptOptimizerEnabled by remember { mutableStateOf(prefs.promptOptimizerEnabled) }
     var optimizerApiUrl by remember { mutableStateOf(prefs.optimizerApiUrl) }
-    var optimizerApiKey by remember { mutableStateOf(prefs.optimizerApiKey) }
+    var optimizerApiKey by remember {
+        val model = prefs.optimizerModelName
+        mutableStateOf(
+            when {
+                model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
+                model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
+                model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
+                else -> prefs.optimizerApiKey
+            }
+        )
+    }
     var optimizerModelName by remember { mutableStateOf(prefs.optimizerModelName) }
     var optimizerModelDropdownExpanded by remember { mutableStateOf(false) }
     var taskSummaryEnabled by remember { mutableStateOf(prefs.taskSummaryEnabled) }
@@ -899,7 +935,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         val title = if (isChinese) "设置" else "Settings"
         val save = if (isChinese) "保存" else "Save"
         val saved = if (isChinese) "设置已保存" else "Settings saved"
-        val modelSettings = if (isChinese) "模型设置" else "Model Settings"
+        val modelSettings = if (isChinese) "AutoGLM模型设置" else "AutoGLM Model Settings"
         val apiUrlLabel = "API URL"
         val apiKeyLabel = "API Key"
         val modelNameLabel = if (isChinese) "模型名称" else "Model Name"
@@ -978,14 +1014,26 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.showAgentProcess = showAgentProcess
         prefs.smartCoordinatorEnabled = smartCoordinatorEnabled
         prefs.coordinatorApiUrl = coordinatorApiUrl
-        prefs.coordinatorApiKey = coordinatorApiKey
+        // Save coordinator API key to provider-specific slot
+        when {
+            coordinatorModelName.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey
+            coordinatorModelName.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey
+            coordinatorModelName.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey
+            else -> prefs.coordinatorApiKey = coordinatorApiKey
+        }
         prefs.coordinatorModelName = coordinatorModelName
         prefs.supervisionEnabled = supervisionEnabled
         prefs.maxCorrections = maxCorrections.toIntOrNull() ?: 2
         // Prompt Optimizer settings
         prefs.promptOptimizerEnabled = promptOptimizerEnabled
         prefs.optimizerApiUrl = optimizerApiUrl
-        prefs.optimizerApiKey = optimizerApiKey
+        // Save optimizer API key to provider-specific slot
+        when {
+            optimizerModelName.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek = optimizerApiKey
+            optimizerModelName.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel = optimizerApiKey
+            optimizerModelName.startsWith("doubao") -> prefs.optimizerApiKeyDoubao = optimizerApiKey
+            else -> prefs.optimizerApiKey = optimizerApiKey
+        }
         prefs.optimizerModelName = optimizerModelName
         prefs.taskSummaryEnabled = taskSummaryEnabled
 
@@ -1187,7 +1235,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 label = { Text(strings.coordinatorApiUrlLabel) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                supportingText = { Text("DeepSeek: https://api.deepseek.com/v1") }
+                supportingText = { Text("DeepSeek: https://api.deepseek.com/v1   ·   Doubao(豆包): https://ark.cn-beijing.volces.com/api/v3") }
             )
 
             OutlinedTextField(
@@ -1202,7 +1250,8 @@ fun SettingsScreen(onBack: () -> Unit) {
             val coordinatorModels = listOf(
                 "deepseek-chat" to "DeepSeek Chat",
                 "glm-4-plus" to "智谱 GLM-4 Plus",
-                "glm-4" to "智谱 GLM-4"
+                "glm-4" to "智谱 GLM-4",
+                "doubao-seed-1-6-251015" to "豆包 Seed 1.6"
             )
 
             ExposedDropdownMenuBox(
@@ -1228,6 +1277,20 @@ fun SettingsScreen(onBack: () -> Unit) {
                             text = { Text(displayName) },
                             onClick = {
                                 coordinatorModelName = model
+                                // Auto-switch Coordinator API URL based on selected model
+                                coordinatorApiUrl = when {
+                                    model.startsWith("deepseek") -> "https://api.deepseek.com/v1"
+                                    model.startsWith("glm-") -> "https://open.bigmodel.cn/api/paas/v4"
+                                    model.startsWith("doubao") -> "https://ark.cn-beijing.volces.com/api/v3"
+                                    else -> coordinatorApiUrl
+                                }
+                                // Auto-switch Coordinator API Key based on selected model
+                                coordinatorApiKey = when {
+                                    model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
+                                    model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
+                                    model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+                                    else -> coordinatorApiKey
+                                }
                                 coordinatorModelDropdownExpanded = false
                             },
                             leadingIcon = if (coordinatorModelName == model) {
@@ -1298,7 +1361,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     label = { Text(strings.optimizerApiUrlLabel) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    supportingText = { Text("DeepSeek: https://api.deepseek.com/v1") }
+                    supportingText = { Text("DeepSeek: https://api.deepseek.com/v1   ·   Doubao(豆包): https://ark.cn-beijing.volces.com/api/v3") }
                 )
 
                 OutlinedTextField(
@@ -1313,7 +1376,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                 val optimizerModels = listOf(
                     "deepseek-chat" to "DeepSeek Chat",
                     "glm-4-plus" to "智谱 GLM-4 Plus",
-                    "glm-4" to "智谱 GLM-4"
+                    "glm-4" to "智谱 GLM-4",
+                    "doubao-seed-1-6-251015" to "豆包 Seed 1.6"
                 )
 
                 ExposedDropdownMenuBox(
@@ -1339,6 +1403,20 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 text = { Text(displayName) },
                                 onClick = {
                                     optimizerModelName = model
+                                    // Auto-switch Optimizer API URL based on selected model
+                                    optimizerApiUrl = when {
+                                        model.startsWith("deepseek") -> "https://api.deepseek.com/v1"
+                                        model.startsWith("glm-") -> "https://open.bigmodel.cn/api/paas/v4"
+                                        model.startsWith("doubao") -> "https://ark.cn-beijing.volces.com/api/v3"
+                                        else -> optimizerApiUrl
+                                    }
+                                    // Auto-switch Optimizer API Key based on selected model
+                                    optimizerApiKey = when {
+                                        model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
+                                        model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
+                                        model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
+                                        else -> optimizerApiKey
+                                    }
                                     optimizerModelDropdownExpanded = false
                                 },
                                 leadingIcon = if (optimizerModelName == model) {

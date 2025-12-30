@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.IBinder
 import android.os.Vibrator
@@ -53,11 +54,11 @@ class WakeWordService : Service() {
     private val _lastRecognizedText = MutableStateFlow("")
     val lastRecognizedText: StateFlow<String> = _lastRecognizedText
 
-    // Agent message types
+    // Agent 消息类型
     enum class AgentMessageType {
-        THINKING,  // Thinking process
-        ACTION,    // Action being executed
-        RESULT     // Final result
+        THINKING,  // 思考过程
+        ACTION,    // 正在执行的动作
+        RESULT     // 最终结果
     }
 
     data class AgentMessage(
@@ -66,7 +67,7 @@ class WakeWordService : Service() {
         val timestamp: Long = System.currentTimeMillis()
     )
 
-    // Coordinator消息类型
+    // Coordinator 消息类型
     enum class CoordinatorMessageType {
         OPTIMIZER_STREAMING,    // 优化器流式输出中
         OPTIMIZER_COMPLETE,     // 优化完成
@@ -87,15 +88,15 @@ class WakeWordService : Service() {
         val timestamp: Long = System.currentTimeMillis()
     )
 
-    // Agent response message with type to filter by setting
+    // 带有类型标签的 Agent 响应消息，用于根据设置进行过滤
     private val _agentMessage = MutableStateFlow<AgentMessage?>(null)
     val agentMessage: StateFlow<AgentMessage?> = _agentMessage
 
-    // Coordinator消息 - 使用类型标签区分
+    // Coordinator 消息 - 使用类型标签区分
     private val _coordinatorMessage = MutableStateFlow<CoordinatorMessage?>(null)
     val coordinatorMessage: StateFlow<CoordinatorMessage?> = _coordinatorMessage
 
-    // Callbacks for UI updates
+    // 用于 UI 更新的回调
     var onWakeWordDetected: (() -> Unit)? = null
     var onSpeechRecognized: ((String) -> Unit)? = null
     var onTaskStarted: ((String) -> Unit)? = null
@@ -123,7 +124,15 @@ class WakeWordService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(App.NOTIFICATION_ID, createNotification())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            startForeground(
+                App.NOTIFICATION_ID,
+                createNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else {
+            startForeground(App.NOTIFICATION_ID, createNotification())
+        }
         startWakeWordListening()
         return START_STICKY
     }
@@ -131,7 +140,7 @@ class WakeWordService : Service() {
     private fun initializeComponents() {
         val prefs = App.instance.preferenceManager
 
-        // Initialize wake word engine
+        // 初始化唤醒词引擎
         wakeWordEngine = WakeWordEngine(this, prefs.porcupineAccessKey)
         wakeWordEngine.onWakeWordDetected = {
             handleWakeWordDetected()
@@ -140,23 +149,23 @@ class WakeWordService : Service() {
             onError?.invoke(error)
         }
 
-        // Initialize speech recognizer
+        // 初始化语音识别
         speechRecognizer = SpeechRecognizer(this)
         speechRecognizer.onResult = { result ->
             handleSpeechResult(result)
         }
         speechRecognizer.onError = { error ->
             onError?.invoke(error)
-            // Resume wake word listening on error
+            // 出错时恢复唤醒词监听
             startWakeWordListening()
         }
         speechRecognizer.initialize()
 
-        // Initialize TTS
+        // 初始化 TTS
         textToSpeech = TextToSpeech(this)
         textToSpeech.initialize()
 
-        // Initialize phone agent
+        // 初始化 PhoneAgent
         initializePhoneAgent()
     }
 
@@ -174,11 +183,17 @@ class WakeWordService : Service() {
         val plannerConfig = if (prefs.coordinatorApiUrl.isNotBlank() &&
                                 prefs.coordinatorApiKey.isNotBlank() &&
                                 prefs.coordinatorModelName.isNotBlank()) {
-            val coordinatorModelConfig = ModelConfig(
-                baseUrl = prefs.coordinatorApiUrl,
-                apiKey = prefs.coordinatorApiKey,
-                modelName = prefs.coordinatorModelName
-            )
+                val coordinatorApiKey = when {
+                    prefs.coordinatorModelName.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
+                    prefs.coordinatorModelName.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
+                    prefs.coordinatorModelName.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+                    else -> prefs.coordinatorApiKey
+                }
+                val coordinatorModelConfig = ModelConfig(
+                    baseUrl = prefs.coordinatorApiUrl,
+                    apiKey = coordinatorApiKey,
+                    modelName = prefs.coordinatorModelName,
+                )
             TaskPlannerConfig(
                 enabled = prefs.smartCoordinatorEnabled,  // 这个字段现在表示"默认启用规划"
                 plannerModelConfig = coordinatorModelConfig,
@@ -195,9 +210,15 @@ class WakeWordService : Service() {
 
         // 创建Prompt优化器配置（如果启用）
         val optimizerConfig = if (prefs.promptOptimizerEnabled) {
+            val optimizerApiKey = when {
+                prefs.optimizerModelName.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
+                prefs.optimizerModelName.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
+                prefs.optimizerModelName.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
+                else -> prefs.optimizerApiKey
+            }
             val optimizerModelConfig = ModelConfig(
                 baseUrl = prefs.optimizerApiUrl,
-                apiKey = prefs.optimizerApiKey,
+                apiKey = optimizerApiKey,
                 modelName = prefs.optimizerModelName
             )
             PromptOptimizerConfig(
@@ -223,21 +244,21 @@ class WakeWordService : Service() {
             initialize()
 
             onThinking = { thinking ->
-                // Emit thinking process message
+                // 发送思考过程消息
                 _agentMessage.value = AgentMessage(thinking, AgentMessageType.THINKING)
             }
 
             onAction = { action ->
-                // Emit action message
+                // 发送动作消息
                 _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
             }
 
-            // Prompt优化器回调 - 支持流式输出
+            // Prompt 优化器回调 - 支持流式输出
             var optimizerStreamingContent = StringBuilder()
             var isOptimizing = false
             var summaryStreamingContent = StringBuilder()
             var isSummarizing = false
-            var summaryAlreadySent = false  // Flag to track if summary was sent via SUMMARY_COMPLETE
+            var summaryAlreadySent = false  // 用于跟踪总结是否已通过 SUMMARY_COMPLETE 发送
 
             onPromptOptimizing = {
                 isOptimizing = true
@@ -258,7 +279,7 @@ class WakeWordService : Service() {
 
             onTaskSummarizing = {
                 isSummarizing = true
-                summaryAlreadySent = false  // Reset flag for new summary generation
+                summaryAlreadySent = false  // 为新的总结生成重置标志
                 summaryStreamingContent.clear()
                 _coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.SUMMARY_STREAMING,
@@ -268,14 +289,14 @@ class WakeWordService : Service() {
 
             onTaskSummary = { summary ->
                 isSummarizing = false
-                summaryAlreadySent = true  // Mark that summary was sent via SUMMARY_COMPLETE
+                summaryAlreadySent = true  // 标记总结已通过 SUMMARY_COMPLETE 发送
                 _coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.SUMMARY_COMPLETE,
                     content = summary
                 )
             }
 
-            // SmartCoordinator结构化回调 - 显示格式化内容
+            // SmartCoordinator 结构化回调 - 显示格式化内容
             var plannerStreamingContent = StringBuilder()
             var isPlanning = false
 
@@ -543,6 +564,21 @@ class WakeWordService : Service() {
 
     fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, context: List<SerializableMessage> = emptyList()) {
         android.util.Log.d("AutoGLM", "WakeWordService.executeTask called: task=$task, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer, currentState=${_serviceState.value}")
+
+        // Upgrade foreground service type to include MediaProjection
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val types = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                }
+                startForeground(App.NOTIFICATION_ID, createNotification(), types)
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "Failed to upgrade foreground service type: ${e.message}")
+            }
+        }
+
         if (_serviceState.value == ServiceState.EXECUTING_TASK) {
             onError?.invoke("Already executing a task")
             android.util.Log.d("AutoGLM", "Already executing, returning")

@@ -250,6 +250,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     addMessage(ChatMessage(content = displayContent, isUser = false))
                     optimizerMessageIndex = messages.size - 1
                 }
+
+                // 优化完成后，重置优化器消息索引，避免后续总结消息覆盖优化结果
+                if (msg.type == WakeWordService.CoordinatorMessageType.OPTIMIZER_COMPLETE) {
+                    optimizerMessageIndex = -1
+                }
             }
             WakeWordService.CoordinatorMessageType.PLANNING_STREAMING,
             WakeWordService.CoordinatorMessageType.PLAN_COMPLETE -> {
@@ -278,7 +283,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING,
             WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {
-                if (summaryMessageIndex >= 0 && summaryMessageIndex < messages.size) {
+                // 总结消息始终作为新消息添加，不覆盖优化结果
+                if (summaryMessageIndex >= 0 && summaryMessageIndex < messages.size && msg.type == WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING) {
                     val oldMsg = messages[summaryMessageIndex]
                     updateMessage(summaryMessageIndex, ChatMessage(
                         id = oldMsg.id,
@@ -287,6 +293,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         timestamp = oldMsg.timestamp
                     ))
                 } else {
+                    // 对于SUMMARY_COMPLETE或新的SUMMARY_STREAMING，总是添加新消息
                     addMessage(ChatMessage(content = displayContent, isUser = false))
                     summaryMessageIndex = messages.size - 1
                 }

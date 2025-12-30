@@ -251,8 +251,8 @@ object ShellExecutor {
             kotlinx.coroutines.delay(200)
 
             if (text.isEmpty()) {
-                Logger.d(TAG, "[TYPE_DONE] Cleared input field")
-                return Result(true, "Cleared input field", "", 0)
+                Logger.d(TAG, "[TYPE_DONE] 已清空输入框")
+                return Result(true, "已清空输入框", "", 0)
             }
 
             // 2. 设置剪贴板内容
@@ -270,8 +270,8 @@ object ShellExecutor {
             Logger.d(TAG, "[TYPE_DONE] success=${pasteResult.success}")
             return pasteResult
         } catch (e: Exception) {
-            Logger.e(TAG, "[TYPE] Exception: ${e.message}", e)
-            return Result(false, "", "Exception: ${e.message}", -1)
+            Logger.e(TAG, "[TYPE] 异常: ${e.message}", e)
+            return Result(false, "", "异常: ${e.message}", -1)
         }
     }
 
@@ -302,13 +302,13 @@ object ShellExecutor {
 
             // 如果 clipper 不可用，尝试 service call 方式
             if (!setClipResult.success || !setClipResult.stdout.contains("result=0")) {
-                Logger.d(TAG, "[TYPE_CLIP] clipper not available, trying service call")
+                Logger.d(TAG, "[TYPE_CLIP] clipper 不可用，尝试 service call 方式")
                 // 使用 service call 设置剪贴板
                 val base64Text = android.util.Base64.encodeToString(text.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                 val serviceResult = execute("echo '$text' | am broadcast -a ADB_INPUT_TEXT --es msg '$text'", useRoot = true)
                 if (!serviceResult.success) {
                     // 最后尝试：直接通过应用 Context 设置（可能不可靠）
-                    Logger.d(TAG, "[TYPE_CLIP] Trying Context clipboard")
+                    Logger.d(TAG, "[TYPE_CLIP] 尝试使用 Context 剪贴板")
                     try {
                         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                             val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
@@ -316,28 +316,28 @@ object ShellExecutor {
                             clipboard.setPrimaryClip(android.content.ClipData.newPlainText("input", text))
                         }
                     } catch (e: Exception) {
-                        Logger.e(TAG, "[TYPE_CLIP] Context clipboard failed: ${e.message}")
-                        return Result(false, "", "Failed to set clipboard", -1)
+                        Logger.e(TAG, "[TYPE_CLIP] Context 剪贴板设置失败: ${e.message}")
+                        return Result(false, "", "设置剪贴板失败", -1)
                     }
                 }
             }
             kotlinx.coroutines.delay(150)
 
             // 2. 全选当前内容
-            Logger.d(TAG, "[TYPE_CLIP] Select all")
+            Logger.d(TAG, "[TYPE_CLIP] 全选")
             execute("input keyevent KEYCODE_CTRL_LEFT KEYCODE_A", useRoot = true)
             kotlinx.coroutines.delay(100)
 
             // 3. 粘贴
-            Logger.d(TAG, "[TYPE_CLIP] Pasting")
+            Logger.d(TAG, "[TYPE_CLIP] 粘贴")
             val pasteResult = execute("input keyevent KEYCODE_PASTE", useRoot = true)
             kotlinx.coroutines.delay(200)
 
             Logger.d(TAG, "[TYPE_CLIP_DONE] success=${pasteResult.success}")
             return pasteResult
         } catch (e: Exception) {
-            Logger.e(TAG, "[TYPE_CLIP] Exception: ${e.message}", e)
-            return Result(false, "", "Exception: ${e.message}", -1)
+            Logger.e(TAG, "[TYPE_CLIP] 异常: ${e.message}", e)
+            return Result(false, "", "异常: ${e.message}", -1)
         }
     }
 
@@ -354,43 +354,43 @@ object ShellExecutor {
             // 1. 获取当前输入法
             val currentImeResult = execute("settings get secure default_input_method", useRoot = true)
             val currentIme = if (currentImeResult.success) currentImeResult.stdout.trim() else ""
-            Logger.d(TAG, "[TYPE_ADB] Current IME: $currentIme")
+            Logger.d(TAG, "[TYPE_ADB] 当前输入法: $currentIme")
 
             // 如果已经是 ADB Keyboard，直接发送
             if (currentIme.contains("adbkeyboard")) {
-                Logger.d(TAG, "[TYPE_ADB] Already using ADB Keyboard, sending directly")
+                Logger.d(TAG, "[TYPE_ADB] 已在使用 ADB Keyboard，直接发送")
                 val escapedText = text.replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
                 return execute("am broadcast -a ADB_INPUT_TEXT --es msg \"$escapedText\"", useRoot = true)
             }
 
             // 2. 切换到 ADB Keyboard
-            Logger.d(TAG, "[TYPE_ADB] Switching to ADB Keyboard")
+            Logger.d(TAG, "[TYPE_ADB] 正在切换到 ADB Keyboard")
             val switchResult = execute("ime enable $adbKeyboardId && ime set $adbKeyboardId", useRoot = true)
             if (!switchResult.success) {
-                Logger.e(TAG, "[TYPE_ADB] Failed to switch: ${switchResult.stderr}")
-                return Result(false, "", "Failed to switch to ADB Keyboard", -1)
+                Logger.e(TAG, "[TYPE_ADB] 切换失败: ${switchResult.stderr}")
+                return Result(false, "", "切换到 ADB Keyboard 失败", -1)
             }
 
             kotlinx.coroutines.delay(delayMs.toLong())
 
             // 3. 发送文本
             val escapedText = text.replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
-            Logger.d(TAG, "[TYPE_ADB] Sending text")
+            Logger.d(TAG, "[TYPE_ADB] 正在发送文本")
             val inputResult = execute("am broadcast -a ADB_INPUT_TEXT --es msg \"$escapedText\"", useRoot = true)
 
             kotlinx.coroutines.delay(200)
 
             // 4. 恢复原输入法
             if (currentIme.isNotEmpty()) {
-                Logger.d(TAG, "[TYPE_ADB] Restoring IME: $currentIme")
+                Logger.d(TAG, "[TYPE_ADB] 正在恢复输入法: $currentIme")
                 execute("ime set $currentIme", useRoot = true)
             }
 
             kotlinx.coroutines.delay(300)
             return inputResult
         } catch (e: Exception) {
-            Logger.e(TAG, "[TYPE_ADB] Exception: ${e.message}", e)
-            return Result(false, "", "Exception: ${e.message}", -1)
+            Logger.e(TAG, "[TYPE_ADB] 异常: ${e.message}", e)
+            return Result(false, "", "异常: ${e.message}", -1)
         }
     }
 

@@ -41,15 +41,15 @@ class WakeWordEngine(
 
             when {
                 keywordPath != null -> {
-                    // Use custom wake word file from path
+                    // 使用指定路径的自定义唤醒词文件
                     builder.setKeywordPath(keywordPath)
                 }
                 keywordName == "XIAOAI" -> {
-                    // Use 小爱 custom wake word from assets
+                    // 使用 assets 中的“小爱”自定义唤醒词
                     builder.setKeywordPath("xiaoai.ppn")
                 }
                 else -> {
-                    // Use built-in keyword based on keywordName
+                    // 使用基于 keywordName 的内置关键词
                     val keyword = try {
                         Porcupine.BuiltInKeyword.valueOf(keywordName)
                     } catch (e: IllegalArgumentException) {
@@ -62,7 +62,7 @@ class WakeWordEngine(
             porcupine = builder.build(context)
             true
         } catch (e: PorcupineException) {
-            _lastError.value = "Porcupine init error: ${e.message}"
+            _lastError.value = "Porcupine 初始化错误: ${e.message}"
             onError?.invoke(_lastError.value!!)
             false
         }
@@ -77,7 +77,7 @@ class WakeWordEngine(
                 .build(context)
             true
         } catch (e: PorcupineException) {
-            _lastError.value = "Porcupine init error: ${e.message}"
+            _lastError.value = "Porcupine 初始化错误: ${e.message}"
             onError?.invoke(_lastError.value!!)
             false
         }
@@ -103,13 +103,13 @@ class WakeWordEngine(
                 minBufferSize * 2
             )
         } catch (e: SecurityException) {
-            _lastError.value = "Microphone permission denied"
+            _lastError.value = "麦克风权限被拒绝"
             onError?.invoke(_lastError.value!!)
             return
         }
 
         if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            _lastError.value = "AudioRecord initialization failed"
+            _lastError.value = "AudioRecord 初始化失败"
             onError?.invoke(_lastError.value!!)
             return
         }
@@ -134,7 +134,7 @@ class WakeWordEngine(
                         }
                     } catch (e: PorcupineException) {
                         withContext(Dispatchers.Main) {
-                            _lastError.value = "Processing error: ${e.message}"
+                            _lastError.value = "处理错误: ${e.message}"
                             onError?.invoke(_lastError.value!!)
                         }
                     }
