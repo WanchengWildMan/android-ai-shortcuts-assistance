@@ -119,6 +119,8 @@ User instruction: "$userPrompt"
 
 If the instruction references previous context (like "continue", "same thing", etc.), interpret it based on the conversation history.
 Provide a clear, specific, and actionable task description.
+
+IMPORTANT: Output ONLY the final optimized instruction. Do NOT include any thinking process, analysis, or explanations.
             """.trimIndent()
         } else {
             """
@@ -128,6 +130,8 @@ $contextSection
 
 如果指令引用了之前的上下文（如"继续"、"再来一次"等），请根据对话历史来理解其含义。
 请提供清晰、具体、可执行的任务描述。
+
+重要：只输出最终的优化指令，不要包含任何思考过程、分析或解释。
             """.trimIndent()
         }
     }
@@ -241,19 +245,109 @@ $recentContext
     }
 
     /**
-     * 移除模型可能输出的思考标签
+     * 移除模型可能输出的思考标签和思考内容
      * 支持 <think>...</think> 和 <thinking>...</thinking> 格式
+     * 同时移除常见的思考性文字模式
      */
     private fun stripThinkingTags(content: String): String {
         var result = content
 
         // 移除 <think>...</think> 标签及其内容
-        val thinkPattern = Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL)
+        val thinkPattern = Regex("<think>.*?</think>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
         result = result.replace(thinkPattern, "")
 
         // 移除 <thinking>...</thinking> 标签及其内容
-        val thinkingPattern = Regex("<thinking>.*?</thinking>", RegexOption.DOT_MATCHES_ALL)
+        val thinkingPattern = Regex("<thinking>.*?</thinking>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
         result = result.replace(thinkingPattern, "")
+
+        // 移除所有从开头到第一个"打开"、"在"、"使用"等动词之前的内容
+        // 这能有效去掉大部分思考性前缀
+        // 注意：如果思考内容中包含这些词（如"我应该打开..."），这个正则可能会失效，所以需要结合下面的行过滤
+        val actionStartPattern = Regex("^[\\s\\S]*?(?=(?:打开|在|使用|进入|点击|搜索|查找|查看|发送|输入|选择))", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE))
+        val newResult = result.replace(actionStartPattern, "")
+        if (newResult.isNotBlank() && newResult.length < result.length) {
+            result = newResult
+        }
+
+        // 针对DeepSeek等模型可能输出的混合思考内容，进行行级过滤
+        val lines = result.lines()
+        val filteredLines = lines.filterNot { line ->
+            val l = line.trim()
+            // 过滤常见的思考性陈述
+            (l.contains("这是一个", ignoreCase = true) && l.contains("需求", ignoreCase = true)) ||
+            (l.contains("明确", ignoreCase = true) && l.contains("任务", ignoreCase = true)) ||
+            l.contains("我应该", ignoreCase = true) ||
+            l.startsWith("在是", ignoreCase = true) || // 例如 "在是晚上7点多"
+            l.contains("选择合适的工具", ignoreCase = true) ||
+            l.contains("选择一个合适", ignoreCase = true) ||
+            l.contains("准备处理", ignoreCase = true) ||
+            l.contains("异常情况", ignoreCase = true) ||
+            // 过滤重复的引用
+            (l.trim() == "\"查看今天的天气\"") ||
+            l.startsWith("查看今天的天气，如果", ignoreCase = true)
+        }
+        result = filteredLines.joinToString("\n")
+
+        // 移除常见的思考性前缀和分析内容
+        val chineseThinkingPatterns = listOf(
+            Regex("^[\\s\\S]*?(?=优化(?:为|后|指令)[：:：]?\\s*)", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)),
+            Regex("^[\\s\\S]*?(?=最终(?:优化)?(?:指令|结果)[：:：]?\\s*)", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)),
+            Regex("^(?:让我.*?[。\\n]|首先.*?[。\\n]|分析.*?[。\\n]|理解.*?[。\\n]|这个.*?[。\\n]|根据.*?[。\\n])+", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)),
+        )
+
+        val englishThinkingPatterns = listOf(
+            Regex("^[\\s\\S]*?(?=(?:Open|Use|Enter|Click|Search|Find|View|Send|Input|Select))", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)),
+            Regex("^[\\s\\S]*?(?=Optimized(?:\\s+instruction)?[：:：]?\\s*)", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)),
+            Regex("^[\\s\\S]*?(?=Final(?:\\s+(?:optimized\\s+)?(?:instruction|result))[：:：]?\\s*)", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)),
+            Regex("^(?:Let me.*?[.\\n]|First.*?[.\\n]|Analysis.*?[.\\n]|Understanding.*?[.\\n]|This.*?[.\\n]|Based on.*?[.\\n])+", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)),
+        )
+
+        // 先尝试中文模式
+        for (pattern in chineseThinkingPatterns) {
+            val newResult2 = result.replace(pattern, "")
+            if (newResult2 != result && newResult2.isNotBlank()) {
+                result = newResult2
+                break
+            }
+        }
+
+        // 如果还是包含思考性内容，尝试英文模式
+        if (result.startsWith("Let me", ignoreCase = true) ||
+            result.startsWith("First", ignoreCase = true) ||
+            result.startsWith("Based", ignoreCase = true) ||
+            result.startsWith("让我", ignoreCase = false) ||
+            result.startsWith("首先", ignoreCase = false) ||
+            result.startsWith("根据", ignoreCase = false)) {
+            for (pattern in englishThinkingPatterns) {
+                val newResult3 = result.replace(pattern, "")
+                if (newResult3 != result && newResult3.isNotBlank()) {
+                    result = newResult3
+                    break
+                }
+            }
+        }
+
+        // 移除可能残留的各种前缀
+        val prefixPatterns = listOf(
+            "^优化(?:为|后|指令)[：:：]?\\s*",
+            "^最终(?:优化)?(?:指令|结果)[：:：]?\\s*",
+            "^指令[：:：]?\\s*",
+            "^结果[：:：]?\\s*",
+            "^以下是",
+            "^这是"
+        )
+
+        for (prefixPattern in prefixPatterns) {
+            result = result.replace(Regex(prefixPattern, RegexOption.MULTILINE), "")
+        }
+
+        result = result.replace(Regex("^Optimized(?:\\s+instruction)?[：:：]?\\s*", RegexOption.IGNORE_CASE), "")
+        result = result.replace(Regex("^Final(?:\\s+(?:optimized\\s+)?(?:instruction|result))[：:：]?\\s*", RegexOption.IGNORE_CASE), "")
+        result = result.replace(Regex("^Instruction[：:：]?\\s*", RegexOption.IGNORE_CASE), "")
+        result = result.replace(Regex("^Result[：:：]?\\s*", RegexOption.IGNORE_CASE), "")
+
+        // 移除开头和结尾的空白
+        result = result.trim()
 
         return result.trim()
     }
@@ -273,13 +367,14 @@ $recentContext
 4. **消除歧义**：明确操作对象和目标
 
 **输出原则：**
-1. **直接输出**：不要有任何前缀、解释或格式标记，直接输出优化后的指令
-2. **操作具体**：
+1. **仅输出最终结果**：直接输出优化后的指令，不要包含任何思考过程、分析、解释、前缀或格式标记
+2. **禁止输出思考内容**：不要输出"让我分析一下"、"首先"、"总结"等思考性文字，直接给出优化结果
+3. **操作具体**：
    - 好的例子："打开美团App，点击搜索框，输入'咖啡'，在搜索结果中选择评分高的咖啡店"
    - 差的例子："在美团上搜索咖啡店"
-3. **步骤清晰**：按操作顺序描述，使UI Agent能直接执行
-4. **补充细节**：包括可能的备选方案、注意事项
-5. **适度长度**：2-4句话即可，不要过于冗长
+4. **步骤清晰**：按操作顺序描述，使UI Agent能直接执行
+5. **补充细节**：包括可能的备选方案、注意事项
+6. **适度长度**：2-4句话即可，不要过于冗长
 
 **重要提醒：Agent需要注意的常见情况**
 在优化指令时，提醒Agent注意以下情况：
@@ -289,6 +384,10 @@ $recentContext
    - 例如："在首页底部点击'我的'标签，进入个人中心，然后找到'设置'按钮"
 4. **异常返回**：如果进入了错误的应用、界面或广告页，提醒Agent使用返回键退回到所需的应用、界面
 5. **弹窗处理**：遇到权限请求、通知弹窗等，根据任务需要选择允许或拒绝
+6. **多步搜索必须分解**（特别重要）：
+   - 错误❌："搜索星巴克拿铁"（可能一次搜索找不到准确结果）
+   - 正确✅："先在搜索框搜索'星巴克'进入店铺，然后在店铺内搜索或浏览'拿铁'"
+   - 原因：在店铺列表搜索"星巴克+拿铁"可能搜不到，必须分步骤执行
 
 **指令解释示例：**
 
@@ -321,8 +420,9 @@ Users may only give simple, vague instructions. You need to:
 4. **Remove ambiguity**: Clarify operation targets and goals
 
 **Output Principles:**
-1. **Direct output**: No prefixes, explanations, or format markers - directly output the optimized instruction
-2. **Specific actions**:
+1. **Only output final result**: Directly output the optimized instruction without any thinking process, analysis, explanations, prefixes, or format markers
+2. **No thinking content**: Do not output thinking phrases like "let me analyze", "first", "in summary" - just give the optimized result directly
+3. **Specific actions**:
    - Good: "Open Meituan App, tap search box, enter 'coffee', select highly-rated coffee shop from results"
    - Bad: "Search for coffee shop on Meituan"
 3. **Clear steps**: Describe in operation order so UI Agent can execute directly

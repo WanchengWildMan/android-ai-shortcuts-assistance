@@ -62,7 +62,7 @@ object Logger {
     fun endTimer(name: String, module: String = AGENT): Long {
         val start = timers.remove(name) ?: return 0
         val elapsed = System.currentTimeMillis() - start
-        d(module, "$name took ${elapsed}ms")
+        d(module, "$name 耗时 ${elapsed}ms")
         return elapsed
     }
 }

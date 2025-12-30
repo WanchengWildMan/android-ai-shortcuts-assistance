@@ -46,16 +46,16 @@ class SpeechRecognizer(private val context: Context) {
         override fun onError(error: Int) {
             _isListening.value = false
             val errorMessage = when (error) {
-                AndroidSpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
-                AndroidSpeechRecognizer.ERROR_CLIENT -> "Client error"
-                AndroidSpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions"
-                AndroidSpeechRecognizer.ERROR_NETWORK -> "Network error"
-                AndroidSpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
-                AndroidSpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized"
-                AndroidSpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
-                AndroidSpeechRecognizer.ERROR_SERVER -> "Server error"
-                AndroidSpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Speech timeout"
-                else -> "Unknown error: $error"
+                AndroidSpeechRecognizer.ERROR_AUDIO -> "音频录制错误"
+                AndroidSpeechRecognizer.ERROR_CLIENT -> "客户端错误"
+                AndroidSpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "权限不足"
+                AndroidSpeechRecognizer.ERROR_NETWORK -> "网络错误"
+                AndroidSpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "网络超时"
+                AndroidSpeechRecognizer.ERROR_NO_MATCH -> "未识别到语音"
+                AndroidSpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别器忙"
+                AndroidSpeechRecognizer.ERROR_SERVER -> "服务器错误"
+                AndroidSpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "语音超时"
+                else -> "未知错误: $error"
             }
             onError?.invoke(errorMessage)
         }
@@ -83,7 +83,7 @@ class SpeechRecognizer(private val context: Context) {
             recognizer?.setRecognitionListener(recognitionListener)
             true
         } else {
-            onError?.invoke("Speech recognition not available")
+            onError?.invoke("语音识别不可用")
             false
         }
     }

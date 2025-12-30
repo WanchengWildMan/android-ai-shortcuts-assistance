@@ -34,12 +34,12 @@ class TextToSpeech(private val context: Context) {
         @Deprecated("Deprecated in Java")
         override fun onError(utteranceId: String?) {
             _isSpeaking.value = false
-            onError?.invoke("TTS error for utterance: $utteranceId")
+            onError?.invoke("TTS 错误: $utteranceId")
         }
 
         override fun onError(utteranceId: String?, errorCode: Int) {
             _isSpeaking.value = false
-            onError?.invoke("TTS error: $errorCode")
+            onError?.invoke("TTS 错误代码: $errorCode")
         }
     }
 
@@ -55,14 +55,14 @@ class TextToSpeech(private val context: Context) {
             } else {
                 isInitialized = false
                 onInitialized?.invoke(false)
-                onError?.invoke("TTS initialization failed")
+                onError?.invoke("TTS 初始化失败")
             }
         }
     }
 
     fun speak(text: String, queueMode: Int = AndroidTTS.QUEUE_FLUSH) {
         if (!isInitialized) {
-            onError?.invoke("TTS not initialized")
+            onError?.invoke("TTS 未初始化")
             return
         }
 

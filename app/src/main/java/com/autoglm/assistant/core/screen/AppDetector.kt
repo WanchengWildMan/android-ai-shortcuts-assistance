@@ -9,42 +9,42 @@ import kotlinx.coroutines.withContext
 
 object AppDetector {
 
-    // Package name to app name mapping (subset of common apps)
+    // 包名到应用名的映射（常用应用子集）
     // 包含中英文名称
     private val APP_PACKAGES = mapOf(
-        "com.tencent.mm" to "WeChat",
+        "com.tencent.mm" to "微信",
         "com.tencent.mobileqq" to "QQ",
-        "com.sina.weibo" to "Weibo",
-        "com.taobao.taobao" to "Taobao",
-        "com.jingdong.app.mall" to "JD",
-        "com.xunmeng.pinduoduo" to "Pinduoduo",
-        "com.xingin.xhs" to "Xiaohongshu",
-        "com.ss.android.ugc.aweme" to "Douyin",
-        "com.smile.gifmaker" to "Kuaishou",
+        "com.sina.weibo" to "微博",
+        "com.taobao.taobao" to "淘宝",
+        "com.jingdong.app.mall" to "京东",
+        "com.xunmeng.pinduoduo" to "拼多多",
+        "com.xingin.xhs" to "小红书",
+        "com.ss.android.ugc.aweme" to "抖音",
+        "com.smile.gifmaker" to "快手",
         "tv.danmaku.bili" to "Bilibili",
-        "com.sankuai.meituan" to "Meituan",
-        "com.sankuai.meituan.enterprise" to "MeituanEnterprise",
-        "me.ele" to "Eleme",
-        "com.dianping.v1" to "Dianping",
-        "com.autonavi.minimap" to "Amap",
-        "com.baidu.BaiduMap" to "Baidu Map",
-        "com.netease.cloudmusic" to "NetEase Music",
-        "com.tencent.qqmusic" to "QQ Music",
-        "com.kugou.android" to "Kugou",
-        "com.tencent.qqlive" to "Tencent Video",
-        "com.qiyi.video" to "iQiyi",
-        "com.youku.phone" to "Youku",
-        "com.UCMobile" to "UC Browser",
+        "com.sankuai.meituan" to "美团",
+        "com.sankuai.meituan.enterprise" to "美团企业版",
+        "me.ele" to "饿了么",
+        "com.dianping.v1" to "大众点评",
+        "com.autonavi.minimap" to "高德地图",
+        "com.baidu.BaiduMap" to "百度地图",
+        "com.netease.cloudmusic" to "网易云音乐",
+        "com.tencent.qqmusic" to "QQ音乐",
+        "com.kugou.android" to "酷狗音乐",
+        "com.tencent.qqlive" to "腾讯视频",
+        "com.qiyi.video" to "爱奇艺",
+        "com.youku.phone" to "优酷",
+        "com.UCMobile" to "UC浏览器",
         "com.android.chrome" to "Chrome",
-        "com.android.settings" to "Settings",
-        "com.android.contacts" to "Contacts",
-        "com.android.mms" to "Messages",
-        "com.android.dialer" to "Phone",
-        "com.android.calendar" to "Calendar",
-        "com.android.camera" to "Camera",
-        "com.android.gallery3d" to "Gallery",
-        "com.android.vending" to "Play Store",
-        "com.google.android.apps.maps" to "Google Maps",
+        "com.android.settings" to "设置",
+        "com.android.contacts" to "联系人",
+        "com.android.mms" to "短信",
+        "com.android.dialer" to "电话",
+        "com.android.calendar" to "日历",
+        "com.android.camera" to "相机",
+        "com.android.gallery3d" to "相册",
+        "com.android.vending" to "Play商店",
+        "com.google.android.apps.maps" to "谷歌地图",
         "com.google.android.youtube" to "YouTube",
         "com.google.android.gm" to "Gmail",
         "com.whatsapp" to "WhatsApp",
@@ -53,20 +53,20 @@ object AppDetector {
         "com.twitter.android" to "Twitter",
         "com.spotify.music" to "Spotify",
         "com.netflix.mediaclient" to "Netflix",
-        "com.amazon.mShop.android.shopping" to "Amazon",
-        "com.ctrip.ibu.market.newsvip" to "Ctrip",
-        "com.Qunar" to "Qunar",
+        "com.amazon.mShop.android.shopping" to "亚马逊",
+        "com.ctrip.ibu.market.newsvip" to "携程",
+        "com.Qunar" to "去哪儿",
         "com.MobileTicket" to "12306"
     )
 
     suspend fun getCurrentApp(context: Context): String = withContext(Dispatchers.IO) {
-        // Try shell command first (works with ADB permissions)
+        // 首先尝试使用 shell 命令（适用于 ADB 权限）
         val packageName = ShellExecutor.getCurrentPackage()
         if (packageName != null) {
             return@withContext getAppNameFromPackage(context, packageName)
         }
 
-        // Fallback to UsageStatsManager
+        // 备选方案：使用 UsageStatsManager
         try {
             val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             val endTime = System.currentTimeMillis()
@@ -86,17 +86,17 @@ object AppDetector {
                 }
             }
         } catch (e: Exception) {
-            // UsageStats permission not granted
+            // 未授予 UsageStats 权限
         }
 
-        return@withContext "System Home"
+        return@withContext "系统桌面"
     }
 
     private fun getAppNameFromPackage(context: Context, packageName: String): String {
-        // Check predefined mapping first
+        // 首先检查预定义的映射
         APP_PACKAGES[packageName]?.let { return it }
 
-        // Try to get app label from PackageManager
+        // 尝试从 PackageManager 获取应用标签
         return try {
             val packageManager = context.packageManager
             val appInfo = packageManager.getApplicationInfo(packageName, 0)
