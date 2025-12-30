@@ -8,6 +8,9 @@ import java.io.File
 
 object ImageUtils {
 
+    /**
+     * 将 Bitmap 转换为 Base64 字符串
+     */
     fun bitmapToBase64(bitmap: Bitmap?, quality: Int = 60): String? {
         if (bitmap == null) return null
 
@@ -22,6 +25,9 @@ object ImageUtils {
         }
     }
 
+    /**
+     * 将 Base64 字符串转换为 Bitmap
+     */
     fun base64ToBitmap(base64String: String): Bitmap? {
         return try {
             val decodedBytes = Base64.decode(base64String, Base64.DEFAULT)
@@ -31,6 +37,9 @@ object ImageUtils {
         }
     }
 
+    /**
+     * 从文件加载 Bitmap
+     */
     fun loadBitmapFromFile(filePath: String): Bitmap? {
         return try {
             val file = File(filePath)
@@ -44,6 +53,9 @@ object ImageUtils {
         }
     }
 
+    /**
+     * 调整 Bitmap 大小
+     */
     fun resizeBitmap(bitmap: Bitmap, maxWidth: Int, maxHeight: Int): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
@@ -59,6 +71,9 @@ object ImageUtils {
         return Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
     }
 
+    /**
+     * 创建黑色占位图
+     */
     fun createBlackBitmap(width: Int, height: Int): Bitmap {
         return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
             eraseColor(android.graphics.Color.BLACK)

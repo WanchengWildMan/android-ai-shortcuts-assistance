@@ -17,7 +17,7 @@ object PermissionHelper {
     const val REQUEST_CODE_OVERLAY = 1002
     const val REQUEST_CODE_ACCESSIBILITY = 1003
 
-    // Required permissions
+    // 所需权限
     val REQUIRED_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         arrayOf(
             Manifest.permission.RECORD_AUDIO,
@@ -29,12 +29,18 @@ object PermissionHelper {
         )
     }
 
+    /**
+     * 检查是否已授予所有必要权限
+     */
     fun hasAllPermissions(context: Context): Boolean {
         return REQUIRED_PERMISSIONS.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         } && hasOverlayPermission(context) && isAccessibilityServiceEnabled(context)
     }
 
+    /**
+     * 检查是否有麦克风权限
+     */
     fun hasMicrophonePermission(context: Context): Boolean {
         return ContextCompat.checkSelfPermission(
             context,
@@ -42,10 +48,16 @@ object PermissionHelper {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    /**
+     * 检查是否有悬浮窗权限
+     */
     fun hasOverlayPermission(context: Context): Boolean {
         return Settings.canDrawOverlays(context)
     }
 
+    /**
+     * 检查无障碍服务是否已启用
+     */
     fun isAccessibilityServiceEnabled(context: Context): Boolean {
         val serviceName = "${context.packageName}/${context.packageName}.service.AutomationService"
         val enabledServices = Settings.Secure.getString(
@@ -55,6 +67,9 @@ object PermissionHelper {
         return enabledServices?.contains(serviceName) == true
     }
 
+    /**
+     * 请求麦克风权限
+     */
     fun requestMicrophonePermission(activity: Activity) {
         ActivityCompat.requestPermissions(
             activity,
@@ -63,6 +78,9 @@ object PermissionHelper {
         )
     }
 
+    /**
+     * 请求所有必要权限
+     */
     fun requestAllPermissions(activity: Activity) {
         ActivityCompat.requestPermissions(
             activity,
@@ -71,6 +89,9 @@ object PermissionHelper {
         )
     }
 
+    /**
+     * 打开悬浮窗权限设置页面
+     */
     fun openOverlayPermissionSettings(activity: Activity) {
         val intent = Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -79,11 +100,17 @@ object PermissionHelper {
         activity.startActivityForResult(intent, REQUEST_CODE_OVERLAY)
     }
 
+    /**
+     * 打开无障碍设置页面
+     */
     fun openAccessibilitySettings(activity: Activity) {
         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
         activity.startActivityForResult(intent, REQUEST_CODE_ACCESSIBILITY)
     }
 
+    /**
+     * 打开应用详情设置页面
+     */
     fun openAppSettings(context: Context) {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", context.packageName, null)
@@ -91,6 +118,9 @@ object PermissionHelper {
         context.startActivity(intent)
     }
 
+    /**
+     * 权限状态数据类
+     */
     data class PermissionStatus(
         val hasMicrophone: Boolean,
         val hasNotification: Boolean,

@@ -135,7 +135,7 @@ fun ChatScreen(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "No messages yet",
+                        text = "暂无消息",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -239,7 +239,7 @@ fun ChatScreen(
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { inputText = it },
-                        placeholder = { Text("Type a message...") },
+                        placeholder = { Text("输入任务指令...") },
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(28.dp),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -284,7 +284,7 @@ fun ChatScreen(
                     ) {
                         Icon(
                             imageVector = if (isAgentRunning) Icons.Default.Stop else Icons.Default.Send,
-                            contentDescription = if (isAgentRunning) "Stop" else "Send",
+                            contentDescription = if (isAgentRunning) "停止" else "发送",
                             tint = when {
                                 isAgentRunning -> MaterialTheme.colorScheme.onError
                                 inputText.isNotBlank() -> MaterialTheme.colorScheme.onPrimary

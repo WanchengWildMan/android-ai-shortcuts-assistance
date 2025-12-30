@@ -21,35 +21,41 @@ class PreferenceManager(context: Context) {
         private const val KEY_WAKE_WORD_KEYWORD = "wake_word_keyword"
         private const val KEY_SHOW_AGENT_PROCESS = "show_agent_process"
 
-        // SmartCoordinator settings
+        // 智能协调器设置
         private const val KEY_SMART_COORDINATOR_ENABLED = "smart_coordinator_enabled"
         private const val KEY_COORDINATOR_API_URL = "coordinator_api_url"
         private const val KEY_COORDINATOR_API_KEY = "coordinator_api_key"
+        private const val KEY_COORDINATOR_API_KEY_DEEPSEEK = "coordinator_api_key_deepseek"
+        private const val KEY_COORDINATOR_API_KEY_BIGMODEL = "coordinator_api_key_bigmodel"
+        private const val KEY_COORDINATOR_API_KEY_DOUBAO = "coordinator_api_key_doubao"
         private const val KEY_COORDINATOR_MODEL_NAME = "coordinator_model_name"
         private const val KEY_SUPERVISION_ENABLED = "supervision_enabled"
         private const val KEY_MAX_CORRECTIONS = "max_corrections"
 
-        // PromptOptimizer settings
+        // 提示词优化器设置
         private const val KEY_PROMPT_OPTIMIZER_ENABLED = "prompt_optimizer_enabled"
         private const val KEY_OPTIMIZER_API_URL = "optimizer_api_url"
         private const val KEY_OPTIMIZER_API_KEY = "optimizer_api_key"
+        private const val KEY_OPTIMIZER_API_KEY_DEEPSEEK = "optimizer_api_key_deepseek"
+        private const val KEY_OPTIMIZER_API_KEY_BIGMODEL = "optimizer_api_key_bigmodel"
+        private const val KEY_OPTIMIZER_API_KEY_DOUBAO = "optimizer_api_key_doubao"
         private const val KEY_OPTIMIZER_MODEL_NAME = "optimizer_model_name"
         private const val KEY_TASK_SUMMARY_ENABLED = "task_summary_enabled"
 
-        // Shell settings
+        // Shell 设置
         private const val KEY_USE_ROOT_MODE = "use_root_mode"
 
-        // Default values - BigModel API
-        const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱 custom wake word
+        // 默认值 - BigModel API
+        const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱自定义唤醒词
         const val DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4"
         const val DEFAULT_MODEL_NAME = "autoglm-phone"
         const val DEFAULT_LANGUAGE = "cn"
         const val DEFAULT_MAX_STEPS = 100
-        // SmartCoordinator defaults - DeepSeek
+        // 智能协调器默认值 - DeepSeek
         const val DEFAULT_COORDINATOR_API_URL = "https://api.deepseek.com/v1"
         const val DEFAULT_COORDINATOR_MODEL_NAME = "deepseek-chat"
         const val DEFAULT_MAX_CORRECTIONS = 2
-        // PromptOptimizer defaults - uses coordinator settings as default
+        // 提示词优化器默认值 - 默认使用协调器设置
         const val DEFAULT_OPTIMIZER_MODEL_NAME = "deepseek-chat"
     }
 
@@ -85,12 +91,12 @@ class PreferenceManager(context: Context) {
         get() = prefs.getString(KEY_WAKE_WORD_KEYWORD, DEFAULT_WAKE_WORD) ?: DEFAULT_WAKE_WORD
         set(value) = prefs.edit { putString(KEY_WAKE_WORD_KEYWORD, value) }
 
-    // true = show all process messages, false = show only final result
+    // true = 显示所有过程消息, false = 仅显示最终结果
     var showAgentProcess: Boolean
         get() = prefs.getBoolean(KEY_SHOW_AGENT_PROCESS, false)
         set(value) = prefs.edit { putBoolean(KEY_SHOW_AGENT_PROCESS, value) }
 
-    // SmartCoordinator settings
+    // 智能协调器设置
     var smartCoordinatorEnabled: Boolean
         get() = prefs.getBoolean(KEY_SMART_COORDINATOR_ENABLED, false)
         set(value) = prefs.edit { putBoolean(KEY_SMART_COORDINATOR_ENABLED, value) }
@@ -102,6 +108,19 @@ class PreferenceManager(context: Context) {
     var coordinatorApiKey: String
         get() = prefs.getString(KEY_COORDINATOR_API_KEY, "") ?: ""
         set(value) = prefs.edit { putString(KEY_COORDINATOR_API_KEY, value) }
+
+    // Provider-specific Coordinator API keys
+    var coordinatorApiKeyDeepseek: String
+        get() = prefs.getString(KEY_COORDINATOR_API_KEY_DEEPSEEK, coordinatorApiKey) ?: coordinatorApiKey
+        set(value) = prefs.edit { putString(KEY_COORDINATOR_API_KEY_DEEPSEEK, value) }
+
+    var coordinatorApiKeyBigmodel: String
+        get() = prefs.getString(KEY_COORDINATOR_API_KEY_BIGMODEL, coordinatorApiKey) ?: coordinatorApiKey
+        set(value) = prefs.edit { putString(KEY_COORDINATOR_API_KEY_BIGMODEL, value) }
+
+    var coordinatorApiKeyDoubao: String
+        get() = prefs.getString(KEY_COORDINATOR_API_KEY_DOUBAO, coordinatorApiKey) ?: coordinatorApiKey
+        set(value) = prefs.edit { putString(KEY_COORDINATOR_API_KEY_DOUBAO, value) }
 
     var coordinatorModelName: String
         get() = prefs.getString(KEY_COORDINATOR_MODEL_NAME, DEFAULT_COORDINATOR_MODEL_NAME) ?: DEFAULT_COORDINATOR_MODEL_NAME
@@ -127,6 +146,19 @@ class PreferenceManager(context: Context) {
     var optimizerApiKey: String
         get() = prefs.getString(KEY_OPTIMIZER_API_KEY, "") ?: ""
         set(value) = prefs.edit { putString(KEY_OPTIMIZER_API_KEY, value) }
+
+    // Provider-specific Optimizer API keys
+    var optimizerApiKeyDeepseek: String
+        get() = prefs.getString(KEY_OPTIMIZER_API_KEY_DEEPSEEK, optimizerApiKey) ?: optimizerApiKey
+        set(value) = prefs.edit { putString(KEY_OPTIMIZER_API_KEY_DEEPSEEK, value) }
+
+    var optimizerApiKeyBigmodel: String
+        get() = prefs.getString(KEY_OPTIMIZER_API_KEY_BIGMODEL, optimizerApiKey) ?: optimizerApiKey
+        set(value) = prefs.edit { putString(KEY_OPTIMIZER_API_KEY_BIGMODEL, value) }
+
+    var optimizerApiKeyDoubao: String
+        get() = prefs.getString(KEY_OPTIMIZER_API_KEY_DOUBAO, optimizerApiKey) ?: optimizerApiKey
+        set(value) = prefs.edit { putString(KEY_OPTIMIZER_API_KEY_DOUBAO, value) }
 
     var optimizerModelName: String
         get() = prefs.getString(KEY_OPTIMIZER_MODEL_NAME, DEFAULT_OPTIMIZER_MODEL_NAME) ?: DEFAULT_OPTIMIZER_MODEL_NAME

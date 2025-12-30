@@ -125,10 +125,20 @@ fun ShortcutEditDialog(
                                         isOptimizing = true
                                         scope.launch {
                                             try {
+                                                    // 使用优化器专用的配置，而不是通用模型配置
                                                     val config = ModelConfig(
-                                                        apiKey = prefs.apiKey,
-                                                        baseUrl = prefs.apiUrl,
-                                                        modelName = prefs.modelName
+                                                        apiKey = run {
+                                                            val model = prefs.optimizerModelName
+                                                            val key = when {
+                                                                model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
+                                                                model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
+                                                                model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
+                                                                else -> prefs.optimizerApiKey
+                                                            }
+                                                            if (key.isNotBlank()) key else prefs.apiKey
+                                                        },
+                                                        baseUrl = if (prefs.optimizerApiUrl.isNotBlank()) prefs.optimizerApiUrl else prefs.apiUrl,
+                                                        modelName = prefs.optimizerModelName
                                                     )
                                                     val optimizer = com.autoglm.assistant.core.planner.PromptOptimizer(config)
                                                 val optimized = optimizer.optimize(promptValue.text)

@@ -22,11 +22,11 @@ class AutomationService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // We don't need to handle accessibility events for automation
+        // 自动化操作不需要处理无障碍事件
     }
 
     override fun onInterrupt() {
-        // Handle interruption
+        // 处理中断
     }
 
     override fun onDestroy() {
@@ -34,7 +34,7 @@ class AutomationService : AccessibilityService() {
         instance = null
     }
 
-    // Gesture-based actions
+    // 基于手势的动作
 
     fun performTap(x: Int, y: Int): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
@@ -121,12 +121,12 @@ class AutomationService : AccessibilityService() {
             moveTo(x.toFloat(), y.toFloat())
         }
 
-        // First tap
+        // 第一次点击
         val gesture1 = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
             .build()
 
-        // Second tap
+        // 第二次点击
         val gesture2 = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 100, 50))
             .build()
@@ -134,7 +134,7 @@ class AutomationService : AccessibilityService() {
         return dispatchGesture(gesture1, null, null) && dispatchGesture(gesture2, null, null)
     }
 
-    // Navigation actions
+    // 导航动作
 
     fun performBack(): Boolean {
         return performGlobalAction(GLOBAL_ACTION_BACK)
@@ -152,7 +152,7 @@ class AutomationService : AccessibilityService() {
         return performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
     }
 
-    // Text input via accessibility
+    // 通过无障碍服务输入文本
 
     fun performTextInput(text: String): Boolean {
         val rootNode = rootInActiveWindow ?: return false
@@ -238,7 +238,7 @@ class AutomationService : AccessibilityService() {
         return null
     }
 
-    // Find and click by text
+    // 通过文本查找并点击
 
     fun findAndClickByText(text: String): Boolean {
         val rootNode = rootInActiveWindow ?: return false
@@ -248,7 +248,7 @@ class AutomationService : AccessibilityService() {
             if (node.isClickable) {
                 return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             }
-            // Try parent if node is not clickable
+            // 如果节点不可点击，尝试点击其父节点
             var parent = node.parent
             while (parent != null) {
                 if (parent.isClickable) {
@@ -261,7 +261,7 @@ class AutomationService : AccessibilityService() {
         return false
     }
 
-    // Find and click by content description
+    // 通过内容描述查找并点击
 
     fun findAndClickByDescription(description: String): Boolean {
         val rootNode = rootInActiveWindow ?: return false
@@ -288,7 +288,7 @@ class AutomationService : AccessibilityService() {
         return false
     }
 
-    // Get screen content as text (for debugging)
+    // 获取屏幕文本内容（用于调试）
 
     fun getScreenText(): String {
         val rootNode = rootInActiveWindow ?: return ""

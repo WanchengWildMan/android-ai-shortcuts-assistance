@@ -40,7 +40,7 @@ import java.util.Calendar
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
-    onShortcutClick: (String, Boolean, Boolean) -> Unit,  // (prompt, enablePlanning, enableOptimizer)
+    onShortcutClick: (String, Boolean, Boolean) -> Unit,  // (提示词, 是否启用规划, 是否启用优化)
     onHistoryClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onRunningTaskClick: () -> Unit = {},
@@ -118,7 +118,7 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
-// Running Task Card
+        // 正在运行的任务卡片
         val wakeWordService = WakeWordService.instance
         if (wakeWordService != null) {
             val serviceState by wakeWordService.serviceState.collectAsState()
@@ -220,13 +220,13 @@ fun HomeScreen(
                         isEditMode = isEditMode,
                         onClick = {
                             if (isEditMode) {
-                                // In edit mode, click does nothing on the card itself, 
-                                // edit button handles edit
+                                // 在编辑模式下，点击卡片本身不执行任何操作，
+                                // 由编辑按钮处理编辑
                             } else {
                                 if (shortcut.hasParameters()) {
                                     showParameterDialog = shortcut
                                 } else {
-                                    onShortcutClick(shortcut.prompt, shortcut.enablePlanning, true) // Default optimizer to true for shortcuts? Or false?
+                                    onShortcutClick(shortcut.prompt, shortcut.enablePlanning, true) // 快捷指令默认开启优化？还是关闭？
                                 }
                             }
                         },
@@ -245,7 +245,7 @@ fun HomeScreen(
             }
         }
 
-        // Planning toggle above input
+        // 输入框上方的规划开关
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -342,7 +342,7 @@ fun HomeScreen(
         )
     }
 
-    // Create dialog
+    // 创建对话框
     if (showCreateDialog) {
         ShortcutEditDialog(
             shortcut = null,
@@ -354,7 +354,7 @@ fun HomeScreen(
         )
     }
 
-    // Edit dialog
+    // 编辑对话框
     showEditDialog?.let { shortcut ->
         ShortcutEditDialog(
             shortcut = shortcut,
@@ -370,7 +370,7 @@ fun HomeScreen(
         )
     }
 
-    // Parameter input dialog for template shortcuts
+    // 模板快捷指令的参数输入对话框
     showParameterDialog?.let { shortcut ->
         ParameterInputDialog(
             shortcut = shortcut,
@@ -401,7 +401,7 @@ fun ShortcutCard(
         label = "elevation"
     )
     
-    // Jiggle animation for edit mode
+    // 编辑模式下的抖动动画
     val infiniteTransition = rememberInfiniteTransition(label = "jiggle")
     val rotation by if (isEditMode) {
         infiniteTransition.animateFloat(

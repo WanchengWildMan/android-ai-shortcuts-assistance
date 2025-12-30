@@ -4,6 +4,9 @@ import com.autoglm.assistant.ai.MessageBuilder
 import com.autoglm.assistant.ai.ModelConfig
 import com.autoglm.assistant.core.planner.TaskPlannerConfig
 
+/**
+ * 智能体配置信息
+ */
 data class AgentConfig(
     val maxSteps: Int = 100,
     val language: String = "cn",
@@ -22,6 +25,9 @@ data class AgentConfig(
      */
     val optimizerConfig: PromptOptimizerConfig? = null
 ) {
+    /**
+     * 获取生效的系统提示词
+     */
     fun getEffectiveSystemPrompt(): String {
         return systemPrompt ?: when (language) {
             "en" -> MessageBuilder.DEFAULT_SYSTEM_PROMPT_EN
@@ -30,6 +36,9 @@ data class AgentConfig(
     }
 }
 
+/**
+ * 单步执行结果
+ */
 data class StepResult(
     val success: Boolean,
     val finished: Boolean,

@@ -64,7 +64,7 @@ class PhoneAgent(
     private var lastAgentThinking: String = ""  // 保存最后一次执行的thinking
     private var lastAgentAction: String = ""    // 保存最后一次执行的action
 
-    // Callbacks
+    // 回调
     var onStepStart: ((Int) -> Unit)? = null
     var onThinking: ((String) -> Unit)? = null
     var onAction: ((String) -> Unit)? = null
@@ -74,7 +74,7 @@ class PhoneAgent(
     var onHumanInterventionNeeded: ((String) -> Unit)? = null
     var onMaxStepsReached: ((Int, String) -> Unit)? = null  // (步数, 任务ID) 达到最大步数时回调
     var onTaskSaved: ((String) -> Unit)? = null  // 任务保存时回调
-    // SmartCoordinator结构化回调 - 显示格式化内容而非原始JSON
+    // SmartCoordinator 结构化回调 - 显示格式化内容而非原始 JSON
     var onPlanningStart: (() -> Unit)? = null           // 开始规划
     var onPlanningComplete: ((TaskPlan?) -> Unit)? = null  // 规划完成
     var onSubTaskGenerated: ((PlannedSubTask) -> Unit)? = null  // 子任务生成（流式）
@@ -82,16 +82,16 @@ class PhoneAgent(
     var onSupervisionResult: ((com.autoglm.assistant.core.planner.SupervisionResult) -> Unit)? = null  // 监督结果
     var onCoordinatorThinking: ((String) -> Unit)? = null  // 协调器思考过程
     // 流式输出回调 - 用于打字机效果（如果需要）
-    var onStreamToken: ((String) -> Unit)? = null       // 流式token回调
+    var onStreamToken: ((String) -> Unit)? = null       // 流式 token 回调
     var onStreamStart: (() -> Unit)? = null             // 流式输出开始
     var onStreamEnd: (() -> Unit)? = null               // 流式输出结束
-    // Prompt优化器回调
-    var onPromptOptimizing: (() -> Unit)? = null        // 正在优化prompt
-    var onPromptOptimized: ((String) -> Unit)? = null   // prompt优化完成
+    // Prompt 优化器回调
+    var onPromptOptimizing: (() -> Unit)? = null        // 正在优化 prompt
+    var onPromptOptimized: ((String) -> Unit)? = null   // prompt 优化完成
     var onTaskSummarizing: (() -> Unit)? = null         // 正在生成任务总结
     var onTaskSummary: ((String) -> Unit)? = null       // 任务总结完成
 
-    // State
+    // 状态
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning
 
@@ -385,10 +385,10 @@ class PhoneAgent(
             return "Task stopped by user"
         }
 
-        // First step: initialize conversation with task
+        // 第一步：使用任务初始化对话
         var result = executeStep(task, isNewTask = true)
 
-        // Continue until finished or max steps reached
+        // 继续执行直到完成或达到最大步数
         while (!result.finished && currentStep < agentConfig.maxSteps) {
             if (stopRequested) {
                 Logger.i(Logger.AGENT, "Task stopped by user (stopRequested=true)")
@@ -451,7 +451,7 @@ ${subTask.context}
             // 执行子任务
             var result = executeStep(prompt, isNewTask = (correctionAttempts == 0))
 
-            // Continue until sub-task is finished or max steps reached
+            // 继续执行直到子任务完成或达到最大步数
             var subTaskSteps = 1
             val maxSubTaskSteps = 20  // 每个子任务最多20步
 
@@ -600,14 +600,14 @@ ${supervision.correctionInstruction}
         Logger.startTimer("step_$currentStep")
         onStepStart?.invoke(currentStep)
 
-        // 1. Capture current screen
+        // 1. 截取当前屏幕
         Logger.startTimer("screenshot")
         val screenshot = screenCapture.capture()
         val screenshotTime = Logger.endTimer("screenshot", Logger.SCREEN)
         val base64Image = screenshot?.base64Data
         Logger.screen("Screenshot: ${screenshot?.width}x${screenshot?.height}, sensitive=${screenshot?.isSensitive}, time=${screenshotTime}ms")
 
-        // 2. Get current app info
+        // 2. 获取当前应用信息
         val currentApp = AppDetector.getCurrentApp(context)
         Logger.agent("Current app: $currentApp")
         val screenInfo = MessageBuilder.buildScreenInfo(
@@ -616,7 +616,7 @@ ${supervision.correctionInstruction}
             screenHeight = screenCapture.screenHeight
         )
 
-        // 3. Build messages
+        // 3. 构建消息
         if (isNewTask) {
             val taskPrompt = MessageBuilder.buildTaskPrompt(userPrompt ?: "", screenInfo)
             conversationHistory.add(
@@ -629,12 +629,12 @@ ${supervision.correctionInstruction}
             )
         }
 
-        // 4. Call model
+        // 4. 调用模型
         Logger.startTimer("model_request")
         Logger.model("Calling model: ${modelConfig.modelName}, messages: ${conversationHistory.size}")
         val response = modelClient.chat(conversationHistory, object : ModelClient.StreamCallback {
             override fun onToken(token: String) {
-                // Could update UI with streaming tokens
+                // 可以使用流式 token 更新 UI
             }
 
             override fun onThinkingComplete(thinking: String) {
@@ -665,7 +665,7 @@ ${supervision.correctionInstruction}
         removeLastUserMessageImage()
         Logger.agent("Context messages: ${conversationHistory.size}")
 
-        // 6. Parse and execute action
+        // 6. 解析并执行操作
         val parsedAction = ActionParser.parse(response.action)
         Logger.action("Parsed: type=${parsedAction.type}, params=${parsedAction.params}")
 

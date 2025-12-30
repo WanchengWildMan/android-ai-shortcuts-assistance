@@ -45,7 +45,7 @@ fun ConversationListScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Conversations",
+                    text = "对话历史",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold
                 )
@@ -59,7 +59,7 @@ fun ConversationListScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("New")
+                    Text("新建")
                 }
             }
         }
@@ -80,13 +80,13 @@ fun ConversationListScreen(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "No conversations yet",
+                        text = "暂无对话历史",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(onClick = onNewConversation) {
-                        Text("Start a new conversation")
+                        Text("开始新对话")
                     }
                 }
             }
@@ -107,12 +107,12 @@ fun ConversationListScreen(
         }
     }
 
-    // Delete confirmation dialog
+    // 删除确认对话框
     showDeleteDialog?.let { conversationId ->
         AlertDialog(
             onDismissRequest = { showDeleteDialog = null },
-            title = { Text("Delete Conversation") },
-            text = { Text("Are you sure you want to delete this conversation? This cannot be undone.") },
+            title = { Text("删除对话") },
+            text = { Text("确定要删除此对话吗？此操作无法撤销。") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -123,12 +123,12 @@ fun ConversationListScreen(
                         contentColor = MaterialTheme.colorScheme.error
                     )
                 ) {
-                    Text("Delete")
+                    Text("删除")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = null }) {
-                    Text("Cancel")
+                    Text("取消")
                 }
             }
         )
@@ -206,7 +206,7 @@ private fun ConversationItem(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = lastMessage?.content ?: "No messages",
+                    text = lastMessage?.content ?: "暂无消息",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -214,14 +214,14 @@ private fun ConversationItem(
                 )
             }
 
-            // Delete button
+            // 删除按钮
             IconButton(
                 onClick = onDelete,
                 modifier = Modifier.size(32.dp)
             ) {
                 Icon(
                     Icons.Default.Delete,
-                    contentDescription = "Delete",
+                    contentDescription = "删除",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp)
                 )
@@ -235,10 +235,10 @@ private fun formatDate(timestamp: Long): String {
     val diff = now - timestamp
 
     return when {
-        diff < 60 * 1000 -> "Just now"
-        diff < 60 * 60 * 1000 -> "${diff / (60 * 1000)}m ago"
-        diff < 24 * 60 * 60 * 1000 -> "${diff / (60 * 60 * 1000)}h ago"
-        diff < 7 * 24 * 60 * 60 * 1000 -> "${diff / (24 * 60 * 60 * 1000)}d ago"
+        diff < 60 * 1000 -> "刚刚"
+        diff < 60 * 60 * 1000 -> "${diff / (60 * 1000)}分钟前"
+        diff < 24 * 60 * 60 * 1000 -> "${diff / (60 * 60 * 1000)}小时前"
+        diff < 7 * 24 * 60 * 60 * 1000 -> "${diff / (24 * 60 * 60 * 1000)}天前"
         else -> SimpleDateFormat("MM/dd", Locale.getDefault()).format(Date(timestamp))
     }
 }
