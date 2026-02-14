@@ -300,7 +300,7 @@ class WakeWordService : Service() {
             var plannerStreamingContent = StringBuilder()
             var isPlanning = false
 
-            onPlanningStart = {
+            phoneAgent?.onPlanningStart = {
                 isPlanning = true
                 plannerStreamingContent.clear()
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -343,7 +343,7 @@ class WakeWordService : Service() {
                 isPlanning = false
             }
 
-            onPlanningComplete = { taskPlan ->
+            phoneAgent?.onPlanningComplete = { taskPlan ->
                 if (taskPlan != null) {
                     // 使用TaskPlan的toReadableText方法，但去掉emoji前缀
                     val planText = taskPlan.toReadableText()
@@ -360,7 +360,7 @@ class WakeWordService : Service() {
                 }
             }
 
-            onSubTaskGenerated = { subTask ->
+            phoneAgent?.onSubTaskGenerated = { subTask ->
                 // 子任务生成时立即显示卡片
                 val cardText = buildString {
                     appendLine("### 步骤 ${subTask.index}")
@@ -382,7 +382,7 @@ class WakeWordService : Service() {
                 android.util.Log.i("AutoGLM", "[COORDINATOR] SubTask ${subTask.index} card displayed: ${subTask.goal}")
             }
 
-            onSubTaskStart = { subTask ->
+            phoneAgent?.onSubTaskStart = { subTask ->
                 val subTaskText = buildString {
                     appendLine("### ▶️ 开始执行子任务 ${subTask.index}")
                     appendLine()
@@ -403,7 +403,7 @@ class WakeWordService : Service() {
                 )
             }
 
-            onSupervisionResult = { result ->
+            phoneAgent?.onSupervisionResult = { result ->
                 val resultText = buildString {
                     appendLine("**评估：**${result.assessment}")
                     if (result.correctionInstruction != null) {
@@ -493,10 +493,12 @@ class WakeWordService : Service() {
         onSpeechRecognized?.invoke(text)
         onTaskStarted?.invoke(text)
 
+        // 步骤2: 语音唤醒执行任务时使用全局配置的默认设置
+        val prefs = App.instance.preferenceManager
         // Execute task with phone agent
         scope.launch {
             try {
-                phoneAgent?.run(text)
+                phoneAgent?.run(text, true, emptyList(), prefs.smartCoordinatorEnabled, true)
             } catch (e: Exception) {
                 onError?.invoke("Task error: ${e.message}")
                 startWakeWordListening()
@@ -562,6 +564,7 @@ class WakeWordService : Service() {
         phoneAgent?.setScreenCaptureData(resultCode, data)
     }
 
+    // 步骤4: WakeWordService执行任务方法 - 默认参数仅作为兜底，实际调用都会传入明确的值
     fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, context: List<SerializableMessage> = emptyList()) {
         android.util.Log.d("AutoGLM", "WakeWordService.executeTask called: task=$task, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer, currentState=${_serviceState.value}")
 

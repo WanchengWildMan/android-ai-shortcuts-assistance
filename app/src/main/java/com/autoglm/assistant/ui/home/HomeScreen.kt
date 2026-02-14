@@ -55,10 +55,23 @@ fun HomeScreen(
     var showCreateDialog by remember { mutableStateOf(false) }
     var showParameterDialog by remember { mutableStateOf<ShortcutData?>(null) }
     var isEditMode by remember { mutableStateOf(false) }
-    // 使用全局设置作为默认值：全局开关控制手动输入任务的默认规划开关状态
+    // 使用全局设置作为初始值，并监听配置变化实时同步
     var enablePlanning by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
     var enableOptimizer by remember { mutableStateOf(true) }
     val haptic = LocalHapticFeedback.current
+
+    // 监听全局配置变化，实时同步到界面
+    DisposableEffect(Unit) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == "smart_coordinator_enabled") {
+                enablePlanning = prefs.smartCoordinatorEnabled
+            }
+        }
+        prefs.registerListener(listener)
+        onDispose {
+            prefs.unregisterListener(listener)
+        }
+    }
 
     Column(
         modifier = modifier
@@ -256,7 +269,10 @@ fun HomeScreen(
                 shape = RoundedCornerShape(16.dp),
                 color = if (enablePlanning) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier
-                    .clickable { enablePlanning = !enablePlanning }
+                    .clickable {
+                        enablePlanning = !enablePlanning
+                        prefs.smartCoordinatorEnabled = enablePlanning  // 同步到全局配置
+                    }
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

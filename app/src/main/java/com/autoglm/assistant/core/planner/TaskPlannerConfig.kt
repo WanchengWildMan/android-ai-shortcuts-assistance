@@ -3,56 +3,46 @@ package com.autoglm.assistant.core.planner
 import com.autoglm.assistant.ai.ModelConfig
 
 /**
- * 任务规划器配置
- * 用于配置一个更强大的模型来分解用户任务
+ * 任务协调器配置
+ * 用于配置一个更强大的模型来协调任务执行
  */
 data class TaskPlannerConfig(
     /**
-     * 是否默认启用规划
-     * 控制新建快捷指令和手动输入任务时的默认规划开关状态
-     * 注意：这不影响SmartCoordinator的初始化，具体任务是否使用规划由任务级别的enablePlanning参数决定
+     * 是否默认启用协调器
+     * 控制新建快捷指令和手动输入任务时的默认协调器开关状态
      */
     val enabled: Boolean = false,
 
     /**
-     * 规划模型配置
+     * 协调器模型配置
      * 建议使用更强大的模型，如 GPT-4, Claude Sonnet, 或 GLM-4 Plus
      */
     val plannerModelConfig: ModelConfig? = null,
 
     /**
-     * 是否启用任务监督
-     * 当启用时，每个子任务执行后会由监督模型检查结果并提供反馈
+     * 决策超时时间（毫秒）
      */
+    val planningTimeout: Long = 30000L,
+
+    // 以下字段已废弃，保留仅为向后兼容
+    @Deprecated("No longer used in new coordinator flow")
     val enableSupervision: Boolean = true,
 
-    /**
-     * 监督模型配置
-     * 如果为null，则使用plannerModelConfig作为监督模型
-     */
+    @Deprecated("No longer used in new coordinator flow")
     val supervisorModelConfig: ModelConfig? = null,
 
-    /**
-     * 最大纠正次数
-     * 每个子任务如果执行不正确，最多允许纠正几次
-     */
+    @Deprecated("No longer used in new coordinator flow")
     val maxCorrections: Int = 2,
 
-    /**
-     * 最大子任务数量
-     * 防止任务分解过于细碎
-     */
-    val maxSubTasks: Int = 10,
-
-    /**
-     * 规划超时时间（毫秒）
-     */
-    val planningTimeout: Long = 30000L
+    @Deprecated("No longer used in new coordinator flow")
+    val maxSubTasks: Int = 10
 )
 
 /**
  * 单个子任务的详细描述
+ * @deprecated 新的协调器流程不再使用预先规划的子任务，改为逐步决策
  */
+@Deprecated("Use CoordinatorDecision instead", ReplaceWith("CoordinatorDecision"))
 data class PlannedSubTask(
     /**
      * 子任务序号（从1开始）
@@ -92,7 +82,9 @@ data class PlannedSubTask(
 
 /**
  * 完整的任务规划
+ * @deprecated 新的协调器流程不再使用预先规划，改为逐步决策
  */
+@Deprecated("Use CoordinatorDecision instead", ReplaceWith("CoordinatorDecision"))
 data class TaskPlan(
     /**
      * 原始用户指令

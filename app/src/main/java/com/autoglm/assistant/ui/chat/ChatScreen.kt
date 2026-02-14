@@ -46,7 +46,7 @@ fun ChatScreen(
 ) {
     val prefs = com.autoglm.assistant.App.instance.preferenceManager
     var inputText by remember { mutableStateOf("") }
-    // 使用全局设置作为默认值：全局开关控制聊天任务的默认规划开关状态
+    // 使用全局设置作为初始值，并监听配置变化实时同步
     var enablePlanning by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
     var enableOptimizer by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
@@ -55,12 +55,17 @@ fun ChatScreen(
     var userScrolledUp by remember { mutableStateOf(false) }
     var isAutoScrolling by remember { mutableStateOf(false) }
 
-    // 监听全局设置变化，同步到聊天页面开关
-    LaunchedEffect(Unit) {
-        snapshotFlow { prefs.smartCoordinatorEnabled }
-            .collect { globalEnabled ->
-                enablePlanning = globalEnabled
+    // 监听全局配置变化，实时同步到界面
+    DisposableEffect(Unit) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == "smart_coordinator_enabled") {
+                enablePlanning = prefs.smartCoordinatorEnabled
             }
+        }
+        prefs.registerListener(listener)
+        onDispose {
+            prefs.unregisterListener(listener)
+        }
     }
 
     // 判断是否在底部（带容差，允许最后2项范围内）
@@ -183,7 +188,10 @@ fun ChatScreen(
                         shape = RoundedCornerShape(8.dp),
                         color = if (enablePlanning) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier
-                            .clickable { enablePlanning = !enablePlanning }
+                            .clickable {
+                                enablePlanning = !enablePlanning
+                                prefs.smartCoordinatorEnabled = enablePlanning  // 同步到全局配置
+                            }
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,

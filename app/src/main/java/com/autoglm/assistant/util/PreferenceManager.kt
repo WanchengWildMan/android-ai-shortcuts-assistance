@@ -173,4 +173,13 @@ class PreferenceManager(context: Context) {
     var useRootMode: Boolean
         get() = prefs.getBoolean(KEY_USE_ROOT_MODE, true)  // 默认开启
         set(value) = prefs.edit { putBoolean(KEY_USE_ROOT_MODE, value) }
+
+    // 配置监听器注册和注销
+    fun registerListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+    }
+
+    fun unregisterListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        prefs.unregisterOnSharedPreferenceChangeListener(listener)
+    }
 }

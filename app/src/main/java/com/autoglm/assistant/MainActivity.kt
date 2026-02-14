@@ -182,6 +182,7 @@ class MainActivity : ComponentActivity() {
         stopService(Intent(this, WakeWordService::class.java))
     }
 
+    // 步骤3: 执行任务方法 - 默认参数仅作为兜底，实际调用都会传入明确的值
     private fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, messages: List<ChatMessage> = emptyList()) {
         // 确保服务作为前台服务启动，这样即使 Activity 进入后台也不会被销毁
         val serviceIntent = Intent(this, WakeWordService::class.java)
