@@ -35,7 +35,12 @@ data class TaskPlannerConfig(
     val maxCorrections: Int = 2,
 
     @Deprecated("No longer used in new coordinator flow")
-    val maxSubTasks: Int = 10
+    val maxSubTasks: Int = 10,
+
+    /**
+     * 协调器每次任务最大执行步数
+     */
+    val maxCoordinatorSteps: Int = 20
 )
 
 /**

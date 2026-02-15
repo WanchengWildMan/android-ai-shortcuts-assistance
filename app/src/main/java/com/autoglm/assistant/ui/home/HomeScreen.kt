@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -50,7 +51,7 @@ fun HomeScreen(
     val shortcutManager = remember { ShortcutManager(context) }
     val prefs = com.autoglm.assistant.App.instance.preferenceManager
     var shortcuts by remember { mutableStateOf(shortcutManager.loadShortcuts()) }
-    var inputText by remember { mutableStateOf("") }
+    var inputText by remember { mutableStateOf(TextFieldValue("")) }
     var showEditDialog by remember { mutableStateOf<ShortcutData?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var showParameterDialog by remember { mutableStateOf<ShortcutData?>(null) }
@@ -335,23 +336,23 @@ fun HomeScreen(
             },
             trailingIcon = {
                 IconButton(onClick = {
-                    if (inputText.isNotEmpty()) {
-                        onShortcutClick(inputText, enablePlanning, enableOptimizer)
-                        inputText = ""
+                    if (inputText.text.isNotEmpty()) {
+                        onShortcutClick(inputText.text, enablePlanning, enableOptimizer)
+                        inputText = TextFieldValue("")
                     }
                 }) {
                     Icon(
                         Icons.Default.Send, 
                         contentDescription = "发送", 
-                        tint = if (inputText.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (inputText.text.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = {
-                if (inputText.isNotEmpty()) {
-                    onShortcutClick(inputText, enablePlanning, enableOptimizer)
-                    inputText = ""
+                if (inputText.text.isNotEmpty()) {
+                    onShortcutClick(inputText.text, enablePlanning, enableOptimizer)
+                    inputText = TextFieldValue("")
                 }
             }),
             singleLine = true

@@ -24,6 +24,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var optimizerMessageIndex = -1
     private var plannerMessageIndex = -1
     private var summaryMessageIndex = -1
+    private var stepMessageIndex = -1
     private var hasShownSubtaskCards = false
     private var lastCoordinatorContent: String? = null
     
@@ -129,6 +130,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         optimizerMessageIndex = -1
         plannerMessageIndex = -1
         summaryMessageIndex = -1
+        stepMessageIndex = -1
         hasShownSubtaskCards = false
         lastCoordinatorContent = null
         lastThinkingContent = null
@@ -223,6 +225,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> {
                 "💭 协调器思考：\n${msg.content}"
             }
+            WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
+                // content 格式: "currentStep|maxSteps"
+                val parts = msg.content.split("|", limit = 2)
+                val current = parts.getOrNull(0) ?: "?"
+                val max = parts.getOrNull(1) ?: "?"
+                "🔄 **协调器执行中** [$current/$max]"
+            }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING -> {
                 if (msg.content.isBlank()) "📝 正在生成任务总结..."
                 else "📝 正在总结...\n\n${msg.content}"
@@ -280,6 +289,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
                 hasShownSubtaskCards = true
                 addMessage(ChatMessage(content = displayContent, isUser = false))
+            }
+            WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
+                // 步骤计数器：原地更新同一条消息，避免刷屏
+                if (stepMessageIndex >= 0 && stepMessageIndex < messages.size) {
+                    val oldMsg = messages[stepMessageIndex]
+                    updateMessage(stepMessageIndex, ChatMessage(
+                        id = oldMsg.id,
+                        content = displayContent,
+                        isUser = false,
+                        timestamp = oldMsg.timestamp
+                    ))
+                } else {
+                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    stepMessageIndex = messages.size - 1
+                }
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING,
             WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {

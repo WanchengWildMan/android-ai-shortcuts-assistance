@@ -31,6 +31,8 @@ class PreferenceManager(context: Context) {
         private const val KEY_COORDINATOR_MODEL_NAME = "coordinator_model_name"
         private const val KEY_SUPERVISION_ENABLED = "supervision_enabled"
         private const val KEY_MAX_CORRECTIONS = "max_corrections"
+        // 协调器最大执行步数
+        private const val KEY_MAX_COORDINATOR_STEPS = "max_coordinator_steps"
 
         // 提示词优化器设置
         private const val KEY_PROMPT_OPTIMIZER_ENABLED = "prompt_optimizer_enabled"
@@ -41,6 +43,8 @@ class PreferenceManager(context: Context) {
         private const val KEY_OPTIMIZER_API_KEY_DOUBAO = "optimizer_api_key_doubao"
         private const val KEY_OPTIMIZER_MODEL_NAME = "optimizer_model_name"
         private const val KEY_TASK_SUMMARY_ENABLED = "task_summary_enabled"
+        // 自定义优化器系统提示词
+        private const val KEY_OPTIMIZER_SYSTEM_PROMPT = "optimizer_system_prompt"
 
         // Shell 设置
         private const val KEY_USE_ROOT_MODE = "use_root_mode"
@@ -55,6 +59,7 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_COORDINATOR_API_URL = "https://api.deepseek.com/v1"
         const val DEFAULT_COORDINATOR_MODEL_NAME = "deepseek-chat"
         const val DEFAULT_MAX_CORRECTIONS = 2
+        const val DEFAULT_MAX_COORDINATOR_STEPS = 20
         // 提示词优化器默认值 - 默认使用协调器设置
         const val DEFAULT_OPTIMIZER_MODEL_NAME = "deepseek-chat"
     }
@@ -134,6 +139,11 @@ class PreferenceManager(context: Context) {
         get() = prefs.getInt(KEY_MAX_CORRECTIONS, DEFAULT_MAX_CORRECTIONS)
         set(value) = prefs.edit { putInt(KEY_MAX_CORRECTIONS, value) }
 
+    // 协调器每次任务最大执行步数
+    var maxCoordinatorSteps: Int
+        get() = prefs.getInt(KEY_MAX_COORDINATOR_STEPS, DEFAULT_MAX_COORDINATOR_STEPS)
+        set(value) = prefs.edit { putInt(KEY_MAX_COORDINATOR_STEPS, value) }
+
     // PromptOptimizer settings
     var promptOptimizerEnabled: Boolean
         get() = prefs.getBoolean(KEY_PROMPT_OPTIMIZER_ENABLED, false)
@@ -168,6 +178,11 @@ class PreferenceManager(context: Context) {
     var taskSummaryEnabled: Boolean
         get() = prefs.getBoolean(KEY_TASK_SUMMARY_ENABLED, false)  // 默认关闭
         set(value) = prefs.edit { putBoolean(KEY_TASK_SUMMARY_ENABLED, value) }
+
+    // 自定义优化器系统提示词（空字符串表示使用内置默认提示词）
+    var optimizerSystemPrompt: String
+        get() = prefs.getString(KEY_OPTIMIZER_SYSTEM_PROMPT, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_OPTIMIZER_SYSTEM_PROMPT, value) }
 
     // Shell settings - 是否使用 Root 模式执行命令
     var useRootMode: Boolean

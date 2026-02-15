@@ -63,5 +63,9 @@ data class PromptOptimizerConfig(
     /**
      * 是否启用任务完成后的自动总结
      */
-    val enableTaskSummary: Boolean = false
+    val enableTaskSummary: Boolean = false,
+    /**
+     * 自定义系统提示词（空字符串表示使用内置默认提示词）
+     */
+    val customSystemPrompt: String = ""
 )
