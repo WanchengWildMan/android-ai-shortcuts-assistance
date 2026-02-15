@@ -36,6 +36,7 @@ import java.util.*
 import dev.jeziellago.compose.markdowntext.MarkdownText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun ChatScreen(
@@ -51,6 +52,7 @@ fun ChatScreen(
     var enablePlanning by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
     var enableOptimizer by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
 
     var previousMessageCount by remember { mutableIntStateOf(0) }
     var userScrolledUp by remember { mutableStateOf(false) }
@@ -247,7 +249,16 @@ fun ChatScreen(
                 ) {
                     OutlinedTextField(
                         value = inputText,
-                        onValueChange = { inputText = it },
+                        onValueChange = { textFieldValue ->
+                            val textChanged = textFieldValue.text != inputText.text
+                            inputText = textFieldValue
+                            // Scroll to bottom when typing
+                            if (textChanged && messages.isNotEmpty() && !userScrolledUp) {
+                                coroutineScope.launch {
+                                    listState.animateScrollToItem(0)
+                                }
+                            }
+                        },
                         placeholder = { Text("输入任务指令...") },
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(28.dp),

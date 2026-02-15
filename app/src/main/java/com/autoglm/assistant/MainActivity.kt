@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.filled.StopCircle
@@ -916,7 +917,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var optimizerModelName by remember { mutableStateOf(prefs.optimizerModelName) }
     var optimizerModelDropdownExpanded by remember { mutableStateOf(false) }
     var taskSummaryEnabled by remember { mutableStateOf(prefs.taskSummaryEnabled) }
-    var optimizerSystemPrompt by remember { mutableStateOf(prefs.optimizerSystemPrompt) }
+    var optimizerSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.optimizerSystemPrompt)) }
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check if any setting has changed
@@ -940,7 +941,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             optimizerApiKey != originalOptimizerApiKey ||
             optimizerModelName != originalOptimizerModelName ||
             taskSummaryEnabled != originalTaskSummaryEnabled ||
-            optimizerSystemPrompt != originalOptimizerSystemPrompt
+            optimizerSystemPrompt.text != originalOptimizerSystemPrompt
 
     // Available wake words
     val availableWakeWords = listOf(
@@ -1036,7 +1037,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 optimizerApiKey != originalOptimizerApiKey ||
                 optimizerModelName != originalOptimizerModelName ||
                 taskSummaryEnabled != originalTaskSummaryEnabled ||
-                optimizerSystemPrompt != originalOptimizerSystemPrompt
+                optimizerSystemPrompt.text != originalOptimizerSystemPrompt
 
         // 保存所有设置
         prefs.apiUrl = apiUrl
@@ -1072,7 +1073,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
         prefs.optimizerModelName = optimizerModelName
         prefs.taskSummaryEnabled = taskSummaryEnabled
-        prefs.optimizerSystemPrompt = optimizerSystemPrompt
+        prefs.optimizerSystemPrompt = optimizerSystemPrompt.text
 
         // 如果关键配置变化，重启服务使其生效
         if (needsRestart) {
@@ -1516,18 +1517,18 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 style = MaterialTheme.typography.bodyMedium
                             )
                             Text(
-                                if (optimizerSystemPrompt.isBlank()) {
+                                if (optimizerSystemPrompt.text.isBlank()) {
                                     if (isChinese) "当前使用内置默认提示词" else "Currently using built-in default prompt"
                                 } else {
-                                    if (isChinese) "已配置自定义提示词（${optimizerSystemPrompt.length}字）" else "Custom prompt configured (${optimizerSystemPrompt.length} chars)"
+                                    if (isChinese) "已配置自定义提示词（${optimizerSystemPrompt.text.length}字）" else "Custom prompt configured (${optimizerSystemPrompt.text.length} chars)"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         Row {
-                            if (optimizerSystemPrompt.isNotBlank()) {
-                                TextButton(onClick = { optimizerSystemPrompt = "" }) {
+                            if (optimizerSystemPrompt.text.isNotBlank()) {
+                                TextButton(onClick = { optimizerSystemPrompt = TextFieldValue("") }) {
                                     Text(if (isChinese) "恢复默认" else "Reset")
                                 }
                             }
