@@ -29,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import java.text.SimpleDateFormat
 import java.util.*
@@ -45,7 +46,7 @@ fun ChatScreen(
     modifier: Modifier = Modifier
 ) {
     val prefs = com.autoglm.assistant.App.instance.preferenceManager
-    var inputText by remember { mutableStateOf("") }
+    var inputText by remember { mutableStateOf(TextFieldValue("")) }
     // 使用全局设置作为初始值，并监听配置变化实时同步
     var enablePlanning by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
     var enableOptimizer by remember { mutableStateOf(true) }
@@ -253,9 +254,9 @@ fun ChatScreen(
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(
                             onSend = {
-                                if (inputText.isNotBlank()) {
-                                    onSendMessage(inputText, enablePlanning, enableOptimizer)
-                                    inputText = ""
+                                if (inputText.text.isNotBlank()) {
+                                    onSendMessage(inputText.text, enablePlanning, enableOptimizer)
+                                    inputText = TextFieldValue("")
                                     userScrolledUp = false
                                 }
                             }
@@ -273,9 +274,9 @@ fun ChatScreen(
                         onClick = {
                             if (isAgentRunning) {
                                 onStopTask()
-                            } else if (inputText.isNotBlank()) {
-                                onSendMessage(inputText, enablePlanning, enableOptimizer)
-                                inputText = ""
+                            } else if (inputText.text.isNotBlank()) {
+                                onSendMessage(inputText.text, enablePlanning, enableOptimizer)
+                                inputText = TextFieldValue("")
                                 userScrolledUp = false
                             }
                         },
@@ -284,7 +285,7 @@ fun ChatScreen(
                             .background(
                                 color = when {
                                     isAgentRunning -> MaterialTheme.colorScheme.error
-                                    inputText.isNotBlank() -> MaterialTheme.colorScheme.primary
+                                    inputText.text.isNotBlank() -> MaterialTheme.colorScheme.primary
                                     else -> MaterialTheme.colorScheme.surfaceVariant
                                 },
                                 shape = CircleShape
@@ -295,7 +296,7 @@ fun ChatScreen(
                             contentDescription = if (isAgentRunning) "停止" else "发送",
                             tint = when {
                                 isAgentRunning -> MaterialTheme.colorScheme.onError
-                                inputText.isNotBlank() -> MaterialTheme.colorScheme.onPrimary
+                                inputText.text.isNotBlank() -> MaterialTheme.colorScheme.onPrimary
                                 else -> MaterialTheme.colorScheme.onSurfaceVariant
                             }
                         )

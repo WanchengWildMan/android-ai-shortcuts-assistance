@@ -23,6 +23,12 @@ class SmartCoordinator(
     private val gatheredInfo = mutableListOf<String>()  // 收集的信息
     private var stepCount = 0  // 当前步数
 
+    /** 获取当前协调器步数 */
+    fun getStepCount(): Int = stepCount
+
+    /** 获取协调器最大步数配置 */
+    fun getMaxSteps(): Int = config.maxCoordinatorSteps
+
     // 回调接口 - 用于UI显示
     var onDecisionStart: (() -> Unit)? = null           // 开始决策
     var onDecisionComplete: ((CoordinatorDecision) -> Unit)? = null  // 决策完成

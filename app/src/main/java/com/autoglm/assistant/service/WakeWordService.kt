@@ -77,6 +77,7 @@ class WakeWordService : Service() {
         SUBTASK_START,          // 子任务开始执行
         SUPERVISION_RESULT,     // 监督结果
         COORDINATOR_THINKING,   // 协调器思考
+        COORDINATOR_STEP,       // 协调器当前执行步数
         SUMMARY_STREAMING,      // 任务总结流式输出中
         SUMMARY_COMPLETE,       // 任务总结完成
         CLEAR                   // 清除消息
@@ -199,7 +200,8 @@ class WakeWordService : Service() {
                 plannerModelConfig = coordinatorModelConfig,
                 enableSupervision = prefs.supervisionEnabled,
                 supervisorModelConfig = coordinatorModelConfig,
-                maxCorrections = prefs.maxCorrections
+                maxCorrections = prefs.maxCorrections,
+                maxCoordinatorSteps = prefs.maxCoordinatorSteps
             ).also {
                 android.util.Log.i("AutoGLM", "SmartCoordinator available: model=${prefs.coordinatorModelName}, defaultEnabled=${prefs.smartCoordinatorEnabled}, supervision=${prefs.supervisionEnabled}")
             }
@@ -224,7 +226,8 @@ class WakeWordService : Service() {
             PromptOptimizerConfig(
                 enabled = true,
                 modelConfig = optimizerModelConfig,
-                enableTaskSummary = prefs.taskSummaryEnabled
+                enableTaskSummary = prefs.taskSummaryEnabled,
+                customSystemPrompt = prefs.optimizerSystemPrompt
             ).also {
                 android.util.Log.i("AutoGLM", "PromptOptimizer enabled: model=${prefs.optimizerModelName}, taskSummary=${prefs.taskSummaryEnabled}")
             }
@@ -341,6 +344,14 @@ class WakeWordService : Service() {
 
             onStreamEnd = {
                 isPlanning = false
+            }
+
+            // 协调器步数回调 — 在消息中显示当前执行步数
+            phoneAgent?.onCoordinatorStep = { currentStep, maxSteps ->
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.COORDINATOR_STEP,
+                    content = "$currentStep|$maxSteps"
+                )
             }
 
             phoneAgent?.onPlanningComplete = { taskPlan ->

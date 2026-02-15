@@ -57,10 +57,6 @@ class PhoneAgent(
     private var currentStep = 0
     private var currentTaskId: String? = null
     private var stopRequested = false  // 用于检测停止请求
-    
-    // Agent执行状态 - 用于监督器
-    private var lastAgentThinking: String = ""
-    private var lastAgentAction: String = ""
 
 
     // 回调
@@ -86,16 +82,6 @@ class PhoneAgent(
     var onPromptOptimized: ((String) -> Unit)? = null   // prompt 优化完成
     var onTaskSummarizing: (() -> Unit)? = null         // 正在生成任务总结
     var onTaskSummary: ((String) -> Unit)? = null       // 任务总结完成
-    
-    // 协调器步数回调 — 用于在消息中显示当前步数
-    var onCoordinatorStep: ((currentStep: Int, maxSteps: Int) -> Unit)? = null
-
-    // SmartCoordinator 回调 - 用于任务规划
-    var onPlanningStart: (() -> Unit)? = null
-    var onPlanningComplete: ((TaskPlan?) -> Unit)? = null
-    var onSubTaskGenerated: ((PlannedSubTask) -> Unit)? = null
-    var onSubTaskStart: ((PlannedSubTask) -> Unit)? = null
-    var onSupervisionResult: ((com.autoglm.assistant.core.planner.SupervisionResult) -> Unit)? = null
 
     // 状态
     private val _isRunning = MutableStateFlow(false)
@@ -165,7 +151,7 @@ class PhoneAgent(
         // 初始化Prompt优化器（如果配置了）
         agentConfig.optimizerConfig?.let { config ->
             if (config.enabled && config.modelConfig != null) {
-                promptOptimizer = PromptOptimizer(config.modelConfig, config.customSystemPrompt).apply {
+                promptOptimizer = PromptOptimizer(config.modelConfig).apply {
                     onOptimizing = {
                         this@PhoneAgent.onPromptOptimizing?.invoke()
                     }
@@ -308,11 +294,10 @@ class PhoneAgent(
      * 使用协调器执行任务（逐步导航模式）
      */
     private suspend fun executeWithCoordinator(task: String): String {
-        Logger.i(Logger.AGENT, "========== EXECUTING WITH COORDINATOR ==========")
+        Logger.i(Logger.AGENT, "========== EXECUTING WITH COORDINATOR ==========\")
 
         var coordinatorSteps = 0
-        // 从协调器配置获取最大步数，避免硬编码
-        val maxCoordinatorSteps = agentConfig.plannerConfig?.maxCoordinatorSteps ?: 20
+        val maxCoordinatorSteps = 20  // 最多20轮协调
 
         while (coordinatorSteps < maxCoordinatorSteps && currentStep < agentConfig.maxSteps) {
             if (stopRequested) {
@@ -322,9 +307,6 @@ class PhoneAgent(
 
             coordinatorSteps++
             Logger.i(Logger.AGENT, "---------- Coordinator Step $coordinatorSteps ----------")
-
-            // 通知UI当前执行步数
-            onCoordinatorStep?.invoke(coordinatorSteps, maxCoordinatorSteps)
 
             // 获取当前截图
             val screenshot = screenCapture.capture()
@@ -465,7 +447,6 @@ class PhoneAgent(
 
     /**
      * 直接执行任务（不使用协调器）
-     */
     private suspend fun executeDirectly(task: String): String {
         if (stopRequested) {
             Logger.i(Logger.AGENT, "Task stopped by user before execution")
@@ -502,10 +483,6 @@ class PhoneAgent(
         return summaryMessage
     }
 
-    /**
-     * 执行一步Agent操作
-     */
-    private suspend fun executeStep(
         userPrompt: String? = null,
         isNewTask: Boolean = false
     ): StepResult {

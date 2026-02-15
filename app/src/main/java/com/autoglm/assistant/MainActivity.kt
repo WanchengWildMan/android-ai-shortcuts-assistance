@@ -351,6 +351,7 @@ fun MainScreen(
     var optimizerMessageIndex by remember { mutableIntStateOf(-1) }
     var plannerMessageIndex by remember { mutableIntStateOf(-1) }
     var summaryMessageIndex by remember { mutableIntStateOf(-1) }
+    var stepMessageIndex by remember { mutableIntStateOf(-1) }
     // 跟踪是否已经显示了subtask卡片
     var hasShownSubtaskCards by remember { mutableStateOf(false) }
 
@@ -359,6 +360,7 @@ fun MainScreen(
         optimizerMessageIndex = -1
         plannerMessageIndex = -1
         summaryMessageIndex = -1
+        stepMessageIndex = -1
         hasShownSubtaskCards = false
         lastCoordinatorContent = null
     }
@@ -373,6 +375,7 @@ fun MainScreen(
             optimizerMessageIndex = -1
             plannerMessageIndex = -1
             summaryMessageIndex = -1
+            stepMessageIndex = -1
             hasShownSubtaskCards = false
             return@LaunchedEffect
         }
@@ -422,6 +425,13 @@ fun MainScreen(
             }
             WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> {
                 "💭 协调器思考：\n${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
+                // content 格式: "currentStep|maxSteps"
+                val parts = msg.content.split("|", limit = 2)
+                val current = parts.getOrNull(0) ?: "?"
+                val max = parts.getOrNull(1) ?: "?"
+                "🔄 **协调器执行中** [$current/$max]"
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING -> {
                 if (msg.content.isBlank()) "📝 正在生成任务总结..."
@@ -495,6 +505,21 @@ fun MainScreen(
                 } else {
                     addMessage(ChatMessage(content = displayContent, isUser = false))
                     summaryMessageIndex = messages.size - 1
+                }
+            }
+            WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
+                // 步骤计数器：原地更新同一条消息
+                if (stepMessageIndex >= 0 && stepMessageIndex < messages.size) {
+                    val oldMsg = messages[stepMessageIndex]
+                    updateMessage(stepMessageIndex, ChatMessage(
+                        id = oldMsg.id,
+                        content = displayContent,
+                        isUser = false,
+                        timestamp = oldMsg.timestamp
+                    ))
+                } else {
+                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    stepMessageIndex = messages.size - 1
                 }
             }
             else -> {
@@ -830,6 +855,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalCoordinatorModelName = remember { prefs.coordinatorModelName }
     val originalSupervisionEnabled = remember { prefs.supervisionEnabled }
     val originalMaxCorrections = remember { prefs.maxCorrections.toString() }
+    val originalMaxCoordinatorSteps = remember { prefs.maxCoordinatorSteps.toString() }
     // Prompt Optimizer originals
     val originalPromptOptimizerEnabled = remember { prefs.promptOptimizerEnabled }
     val originalOptimizerApiUrl = remember { prefs.optimizerApiUrl }
@@ -844,6 +870,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
     val originalOptimizerModelName = remember { prefs.optimizerModelName }
     val originalTaskSummaryEnabled = remember { prefs.taskSummaryEnabled }
+    val originalOptimizerSystemPrompt = remember { prefs.optimizerSystemPrompt }
 
     var apiUrl by remember { mutableStateOf(prefs.apiUrl) }
     var apiKey by remember { mutableStateOf(prefs.apiKey) }
@@ -871,6 +898,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var coordinatorModelDropdownExpanded by remember { mutableStateOf(false) }
     var supervisionEnabled by remember { mutableStateOf(prefs.supervisionEnabled) }
     var maxCorrections by remember { mutableStateOf(prefs.maxCorrections.toString()) }
+    var maxCoordinatorSteps by remember { mutableStateOf(prefs.maxCoordinatorSteps.toString()) }
     // Prompt Optimizer states
     var promptOptimizerEnabled by remember { mutableStateOf(prefs.promptOptimizerEnabled) }
     var optimizerApiUrl by remember { mutableStateOf(prefs.optimizerApiUrl) }
@@ -888,6 +916,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var optimizerModelName by remember { mutableStateOf(prefs.optimizerModelName) }
     var optimizerModelDropdownExpanded by remember { mutableStateOf(false) }
     var taskSummaryEnabled by remember { mutableStateOf(prefs.taskSummaryEnabled) }
+    var optimizerSystemPrompt by remember { mutableStateOf(prefs.optimizerSystemPrompt) }
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check if any setting has changed
@@ -905,11 +934,13 @@ fun SettingsScreen(onBack: () -> Unit) {
             coordinatorModelName != originalCoordinatorModelName ||
             supervisionEnabled != originalSupervisionEnabled ||
             maxCorrections != originalMaxCorrections ||
+            maxCoordinatorSteps != originalMaxCoordinatorSteps ||
             promptOptimizerEnabled != originalPromptOptimizerEnabled ||
             optimizerApiUrl != originalOptimizerApiUrl ||
             optimizerApiKey != originalOptimizerApiKey ||
             optimizerModelName != originalOptimizerModelName ||
-            taskSummaryEnabled != originalTaskSummaryEnabled
+            taskSummaryEnabled != originalTaskSummaryEnabled ||
+            optimizerSystemPrompt != originalOptimizerSystemPrompt
 
     // Available wake words
     val availableWakeWords = listOf(
@@ -961,6 +992,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         val enableSupervision = if (isChinese) "启用执行监督" else "Enable Supervision"
         val supervisionDesc = if (isChinese) "检查每个子任务的执行结果" else "Check execution result of each subtask"
         val maxCorrectionsLabel = if (isChinese) "最大纠正次数" else "Max Corrections"
+        val maxCoordinatorStepsLabel = if (isChinese) "协调器最大执行步数" else "Max Coordinator Steps"
         // Prompt Optimizer strings
         val promptOptimizerSettings = if (isChinese) "指令优化器设置" else "Prompt Optimizer Settings"
         val enablePromptOptimizer = if (isChinese) "启用指令优化器" else "Enable Prompt Optimizer"
@@ -998,11 +1030,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                 coordinatorModelName != originalCoordinatorModelName ||
                 supervisionEnabled != originalSupervisionEnabled ||
                 maxCorrections != originalMaxCorrections ||
+                maxCoordinatorSteps != originalMaxCoordinatorSteps ||
                 promptOptimizerEnabled != originalPromptOptimizerEnabled ||
                 optimizerApiUrl != originalOptimizerApiUrl ||
                 optimizerApiKey != originalOptimizerApiKey ||
                 optimizerModelName != originalOptimizerModelName ||
-                taskSummaryEnabled != originalTaskSummaryEnabled
+                taskSummaryEnabled != originalTaskSummaryEnabled ||
+                optimizerSystemPrompt != originalOptimizerSystemPrompt
 
         // 保存所有设置
         prefs.apiUrl = apiUrl
@@ -1025,6 +1059,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.coordinatorModelName = coordinatorModelName
         prefs.supervisionEnabled = supervisionEnabled
         prefs.maxCorrections = maxCorrections.toIntOrNull() ?: 2
+        prefs.maxCoordinatorSteps = maxCoordinatorSteps.toIntOrNull() ?: 20
         // Prompt Optimizer settings
         prefs.promptOptimizerEnabled = promptOptimizerEnabled
         prefs.optimizerApiUrl = optimizerApiUrl
@@ -1037,6 +1072,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
         prefs.optimizerModelName = optimizerModelName
         prefs.taskSummaryEnabled = taskSummaryEnabled
+        prefs.optimizerSystemPrompt = optimizerSystemPrompt
 
         // 如果关键配置变化，重启服务使其生效
         if (needsRestart) {
@@ -1331,6 +1367,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                 )
             }
 
+            // 2. 协调器最大执行步数
+            OutlinedTextField(
+                value = maxCoordinatorSteps,
+                onValueChange = { maxCoordinatorSteps = it },
+                label = { Text(strings.maxCoordinatorStepsLabel) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
             Divider()
 
             // Prompt Optimizer Settings
@@ -1451,6 +1496,68 @@ fun SettingsScreen(onBack: () -> Unit) {
                         checked = taskSummaryEnabled,
                         onCheckedChange = { taskSummaryEnabled = it }
                     )
+                }
+
+                // 自定义优化器系统提示词
+                var showPromptEditor by remember { mutableStateOf(false) }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                if (isChinese) "自定义优化器提示词" else "Custom Optimizer Prompt",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                if (optimizerSystemPrompt.isBlank()) {
+                                    if (isChinese) "当前使用内置默认提示词" else "Currently using built-in default prompt"
+                                } else {
+                                    if (isChinese) "已配置自定义提示词（${optimizerSystemPrompt.length}字）" else "Custom prompt configured (${optimizerSystemPrompt.length} chars)"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Row {
+                            if (optimizerSystemPrompt.isNotBlank()) {
+                                TextButton(onClick = { optimizerSystemPrompt = "" }) {
+                                    Text(if (isChinese) "恢复默认" else "Reset")
+                                }
+                            }
+                            TextButton(onClick = { showPromptEditor = !showPromptEditor }) {
+                                Text(if (showPromptEditor) {
+                                    if (isChinese) "收起" else "Collapse"
+                                } else {
+                                    if (isChinese) "编辑" else "Edit"
+                                })
+                            }
+                        }
+                    }
+                    if (showPromptEditor) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = optimizerSystemPrompt,
+                            onValueChange = { optimizerSystemPrompt = it },
+                            label = { Text(if (isChinese) "系统提示词（留空使用默认）" else "System Prompt (empty = default)") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 150.dp, max = 400.dp),
+                            maxLines = 20,
+                            supportingText = {
+                                Text(
+                                    if (isChinese) "自定义指令优化器的行为规则，留空则使用内置的默认提示词"
+                                    else "Customize optimizer behavior rules. Leave empty to use built-in default prompt"
+                                )
+                            }
+                        )
+                    }
                 }
             }
 
