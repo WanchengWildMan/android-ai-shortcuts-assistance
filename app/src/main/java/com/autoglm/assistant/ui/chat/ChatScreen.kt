@@ -39,10 +39,12 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import java.text.SimpleDateFormat
 import java.util.*
-import dev.jeziellago.compose.markdowntext.MarkdownText
+// dev.jeziellago.compose.markdowntext.MarkdownText removed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 
 @Composable
 fun ChatScreen(
@@ -365,70 +367,79 @@ fun ChatBubble(message: ChatMessage) {
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = alignment
-    ) {
-        Row(
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-        ) {
-            if (!isUser) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.SmartToy,
-                        contentDescription = "Bot",
-                        modifier = Modifier.padding(6.dp),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-            }
+    val selectionColors = TextSelectionColors(
+        handleColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+        backgroundColor = if (isUser) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.4f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+    )
 
-            Surface(
-                color = backgroundColor,
-                shape = shape,
-                modifier = Modifier
-                    .widthIn(min = 100.dp, max = 320.dp)
-                    .combinedClickable(
-                        onClick = { },
-                        onLongClick = {
-                            clipboardManager.setText(AnnotatedString(message.content))
-                            Toast.makeText(context, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
-                        }
-                    ),
-                shadowElevation = 1.dp
+    CompositionLocalProvider(
+        LocalTextSelectionColors provides selectionColors
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = alignment
+        ) {
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    if (isUser) {
-                        SelectionContainer {
-                            Text(
-                                text = message.content,
-                                style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
-                            )
-                        }
-                    } else {
-                        MarkdownText(
-                            markdown = message.content,
-                            style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                if (!isUser) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SmartToy,
+                            contentDescription = "Bot",
+                            modifier = Modifier.padding(6.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = formatTime(message.timestamp),
-                        color = textColor.copy(alpha = 0.7f),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.align(Alignment.End)
-                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                 }
-            }
 
-            if (isUser) {
+                Surface(
+                    color = backgroundColor,
+                    shape = shape,
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .combinedClickable(
+                            onClick = { },
+                            onLongClick = {
+                                clipboardManager.setText(AnnotatedString(message.content))
+                                Toast.makeText(context, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+                            }
+                        ),
+                    shadowElevation = 1.dp
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        SelectionContainer {
+                            if (isUser) {
+                                Text(
+                                    text = message.content,
+                                    style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                                )
+                            } else {
+                                Text(
+                                    text = parseMarkdown(message.content),
+                                    style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = formatTime(message.timestamp),
+                            color = textColor.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.align(Alignment.End)
+                        )
+                    }
+                }
+
+                if (isUser) {
+                }
             }
         }
     }

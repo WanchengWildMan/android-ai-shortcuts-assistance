@@ -15,6 +15,7 @@ class PreferenceManager(context: Context) {
         private const val KEY_API_KEY = "api_key"
         private const val KEY_MODEL_NAME = "model_name"
         private const val KEY_LANGUAGE = "language"
+        // Agent执行单个任务的总操作步数上限（无论是否使用协调器）
         private const val KEY_MAX_STEPS = "max_steps"
         private const val KEY_WAKE_WORD_ENABLED = "wake_word_enabled"
         private const val KEY_PORCUPINE_ACCESS_KEY = "porcupine_access_key"
@@ -29,9 +30,12 @@ class PreferenceManager(context: Context) {
         private const val KEY_COORDINATOR_API_KEY_BIGMODEL = "coordinator_api_key_bigmodel"
         private const val KEY_COORDINATOR_API_KEY_DOUBAO = "coordinator_api_key_doubao"
         private const val KEY_COORDINATOR_MODEL_NAME = "coordinator_model_name"
+        // 自定义协调器系统提示词
+        private const val KEY_COORDINATOR_SYSTEM_PROMPT = "coordinator_system_prompt"
+        // 已废弃：监督模式下对单个子任务的最大纠正次数（当前协调器流程不再使用）
         private const val KEY_SUPERVISION_ENABLED = "supervision_enabled"
         private const val KEY_MAX_CORRECTIONS = "max_corrections"
-        // 协调器最大执行步数
+        // 协调器每次任务的最大决策轮次（每轮包括：分析截图+决策下一步+Agent执行）
         private const val KEY_MAX_COORDINATOR_STEPS = "max_coordinator_steps"
 
         // 提示词优化器设置
@@ -46,6 +50,9 @@ class PreferenceManager(context: Context) {
         // 自定义优化器系统提示词
         private const val KEY_OPTIMIZER_SYSTEM_PROMPT = "optimizer_system_prompt"
 
+        // 自定义 Agent 系统提示词
+        private const val KEY_AGENT_SYSTEM_PROMPT = "agent_system_prompt"
+
         // Shell 设置
         private const val KEY_USE_ROOT_MODE = "use_root_mode"
 
@@ -54,12 +61,12 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4"
         const val DEFAULT_MODEL_NAME = "autoglm-phone"
         const val DEFAULT_LANGUAGE = "cn"
-        const val DEFAULT_MAX_STEPS = 100
+        const val DEFAULT_MAX_STEPS = 100  // Agent执行单个任务的总操作步数上限
         // 智能协调器默认值 - DeepSeek
         const val DEFAULT_COORDINATOR_API_URL = "https://api.deepseek.com/v1"
         const val DEFAULT_COORDINATOR_MODEL_NAME = "deepseek-chat"
-        const val DEFAULT_MAX_CORRECTIONS = 2
-        const val DEFAULT_MAX_COORDINATOR_STEPS = 20
+        const val DEFAULT_MAX_CORRECTIONS = 2  // 已废弃：监督模式的纠正次数
+        const val DEFAULT_MAX_COORDINATOR_STEPS = 20  // 协调器每次任务的最大决策轮次
         // 提示词优化器默认值 - 默认使用协调器设置
         const val DEFAULT_OPTIMIZER_MODEL_NAME = "deepseek-chat"
     }
@@ -131,15 +138,23 @@ class PreferenceManager(context: Context) {
         get() = prefs.getString(KEY_COORDINATOR_MODEL_NAME, DEFAULT_COORDINATOR_MODEL_NAME) ?: DEFAULT_COORDINATOR_MODEL_NAME
         set(value) = prefs.edit { putString(KEY_COORDINATOR_MODEL_NAME, value) }
 
+    // 自定义 Coordinator 系统提示词（空字符串表示使用内置默认提示词）
+    var coordinatorSystemPrompt: String
+        get() = prefs.getString(KEY_COORDINATOR_SYSTEM_PROMPT, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_COORDINATOR_SYSTEM_PROMPT, value) }
+
     var supervisionEnabled: Boolean
         get() = prefs.getBoolean(KEY_SUPERVISION_ENABLED, true)
         set(value) = prefs.edit { putBoolean(KEY_SUPERVISION_ENABLED, value) }
 
+    // 已废弃：监督模式下对单个子任务的最大纠正次数
     var maxCorrections: Int
         get() = prefs.getInt(KEY_MAX_CORRECTIONS, DEFAULT_MAX_CORRECTIONS)
         set(value) = prefs.edit { putInt(KEY_MAX_CORRECTIONS, value) }
 
-    // 协调器每次任务最大执行步数
+    // 协调器每次任务的最大决策轮次
+    // 每轮包括：1)协调器分析截图和执行历史 2)决策下一步操作 3)Agent执行具体指令
+    // 同时受maxSteps限制：当任一条件达到上限，任务执行便停止
     var maxCoordinatorSteps: Int
         get() = prefs.getInt(KEY_MAX_COORDINATOR_STEPS, DEFAULT_MAX_COORDINATOR_STEPS)
         set(value) = prefs.edit { putInt(KEY_MAX_COORDINATOR_STEPS, value) }
@@ -178,6 +193,11 @@ class PreferenceManager(context: Context) {
     var taskSummaryEnabled: Boolean
         get() = prefs.getBoolean(KEY_TASK_SUMMARY_ENABLED, false)  // 默认关闭
         set(value) = prefs.edit { putBoolean(KEY_TASK_SUMMARY_ENABLED, value) }
+
+    // 自定义 Agent 系统提示词（空字符串表示使用内置默认提示词）
+    var agentSystemPrompt: String
+        get() = prefs.getString(KEY_AGENT_SYSTEM_PROMPT, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_AGENT_SYSTEM_PROMPT, value) }
 
     // 自定义优化器系统提示词（空字符串表示使用内置默认提示词）
     var optimizerSystemPrompt: String

@@ -38,9 +38,23 @@ data class TaskPlannerConfig(
     val maxSubTasks: Int = 10,
 
     /**
-     * 协调器每次任务最大执行步数
+     * 协调器每次任务的最大决策轮次
+     * 
+     * 每轮决策包括：
+     * 1. 协调器分析当前截图和执行历史
+     * 2. 决定下一步操作（继续执行/任务完成/任务失败）
+     * 3. Agent执行协调器给出的具体指令
+     * 
+     * 注意：同时受AgentConfig.maxSteps限制，任一条件达到上限，任务执行便停止
+     * 
+     * 循环条件：while (coordinatorSteps < maxCoordinatorSteps && currentStep < agentConfig.maxSteps)
      */
-    val maxCoordinatorSteps: Int = 20
+    val maxCoordinatorSteps: Int = 20,
+
+    /**
+     * 自定义系统提示词（空字符串表示使用内置默认提示词）
+     */
+    val customSystemPrompt: String = ""
 )
 
 /**

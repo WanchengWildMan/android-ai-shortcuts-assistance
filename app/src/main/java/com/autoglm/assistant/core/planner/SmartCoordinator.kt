@@ -66,7 +66,9 @@ class SmartCoordinator(
         Logger.startTimer("coordinator_decision")
 
         try {
-            val systemPrompt = if (language == "en") {
+            val systemPrompt = if (config.customSystemPrompt.isNotBlank()) {
+                config.customSystemPrompt
+            } else if (language == "en") {
                 DECISION_SYSTEM_PROMPT_EN
             } else {
                 DECISION_SYSTEM_PROMPT_CN
