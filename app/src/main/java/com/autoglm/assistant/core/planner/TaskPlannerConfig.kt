@@ -45,16 +45,39 @@ data class TaskPlannerConfig(
      * 2. 决定下一步操作（继续执行/任务完成/任务失败）
      * 3. Agent执行协调器给出的具体指令
      * 
-     * 注意：同时受AgentConfig.maxSteps限制，任一条件达到上限，任务执行便停止
-     * 
-     * 循环条件：while (coordinatorSteps < maxCoordinatorSteps && currentStep < agentConfig.maxSteps)
+     * 循环条件：while (coordinatorSteps < maxCoordinatorSteps)
      */
     val maxCoordinatorSteps: Int = 20,
 
     /**
+     * 协调器单轮内，PhoneAgent 执行单条 nextInstruction 的最大连续决策轮次
+     */
+    val maxAgentStepsPerCoordinatorStep: Int = 10,
+
+    /**
      * 自定义系统提示词（空字符串表示使用内置默认提示词）
      */
-    val customSystemPrompt: String = ""
+    val customSystemPrompt: String = "",
+
+    /**
+     * 协调器模型是否支持 Vision（图片输入）
+     *
+     * 如果启用，协调器在决策时会接收当前截图，可以更准确地判断任务状态
+     * 如果禁用，协调器只根据执行历史文本做决策
+     *
+     * 支持 Vision 的模型：
+     * - GLM-4V, GLM-4V-Plus (智谱)
+     * - GPT-4V, GPT-4-Turbo (OpenAI)
+     * - Claude 3 系列 (Anthropic)
+     *
+     * 不支持 Vision 的模型：
+     * - DeepSeek-Chat, DeepSeek-Reasoner
+     * - GLM-4, GLM-4-Plus (非 V 版本)
+     * - 大部分纯文本模型
+     *
+     * 默认：false（兼容大多数模型）
+     */
+    val enableVision: Boolean = false
 )
 
 /**

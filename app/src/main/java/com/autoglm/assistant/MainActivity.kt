@@ -23,6 +23,10 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.background
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.TextFieldValue
@@ -46,6 +50,10 @@ import com.autoglm.assistant.ui.home.HomeScreen
 import com.autoglm.assistant.ui.chat.MessageManager
 import com.autoglm.assistant.ui.chat.Conversation
 import com.autoglm.assistant.ui.chat.ConversationListScreen
+import com.autoglm.assistant.ui.components.PermissionGuideDialog
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+
 import androidx.compose.runtime.collectAsState
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -122,20 +130,32 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        bindService(
-            Intent(this, WakeWordService::class.java),
-            serviceConnection,
-            Context.BIND_AUTO_CREATE
-        )
+        // 步骤: 仅在尚未绑定时绑定服务
+        // 任务执行期间 onStop 会跳过解绑，此时 serviceBound 仍为 true，无需重复绑定
+        if (!serviceBound) {
+            bindService(
+                Intent(this, WakeWordService::class.java),
+                serviceConnection,
+                Context.BIND_AUTO_CREATE
+            )
+        }
     }
 
     override fun onStop() {
         android.util.Log.d("AutoGLM", "=== MainActivity.onStop() called - activity going to background ===")
         super.onStop()
         if (serviceBound) {
-            android.util.Log.d("AutoGLM", "=== MainActivity: unbinding service (but NOT stopping task) ===")
-            unbindService(serviceConnection)
-            serviceBound = false
+            // 步骤: 任务执行期间保持绑定，作为双重保险
+            // 主保护由 ensureServiceStartedAsForeground 提供（前台服务不会因解绑销毁）
+            // 此处额外保留绑定，避免极端情况（如前台服务启动失败）下服务被销毁
+            val isTaskRunning = wakeWordService?.serviceState?.value == WakeWordService.ServiceState.EXECUTING_TASK
+            if (isTaskRunning) {
+                android.util.Log.d("AutoGLM", "=== MainActivity.onStop(): task running, keeping service bound ===")
+            } else {
+                android.util.Log.d("AutoGLM", "=== MainActivity: unbinding service (no task running) ===")
+                unbindService(serviceConnection)
+                serviceBound = false
+            }
         }
     }
 
@@ -160,26 +180,45 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startWakeWordService() {
-        // 检查无障碍服务
-        if (!isAccessibilityServiceEnabled()) {
-            Toast.makeText(this, "请启用无障碍服务", Toast.LENGTH_LONG).show()
-            openAccessibilitySettings()
-            return
-        }
-
-        // 检查悬浮窗权限
+        // 步骤1: 检查悬浮窗权限
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "请授予悬浮窗权限", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             return
         }
 
-        // 启动服务
-        val serviceIntent = Intent(this, WakeWordService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
+        // 步骤2: 检查并请求电池优化豁免
+        // 业务目的：防止系统在后台杀死服务，确保任务持续执行
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                android.util.Log.w("AutoGLM", "=== 应用未在电池优化白名单中，请求加入 ===")
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                    Toast.makeText(this, "请允许应用在后台运行，以确保任务不被中断", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    android.util.Log.e("AutoGLM", "请求电池优化豁免失败", e)
+                }
+            }
+        }
+
+        // 步骤3: 启动语音唤醒服务（需要麦克风权限）
+        // HARD: 暂时禁用唤醒词功能，仅启动前台服务
+        val serviceIntent = Intent(this, WakeWordService::class.java).apply {
+            putExtra("START_WAKE_WORD", false)  // HARD: 禁用唤醒词，避免服务被停止导致任务中断
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "启动服务失败: ${e.message}", Toast.LENGTH_LONG).show()
+            android.util.Log.e("MainActivity", "启动服务失败", e)
         }
     }
 
@@ -189,14 +228,57 @@ class MainActivity : ComponentActivity() {
 
     // 步骤3: 执行任务方法 - 默认参数仅作为兜底，实际调用都会传入明确的值
     private fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, messages: List<ChatMessage> = emptyList()) {
-        // 确保服务作为前台服务启动，这样即使 Activity 进入后台也不会被销毁
-        val serviceIntent = Intent(this, WakeWordService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
+        // 步骤3.0: 检查电池优化设置
+        // 业务目的：在执行任务前提醒用户关闭电池优化，避免任务被系统中断
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                android.util.Log.w("AutoGLM", "=== 警告：应用未在电池优化白名单中，任务可能被中断 ===")
+                Toast.makeText(this, "建议关闭电池优化，避免任务被中断", Toast.LENGTH_SHORT).show()
+            }
         }
+        
+        // 步骤3.1: 确保服务以前台服务方式运行
+        // 业务目的：防止 Activity 切后台（onStop→unbindService）时服务因仅通过 BIND_AUTO_CREATE 创建而被销毁
+        // 仅通过 bindService 创建的服务，在所有客户端解绑后会被系统销毁；
+        // 通过 startForegroundService 启动的服务，即使解绑也会继续运行
+        ensureServiceStartedAsForeground()
 
+        if (!serviceBound) {
+            bindService(
+                Intent(this, WakeWordService::class.java),
+                serviceConnection,
+                Context.BIND_AUTO_CREATE
+            )
+            // 等待绑定完成
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                executeTaskInternal(task, enablePlanning, enableOptimizer, messages)
+            }, 100)
+        } else {
+            executeTaskInternal(task, enablePlanning, enableOptimizer, messages)
+        }
+    }
+
+    /**
+     * 确保 WakeWordService 以前台服务方式运行
+     * 业务目的：前台服务在 unbindService 后不会被销毁，确保任务在后台持续执行
+     */
+    private fun ensureServiceStartedAsForeground() {
+        val serviceIntent = Intent(this, WakeWordService::class.java).apply {
+            putExtra("START_WAKE_WORD", false)  // 不启动语音唤醒，仅确保前台服务运行
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "⚠️ 无法启动前台服务: ${e.message}")
+        }
+    }
+    
+    private fun executeTaskInternal(task: String, enablePlanning: Boolean, enableOptimizer: Boolean, messages: List<ChatMessage>) {
         val context = messages.map {
             SerializableMessage(
                 role = if (it.isUser) "user" else "assistant",
@@ -214,6 +296,40 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestScreenCapturePermission() {
+        // 步骤1: 确保服务已启动（作为MediaProjection类型的前台服务）
+        if (!serviceBound) {
+            // 启动服务（不需要语音唤醒，但需要MediaProjection类型）
+            val serviceIntent = Intent(this, WakeWordService::class.java).apply {
+                putExtra("START_WAKE_WORD", false)  // 不启动语音唤醒
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+                
+                // 绑定服务以获取引用
+                bindService(
+                    Intent(this, WakeWordService::class.java),
+                    serviceConnection,
+                    0  // 不使用BIND_AUTO_CREATE，因为已经启动了
+                )
+                
+                // 等待绑定完成后再请求权限
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    screenCapturePermissionLauncher.launch(projectionManager.createScreenCaptureIntent())
+                }, 200)
+                return
+            } catch (e: Exception) {
+                Toast.makeText(this, "启动服务失败: ${e.message}", Toast.LENGTH_LONG).show()
+                android.util.Log.e("MainActivity", "启动服务失败", e)
+                return
+            }
+        }
+        
+        // 步骤2: 服务已启动，直接请求权限
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         screenCapturePermissionLauncher.launch(projectionManager.createScreenCaptureIntent())
     }
@@ -271,6 +387,32 @@ fun MainScreen(
     val context = LocalContext.current
     val messageManager = remember { MessageManager(context) }
     val scope = rememberCoroutineScope()
+
+    var showPermissionGuide by remember { mutableStateOf(false) }
+
+    if (showPermissionGuide) {
+        PermissionGuideDialog(
+            onDismissRequest = { showPermissionGuide = false },
+            onGoToSettings = {
+                showPermissionGuide = false
+                try {
+                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (e: Exception) {
+                    context.startActivity(Intent(Settings.ACTION_SETTINGS))
+                }
+            },
+            isChinese = App.instance.preferenceManager.language == "cn"
+        )
+    }
+
+    val checkAndExecute: (String, Boolean, Boolean, List<ChatMessage>) -> Unit = { task, plan, opt, msgs ->
+        val prefs = App.instance.preferenceManager
+        if (!prefs.useRootMode && !com.autoglm.assistant.util.PermissionHelper.isAccessibilityServiceEnabled(context)) {
+            showPermissionGuide = true
+        } else {
+            onExecuteTask(task, plan, opt, msgs)
+        }
+    }
 
     // 启动时加载对话
     LaunchedEffect(Unit) {
@@ -431,14 +573,14 @@ fun MainScreen(
                 "$emoji 监督结果\n\n$content"
             }
             WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> {
-                "💭 协调器思考：\n${msg.content}"
+                "🤔 **协调器分析：**\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
                 // content 格式: "currentStep|maxSteps"
                 val parts = msg.content.split("|", limit = 2)
                 val current = parts.getOrNull(0) ?: "?"
                 val max = parts.getOrNull(1) ?: "?"
-                "🔄 **协调器执行中** [$current/$max]"
+                "🔄 **协调器决策中** [$current/$max]"
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING -> {
                 if (msg.content.isBlank()) "📝 正在生成任务总结..."
@@ -745,7 +887,7 @@ fun MainScreen(
                             // Navigate first, then execute task
                             navController.navigate("chat")
                             // Execute task after navigation to ensure UI is ready
-                            onExecuteTask(prompt, enablePlanning, enableOptimizer, emptyList())
+                            checkAndExecute(prompt, enablePlanning, enableOptimizer, emptyList())
                         },
                         onHistoryClick = {
                             navController.navigate("conversations")
@@ -788,7 +930,7 @@ fun MainScreen(
                         messages = messages,
                         isAgentRunning = isAgentRunning,
                         onSendMessage = { text, enablePlanning, enableOptimizer ->
-                            onExecuteTask(text, enablePlanning, enableOptimizer, messages)
+                            checkAndExecute(text, enablePlanning, enableOptimizer, messages)
                             addMessage(ChatMessage(content = text, isUser = true))
                         },
                         onStopTask = onStopTask,
@@ -864,10 +1006,13 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
     val originalCoordinatorModelName = remember { prefs.coordinatorModelName }
+    val originalCoordinatorEnableVision = remember { prefs.coordinatorEnableVision }
+    val originalCoordinatorEnableThinking = remember { prefs.coordinatorEnableThinking }
     val originalCoordinatorSystemPrompt = remember { prefs.coordinatorSystemPrompt }
     val originalSupervisionEnabled = remember { prefs.supervisionEnabled }
     val originalMaxCorrections = remember { prefs.maxCorrections.toString() }
     val originalMaxCoordinatorSteps = remember { prefs.maxCoordinatorSteps.toString() }
+    val originalMaxAgentStepsPerCoordinatorStep = remember { prefs.maxAgentStepsPerCoordinatorStep.toString() }
     // Prompt Optimizer originals
     val originalPromptOptimizerEnabled = remember { prefs.promptOptimizerEnabled }
     val originalOptimizerApiUrl = remember { prefs.optimizerApiUrl }
@@ -909,12 +1054,17 @@ fun SettingsScreen(onBack: () -> Unit) {
             )
         )
     }
-    var coordinatorModelName by remember { mutableStateOf(prefs.coordinatorModelName) }
+    var coordinatorModelName by remember { mutableStateOf(TextFieldValue(prefs.coordinatorModelName)) }
     var coordinatorSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.coordinatorSystemPrompt)) }
     var coordinatorModelDropdownExpanded by remember { mutableStateOf(false) }
+    var coordinatorEnableVision by remember { mutableStateOf(prefs.coordinatorEnableVision) }
+    var coordinatorEnableThinking by remember { mutableStateOf(prefs.coordinatorEnableThinking) }
     var supervisionEnabled by remember { mutableStateOf(prefs.supervisionEnabled) }
     var maxCorrections by remember { mutableStateOf(TextFieldValue(prefs.maxCorrections.toString())) }
     var maxCoordinatorSteps by remember { mutableStateOf(TextFieldValue(prefs.maxCoordinatorSteps.toString())) }
+    var maxAgentStepsPerCoordinatorStep by remember {
+        mutableStateOf(TextFieldValue(prefs.maxAgentStepsPerCoordinatorStep.toString()))
+    }
     // Prompt Optimizer states
     var promptOptimizerEnabled by remember { mutableStateOf(prefs.promptOptimizerEnabled) }
     var optimizerApiUrl by remember { mutableStateOf(TextFieldValue(prefs.optimizerApiUrl)) }
@@ -931,7 +1081,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             )
         )
     }
-    var optimizerModelName by remember { mutableStateOf(prefs.optimizerModelName) }
+    var optimizerModelName by remember { mutableStateOf(TextFieldValue(prefs.optimizerModelName)) }
     var optimizerModelDropdownExpanded by remember { mutableStateOf(false) }
     var taskSummaryEnabled by remember { mutableStateOf(prefs.taskSummaryEnabled) }
     var optimizerSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.optimizerSystemPrompt)) }
@@ -950,15 +1100,18 @@ fun SettingsScreen(onBack: () -> Unit) {
             smartCoordinatorEnabled != originalSmartCoordinatorEnabled ||
             coordinatorApiUrl.text != originalCoordinatorApiUrl ||
             coordinatorApiKey.text != originalCoordinatorApiKey ||
-            coordinatorModelName != originalCoordinatorModelName ||
+            coordinatorModelName.text != originalCoordinatorModelName ||
+            coordinatorEnableVision != originalCoordinatorEnableVision ||
+            coordinatorEnableThinking != originalCoordinatorEnableThinking ||
             coordinatorSystemPrompt.text != originalCoordinatorSystemPrompt ||
             supervisionEnabled != originalSupervisionEnabled ||
             maxCorrections.text != originalMaxCorrections ||
             maxCoordinatorSteps.text != originalMaxCoordinatorSteps ||
+            maxAgentStepsPerCoordinatorStep.text != originalMaxAgentStepsPerCoordinatorStep ||
             promptOptimizerEnabled != originalPromptOptimizerEnabled ||
             optimizerApiUrl.text != originalOptimizerApiUrl ||
             optimizerApiKey.text != originalOptimizerApiKey ||
-            optimizerModelName != originalOptimizerModelName ||
+            optimizerModelName.text != originalOptimizerModelName ||
             taskSummaryEnabled != originalTaskSummaryEnabled ||
             optimizerSystemPrompt.text != originalOptimizerSystemPrompt
 
@@ -1009,10 +1162,21 @@ fun SettingsScreen(onBack: () -> Unit) {
         val coordinatorApiUrlLabel = if (isChinese) "协调器 API URL" else "Coordinator API URL"
         val coordinatorApiKeyLabel = if (isChinese) "协调器 API Key" else "Coordinator API Key"
         val coordinatorModelLabel = if (isChinese) "协调器模型" else "Coordinator Model"
+        val coordinatorEnableThinkingLabel = if (isChinese) "启用模型思考/推理" else "Enable Model Thinking/Reasoning"
+        val coordinatorEnableThinkingDesc = if (isChinese) {
+            "仅对部分模型生效（如 DeepSeek/Qwen/豆包），关闭可减少推理输出"
+        } else {
+            "Only works for some models (e.g. DeepSeek/Qwen/Doubao). Disable to reduce reasoning output"
+        }
         val enableSupervision = if (isChinese) "启用执行监督" else "Enable Supervision"
         val supervisionDesc = if (isChinese) "检查每个子任务的执行结果" else "Check execution result of each subtask"
         val maxCorrectionsLabel = if (isChinese) "最大纠正次数（已废弃）" else "Max Corrections (Deprecated)"
         val maxCoordinatorStepsLabel = if (isChinese) "协调器最大决策轮次" else "Max Coordinator Decision Rounds"
+        val maxAgentStepsPerCoordinatorStepLabel = if (isChinese) {
+            "单轮协调内 Agent 最大决策轮次"
+        } else {
+            "Max Agent Rounds Per Coordinator Step"
+        }
         // Prompt Optimizer strings
         val promptOptimizerSettings = if (isChinese) "指令优化器设置" else "Prompt Optimizer Settings"
         val enablePromptOptimizer = if (isChinese) "启用指令优化器" else "Enable Prompt Optimizer"
@@ -1048,15 +1212,18 @@ fun SettingsScreen(onBack: () -> Unit) {
                 smartCoordinatorEnabled != originalSmartCoordinatorEnabled ||
                 coordinatorApiUrl.text != originalCoordinatorApiUrl ||
                 coordinatorApiKey.text != originalCoordinatorApiKey ||
-                coordinatorModelName != originalCoordinatorModelName ||
+                coordinatorModelName.text != originalCoordinatorModelName ||
+            coordinatorEnableVision != originalCoordinatorEnableVision ||
+                coordinatorEnableThinking != originalCoordinatorEnableThinking ||
                 coordinatorSystemPrompt.text != originalCoordinatorSystemPrompt ||
                 supervisionEnabled != originalSupervisionEnabled ||
                 maxCorrections.text != originalMaxCorrections ||
                 maxCoordinatorSteps.text != originalMaxCoordinatorSteps ||
+                maxAgentStepsPerCoordinatorStep.text != originalMaxAgentStepsPerCoordinatorStep ||
                 promptOptimizerEnabled != originalPromptOptimizerEnabled ||
                 optimizerApiUrl.text != originalOptimizerApiUrl ||
                 optimizerApiKey.text != originalOptimizerApiKey ||
-                optimizerModelName != originalOptimizerModelName ||
+                optimizerModelName.text != originalOptimizerModelName ||
                 taskSummaryEnabled != originalTaskSummaryEnabled ||
                 optimizerSystemPrompt.text != originalOptimizerSystemPrompt
 
@@ -1074,27 +1241,31 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.coordinatorApiUrl = coordinatorApiUrl.text
         // Save coordinator API key to provider-specific slot
         when {
-            coordinatorModelName.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey.text
-            coordinatorModelName.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey.text
-            coordinatorModelName.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey.text
+            coordinatorModelName.text.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey.text
+            coordinatorModelName.text.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey.text
+            coordinatorModelName.text.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey.text
             else -> prefs.coordinatorApiKey = coordinatorApiKey.text
         }
         prefs.coordinatorSystemPrompt = coordinatorSystemPrompt.text
-        prefs.coordinatorModelName = coordinatorModelName
+        prefs.coordinatorModelName = coordinatorModelName.text
+        prefs.coordinatorEnableVision = coordinatorEnableVision
+        prefs.coordinatorEnableThinking = coordinatorEnableThinking
         prefs.supervisionEnabled = supervisionEnabled
         prefs.maxCorrections = maxCorrections.text.toIntOrNull() ?: 2
         prefs.maxCoordinatorSteps = maxCoordinatorSteps.text.toIntOrNull() ?: 20
+        prefs.maxAgentStepsPerCoordinatorStep =
+            maxAgentStepsPerCoordinatorStep.text.toIntOrNull() ?: 10
         // Prompt Optimizer settings
         prefs.promptOptimizerEnabled = promptOptimizerEnabled
         prefs.optimizerApiUrl = optimizerApiUrl.text
         // Save optimizer API key to provider-specific slot
         when {
-            optimizerModelName.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek = optimizerApiKey.text
-            optimizerModelName.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel = optimizerApiKey.text
-            optimizerModelName.startsWith("doubao") -> prefs.optimizerApiKeyDoubao = optimizerApiKey.text
+            optimizerModelName.text.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek = optimizerApiKey.text
+            optimizerModelName.text.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel = optimizerApiKey.text
+            optimizerModelName.text.startsWith("doubao") -> prefs.optimizerApiKeyDoubao = optimizerApiKey.text
             else -> prefs.optimizerApiKey = optimizerApiKey.text
         }
-        prefs.optimizerModelName = optimizerModelName
+        prefs.optimizerModelName = optimizerModelName.text
         prefs.taskSummaryEnabled = taskSummaryEnabled
         prefs.optimizerSystemPrompt = optimizerSystemPrompt.text
 
@@ -1384,55 +1555,165 @@ fun SettingsScreen(onBack: () -> Unit) {
                 "doubao-seed-1-6-251015" to "豆包 Seed 1.6"
             )
 
-            ExposedDropdownMenuBox(
-                expanded = coordinatorModelDropdownExpanded,
-                onExpandedChange = { coordinatorModelDropdownExpanded = it }
+            // 可编辑的模型名称输入框
+            OutlinedTextField(
+                value = coordinatorModelName,
+                onValueChange = { coordinatorModelName = it },
+                label = { Text(strings.coordinatorModelLabel) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                supportingText = { Text(if (isChinese) "可输入任意模型名称" else "Enter any model name") }
+            )
+
+            // 快捷选择按钮
+            Text(
+                text = if (isChinese) "快捷选择：" else "Quick select:",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedTextField(
-                    value = coordinatorModels.find { it.first == coordinatorModelName }?.second ?: coordinatorModelName,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text(strings.coordinatorModelLabel) },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = coordinatorModelDropdownExpanded) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .menuAnchor()
-                )
-                ExposedDropdownMenu(
-                    expanded = coordinatorModelDropdownExpanded,
-                    onDismissRequest = { coordinatorModelDropdownExpanded = false }
-                ) {
-                    coordinatorModels.forEach { (model, displayName) ->
-                        DropdownMenuItem(
-                            text = { Text(displayName) },
-                            onClick = {
-                                coordinatorModelName = model
-                                // Auto-switch Coordinator API URL based on selected model
-                                coordinatorApiUrl = when {
-                                    model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
-                                    model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
-                                    model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
-                                    else -> coordinatorApiUrl
-                                }
-                                // Auto-switch Coordinator API Key based on selected model
-                                coordinatorApiKey = when {
-                                    model.startsWith("deepseek") -> TextFieldValue(prefs.coordinatorApiKeyDeepseek)
-                                    model.startsWith("glm-") -> TextFieldValue(prefs.coordinatorApiKeyBigmodel)
-                                    model.startsWith("doubao") -> TextFieldValue(prefs.coordinatorApiKeyDoubao)
-                                    else -> coordinatorApiKey
-                                }
-                                coordinatorModelDropdownExpanded = false
-                            },
-                            leadingIcon = if (coordinatorModelName == model) {
-                                { Icon(Icons.Default.Check, contentDescription = null) }
-                            } else null
-                        )
-                    }
+                coordinatorModels.forEach { (model, displayName) ->
+                    FilterChip(
+                        selected = coordinatorModelName.text == model,
+                        onClick = {
+                            coordinatorModelName = TextFieldValue(model)
+                            // Auto-switch Coordinator API URL based on selected model
+                            coordinatorApiUrl = when {
+                                model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
+                                model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
+                                model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
+                                else -> coordinatorApiUrl
+                            }
+                            // Auto-switch Coordinator API Key based on selected model
+                            coordinatorApiKey = when {
+                                model.startsWith("deepseek") -> TextFieldValue(prefs.coordinatorApiKeyDeepseek)
+                                model.startsWith("glm-") -> TextFieldValue(prefs.coordinatorApiKeyBigmodel)
+                                model.startsWith("doubao") -> TextFieldValue(prefs.coordinatorApiKeyDoubao)
+                                else -> coordinatorApiKey
+                            }
+                        },
+                        label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
+                    )
                 }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        strings.coordinatorEnableThinkingLabel,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        strings.coordinatorEnableThinkingDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = coordinatorEnableThinking,
+                    onCheckedChange = { coordinatorEnableThinking = it }
+                )
+            }
+
+            // 模型是否支持图像（Vision）
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (isChinese) "模型支持图像 (Vision)" else "Model Supports Vision",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        if (isChinese) "启用后协调器会发送截图辅助决策" else "When enabled, coordinator sends screenshots for decision making",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = coordinatorEnableVision,
+                    onCheckedChange = { coordinatorEnableVision = it }
+                )
             }
 
             // 自定义 Coordinator 系统提示词
             var showCoordinatorPromptEditor by remember { mutableStateOf(false) }
+            var showCoordinatorDefaultPreview by remember { mutableStateOf(false) }
+            
+            // 预览默认提示词 Dialog
+            if (showCoordinatorDefaultPreview) {
+                AlertDialog(
+                    onDismissRequest = { showCoordinatorDefaultPreview = false },
+                    title = { Text(if (isChinese) "默认协调器提示词" else "Default Coordinator Prompt") },
+                    text = {
+                        val defaultPrompt = if (isChinese) 
+                            com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_CN 
+                        else 
+                            com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_EN
+                        
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            Text(
+                                text = if (isChinese) 
+                                    "这是内置的默认提示词内容。您可以基于此模板修改，或直接留空使用默认。" 
+                                else 
+                                    "This is the built-in default prompt. You can modify based on this template, or leave empty to use default.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                                    .padding(12.dp)
+                            ) {
+                                Text(
+                                    text = defaultPrompt,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    )
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val defaultPrompt = if (isChinese) 
+                                com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_CN 
+                            else 
+                                com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_EN
+                            coordinatorSystemPrompt = TextFieldValue(defaultPrompt)
+                            showCoordinatorDefaultPreview = false
+                            showCoordinatorPromptEditor = true
+                        }) {
+                            Text(if (isChinese) "加载到编辑器" else "Load to Editor")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showCoordinatorDefaultPreview = false }) {
+                            Text(if (isChinese) "关闭" else "Close")
+                        }
+                    }
+                )
+            }
+            
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1461,15 +1742,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                     Row {
                         if (coordinatorSystemPrompt.text.isNotBlank()) {
                             TextButton(onClick = { coordinatorSystemPrompt = TextFieldValue("") }) {
-                                Text(if (isChinese) "清空重置" else "Clear")
+                                Text(if (isChinese) "清空" else "Clear")
                             }
                         }
-                        TextButton(onClick = {
-                            val defaultPrompt = if (isChinese) com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_CN else com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_EN
-                            coordinatorSystemPrompt = TextFieldValue(defaultPrompt)
-                            showCoordinatorPromptEditor = true
-                        }) {
-                            Text(if (isChinese) "加载默认模板" else "Load Template")
+                        TextButton(onClick = { showCoordinatorDefaultPreview = true }) {
+                            Text(if (isChinese) "查看默认" else "View Default")
                         }
                         TextButton(onClick = { showCoordinatorPromptEditor = !showCoordinatorPromptEditor }) {
                             Text(if (showCoordinatorPromptEditor) {
@@ -1492,8 +1769,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                         maxLines = 20,
                         supportingText = {
                             Text(
-                                if (isChinese) "自定义协调器的系统提示词，留空则使用内置的 Task Coordinator System Prompt"
-                                else "Customize Coordinator system prompt. Leave empty to use built-in Task Coordinator System Prompt"
+                                if (isChinese) 
+                                    "协调器负责规划每一步的目标（如\"打开微信找到张三\"），不负责具体操作。留空使用内置默认提示词，自定义后将覆盖默认。点击上方【查看默认】按钮可预览内置提示词内容。"
+                                else 
+                                    "Coordinator plans each step's goal (e.g. \"Open WeChat and find John\"), not specific operations. Leave empty to use built-in default. Custom prompt overrides default. Click [View Default] above to preview built-in prompt."
                             )
                         }
                     )
@@ -1534,6 +1813,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                 value = maxCoordinatorSteps,
                 onValueChange = { maxCoordinatorSteps = it },
                 label = { Text(strings.maxCoordinatorStepsLabel) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            OutlinedTextField(
+                value = maxAgentStepsPerCoordinatorStep,
+                onValueChange = { maxAgentStepsPerCoordinatorStep = it },
+                label = { Text(strings.maxAgentStepsPerCoordinatorStepLabel) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
@@ -1588,50 +1875,52 @@ fun SettingsScreen(onBack: () -> Unit) {
                     "doubao-seed-1-6-251015" to "豆包 Seed 1.6"
                 )
 
-                ExposedDropdownMenuBox(
-                    expanded = optimizerModelDropdownExpanded,
-                    onExpandedChange = { optimizerModelDropdownExpanded = it }
+                // 可编辑的模型名称输入框
+                OutlinedTextField(
+                    value = optimizerModelName,
+                    onValueChange = { optimizerModelName = it },
+                    label = { Text(strings.optimizerModelLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text(if (isChinese) "可输入任意模型名称" else "Enter any model name") }
+                )
+
+                // 快捷选择按钮
+                Text(
+                    text = if (isChinese) "快捷选择：" else "Quick select:",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedTextField(
-                        value = optimizerModels.find { it.first == optimizerModelName }?.second ?: optimizerModelName,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text(strings.optimizerModelLabel) },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = optimizerModelDropdownExpanded) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .menuAnchor()
-                    )
-                    ExposedDropdownMenu(
-                        expanded = optimizerModelDropdownExpanded,
-                        onDismissRequest = { optimizerModelDropdownExpanded = false }
-                    ) {
-                        optimizerModels.forEach { (model, displayName) ->
-                            DropdownMenuItem(
-                                text = { Text(displayName) },
-                                onClick = {
-                                    optimizerModelName = model
-                                    // Auto-switch Optimizer API URL based on selected model
-                                    optimizerApiUrl = when {
-                                        model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
-                                        model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
-                                        model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
-                                        else -> optimizerApiUrl
-                                    }
-                                    // Auto-switch Optimizer API Key based on selected model
-                                    optimizerApiKey = when {
-                                        model.startsWith("deepseek") -> TextFieldValue(prefs.optimizerApiKeyDeepseek)
-                                        model.startsWith("glm-") -> TextFieldValue(prefs.optimizerApiKeyBigmodel)
-                                        model.startsWith("doubao") -> TextFieldValue(prefs.optimizerApiKeyDoubao)
-                                        else -> optimizerApiKey
-                                    }
-                                    optimizerModelDropdownExpanded = false
-                                },
-                                leadingIcon = if (optimizerModelName == model) {
-                                    { Icon(Icons.Default.Check, contentDescription = null) }
-                                } else null
-                            )
-                        }
+                    optimizerModels.forEach { (model, displayName) ->
+                        FilterChip(
+                            selected = optimizerModelName.text == model,
+                            onClick = {
+                                optimizerModelName = TextFieldValue(model)
+                                // Auto-switch Optimizer API URL based on selected model
+                                optimizerApiUrl = when {
+                                    model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
+                                    model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
+                                    model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
+                                    else -> optimizerApiUrl
+                                }
+                                // Auto-switch Optimizer API Key based on selected model
+                                optimizerApiKey = when {
+                                    model.startsWith("deepseek") -> TextFieldValue(prefs.optimizerApiKeyDeepseek)
+                                    model.startsWith("glm-") -> TextFieldValue(prefs.optimizerApiKeyBigmodel)
+                                    model.startsWith("doubao") -> TextFieldValue(prefs.optimizerApiKeyDoubao)
+                                    else -> optimizerApiKey
+                                }
+                            },
+                            label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
+                        )
                     }
                 }
 
@@ -1662,6 +1951,65 @@ fun SettingsScreen(onBack: () -> Unit) {
 
                 // 自定义优化器系统提示词
                 var showPromptEditor by remember { mutableStateOf(false) }
+                var showOptimizerDefaultPreview by remember { mutableStateOf(false) }
+                
+                // 预览默认优化器提示词 Dialog
+                if (showOptimizerDefaultPreview) {
+                    AlertDialog(
+                        onDismissRequest = { showOptimizerDefaultPreview = false },
+                        title = { Text(if (isChinese) "默认优化器提示词" else "Default Optimizer Prompt") },
+                        text = {
+                            val defaultPrompt = if (isChinese) 
+                                com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_CN 
+                            else 
+                                com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_EN
+                            
+                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                Text(
+                                    text = if (isChinese) 
+                                        "这是内置的默认优化器提示词。您可以基于此模板修改，或直接留空使用默认。" 
+                                    else 
+                                        "This is the built-in default optimizer prompt. You can modify based on this template, or leave empty to use default.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(bottom = 8.dp)
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                                        .padding(12.dp)
+                                ) {
+                                    Text(
+                                        text = defaultPrompt,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                        )
+                                    )
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                val defaultPrompt = if (isChinese) 
+                                    com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_CN 
+                                else 
+                                    com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_EN
+                                optimizerSystemPrompt = TextFieldValue(defaultPrompt)
+                                showOptimizerDefaultPreview = false
+                                showPromptEditor = true
+                            }) {
+                                Text(if (isChinese) "加载到编辑器" else "Load to Editor")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showOptimizerDefaultPreview = false }) {
+                                Text(if (isChinese) "关闭" else "Close")
+                            }
+                        }
+                    )
+                }
+                
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1690,15 +2038,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Row {
                             if (optimizerSystemPrompt.text.isNotBlank()) {
                                 TextButton(onClick = { optimizerSystemPrompt = TextFieldValue("") }) {
-                                    Text(if (isChinese) "清空重置" else "Clear")
+                                    Text(if (isChinese) "清空" else "Clear")
                                 }
                             }
-                            TextButton(onClick = {
-                                val defaultPrompt = if (isChinese) com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_CN else com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_EN
-                                optimizerSystemPrompt = TextFieldValue(defaultPrompt)
-                                showPromptEditor = true
-                            }) {
-                                Text(if (isChinese) "加载默认模板" else "Load Template")
+                            TextButton(onClick = { showOptimizerDefaultPreview = true }) {
+                                Text(if (isChinese) "查看默认" else "View Default")
                             }
                             TextButton(onClick = { showPromptEditor = !showPromptEditor }) {
                                 Text(if (showPromptEditor) {
@@ -1721,8 +2065,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                             maxLines = 20,
                             supportingText = {
                                 Text(
-                                    if (isChinese) "自定义指令优化器的行为规则，留空则使用内置的默认提示词"
-                                    else "Customize optimizer behavior rules. Leave empty to use built-in default prompt"
+                                    if (isChinese) 
+                                        "优化器负责将用户指令转换为结构化任务描述。留空使用内置默认提示词，自定义后将覆盖默认。点击上方【查看默认】按钮可预览内置提示词内容。"
+                                    else 
+                                        "Optimizer converts user instructions to structured task descriptions. Leave empty to use built-in default. Custom prompt overrides default. Click [View Default] above to preview built-in prompt."
                                 )
                             }
                         )

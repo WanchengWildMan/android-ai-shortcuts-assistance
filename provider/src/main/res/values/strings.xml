@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">无障碍服务提供者</string>
+    <string name="accessibility_service_description">为 AutoGLM 助手提供无障碍操作能力，用于实现无 root 的屏幕自动化操作。\n\n请仅在信任主应用的情况下启用此服务。</string>
+</resources>

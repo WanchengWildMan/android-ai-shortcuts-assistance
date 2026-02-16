@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AutoGLM-Assistant"
 include(":app")
+include(":provider")

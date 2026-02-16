@@ -16,6 +16,7 @@ import com.autoglm.assistant.core.planner.SupervisionStatus
 import com.autoglm.assistant.core.screen.AppDetector
 import com.autoglm.assistant.core.screen.ScreenCapture
 import com.autoglm.assistant.util.Logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -136,20 +137,15 @@ class PhoneAgent(
                         Logger.d(Logger.AGENT, "[COORDINATOR->UI] Token: $token")
                         this@PhoneAgent.onStreamToken?.invoke(token)
                     }
-                    onStreamStart = {
-                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream start")
-                    // 设置决策回调
                     onDecisionStart = {
                         this@PhoneAgent.onDecisionStart?.invoke()
                     }
                     onDecisionComplete = { decision ->
                         this@PhoneAgent.onDecisionComplete?.invoke(decision)
                     }
+                    onStreamStart = {
+                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream start")
                         this@PhoneAgent.onStreamStart?.invoke()
-                    onCoordinatorThinking = { thinking ->
-                        Logger.i(Logger.AGENT, "[COORDINATOR->UI] Thinking: ${thinking.take(100)}...")
-                        this@PhoneAgent.onCoordinatorThinking?.invoke(thinking)
-                    }
                     }
                     onStreamEnd = {
                         Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream end")
@@ -297,6 +293,11 @@ class PhoneAgent(
             // 否则按原来的方式直接执行
             return executeDirectly(effectiveTask)
 
+        } catch (e: CancellationException) {
+            // 步骤1: CancellationException 必须重新抛出，否则破坏协程取消机制
+            // 吞掉该异常会导致协程状态混乱，表现为"StandaloneCoroutine was cancelled"错误
+            Logger.w(Logger.AGENT, "Task coroutine cancelled, rethrowing for proper cleanup")
+            throw e
         } catch (e: Exception) {
             val error = "Error: ${e.message}"
             Logger.e(Logger.AGENT, "Task failed: $error", e)
@@ -314,6 +315,9 @@ class PhoneAgent(
     private suspend fun executeWithCoordinator(task: String): String {
         Logger.i(Logger.AGENT, "========== EXECUTING WITH COORDINATOR ==========")
 
+        // 协调器模式下，子步骤 finish 不应弹回 app
+        actionExecutor.returnToAppOnFinish = false
+
         var coordinatorSteps = 0
         // 从协调器配置获取最大步数，避免硬编码
         val maxCoordinatorSteps = agentConfig.plannerConfig?.maxCoordinatorSteps ?: 20
@@ -321,6 +325,10 @@ class PhoneAgent(
         var consecutiveEmptyInstructions = 0
         val maxConsecutiveDecisionFailures = 3
         val maxConsecutiveEmptyInstructions = 3
+        
+        // 业务目的：记录协调器指令及其完成状态，便于构建清晰的执行历史
+        // 避免协调器看到finish后不理解子任务已完成而继续重复执行
+        val coordinatorInstructions = mutableListOf<Pair<String, Boolean>>()  // (指令, 是否完成)
 
         while (coordinatorSteps < maxCoordinatorSteps) {
             if (stopRequested) {
@@ -338,13 +346,21 @@ class PhoneAgent(
             val screenshot = captureScreenWithOverlayControl()
 
             // 构建执行历史摘要
-            val executionHistory = buildExecutionHistorySummary()
+            // 业务目的：传入协调器指令历史，让协调器明确知道哪些子任务已完成
+            val executionHistory = buildExecutionHistorySummary(coordinatorInstructions)
 
             // 让协调器决定下一步
+            // 根据配置决定是否发送截图（只有支持 vision 的模型才发送）
+            // 第一次协调不发送截图（界面是已知的 AutoGLM 页面）
+            val screenshotForCoordinator = if (agentConfig.plannerConfig?.enableVision == true && coordinatorSteps > 1) {
+                screenshot?.base64Data
+            } else {
+                null
+            }
             val decision = smartCoordinator?.decideNextStep(
                 originalTask = task,
                 executionHistory = executionHistory,
-                screenshotBase64 = screenshot?.base64Data,
+                screenshotBase64 = screenshotForCoordinator,
                 language = agentConfig.language
             )
 
@@ -373,6 +389,9 @@ class PhoneAgent(
             when (decision.status) {
                 com.autoglm.assistant.core.planner.DecisionStatus.COMPLETE -> {
                     Logger.i(Logger.AGENT, "✓ Coordinator: Task complete")
+                    // 任务完成，恢复默认行为并返回 app
+                    actionExecutor.returnToAppOnFinish = true
+                    actionExecutor.returnToAutoGLM()
                     val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: decision.assessment
                     onTaskComplete?.invoke(summaryMessage)
                     return summaryMessage
@@ -380,6 +399,9 @@ class PhoneAgent(
 
                 com.autoglm.assistant.core.planner.DecisionStatus.FAILED -> {
                     Logger.e(Logger.AGENT, "✗ Coordinator: Task failed")
+                    // 任务失败，恢复默认行为并返回 app
+                    actionExecutor.returnToAppOnFinish = true
+                    actionExecutor.returnToAutoGLM()
                     val failMessage = if (agentConfig.language == "en") {
                         "Task failed: ${decision.assessment}"
                     } else {
@@ -423,6 +445,12 @@ class PhoneAgent(
                         return result.message ?: "Task paused for human intervention"
                     }
 
+                    // 业务目的：记录该指令的完成状态
+                    // 当Agent调用finish时，标记为已完成，避免协调器重复执行相同指令
+                    val isSubTaskFinished = result.finished
+                    coordinatorInstructions.add(decision.nextInstruction to isSubTaskFinished)
+                    Logger.i(Logger.AGENT, "Sub-task finished: $isSubTaskFinished")
+
                     // 继续下一轮协调
                 }
             }
@@ -435,6 +463,10 @@ class PhoneAgent(
         val finalMessage = "Task execution completed after $coordinatorSteps coordinator steps"
         Logger.i(Logger.AGENT, "========== COORDINATOR EXECUTION COMPLETE ==========")
 
+        // 协调器任务全部结束，恢复默认行为并执行一次返回 app
+        actionExecutor.returnToAppOnFinish = true
+        actionExecutor.returnToAutoGLM()
+
         val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
         onTaskComplete?.invoke(summaryMessage)
         return summaryMessage
@@ -442,18 +474,54 @@ class PhoneAgent(
 
     /**
      * 构建执行历史摘要
+     * 业务目的：清晰展示协调器指令及其完成状态，避免协调器误解子任务状态而重复执行
      */
-    private fun buildExecutionHistorySummary(): String {
+    private fun buildExecutionHistorySummary(coordinatorInstructions: List<Pair<String, Boolean>>): String {
+        // 优先展示协调器级别的指令历史（更高层次的视角）
+        if (coordinatorInstructions.isNotEmpty()) {
+            val coordinatorHistory = coordinatorInstructions.mapIndexed { index, (instruction, finished) ->
+                val status = if (finished) "✓ 已完成" else "○ 执行中"
+                "协调器指令${index + 1}: $instruction [$status]"
+            }.joinToString("\n")
+            
+            // 同时保留最近的Agent执行细节（最多3条）
+            val recentAgentActions = conversationHistory
+                .filter { it !is Message.System }
+                .takeLast(3)
+                .mapNotNull { message ->
+                    when (message) {
+                        is Message.Assistant -> {
+                            val content = message.content
+                            val actionMatch = Regex("<answer>(.*?)</answer>", RegexOption.DOT_MATCHES_ALL).find(content)
+                            val action = actionMatch?.groupValues?.get(1)?.trim()
+                            if (action != null && action.isNotBlank()) {
+                                "  → ${action.take(80)}"
+                            } else null
+                        }
+                        else -> null
+                    }
+                }
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+            
+            return buildString {
+                append(coordinatorHistory)
+                if (recentAgentActions.isNotBlank()) {
+                    append("\n\n最近执行的操作：\n")
+                    append(recentAgentActions)
+                }
+            }
+        }
+        
+        // 如果没有协调器指令历史，回退到原有逻辑（兼容性）
         val recentMessages = conversationHistory
             .filter { it !is Message.System }
-            .takeLast(6)  // 只取最近6条消息
+            .takeLast(6)
             .mapIndexed { index, message ->
                 when (message) {
                     is Message.User -> "步骤${index + 1}: ${message.text.take(100)}"
                     is Message.Assistant -> {
-                        // 提取thinking和action
                         val content = message.content
-                        val thinkMatch = Regex("<think>(.*?)</think>", RegexOption.DOT_MATCHES_ALL).find(content)
                         val actionMatch = Regex("<answer>(.*?)</answer>", RegexOption.DOT_MATCHES_ALL).find(content)
                         val action = actionMatch?.groupValues?.get(1)?.trim() ?: content.take(100)
                         "  → 执行: $action"
@@ -483,7 +551,8 @@ class PhoneAgent(
 
         // 继续执行直到完成或达到限制
         var subSteps = 1
-        val maxSubSteps = 10  // 每个指令最多10步
+        val maxSubSteps = (agentConfig.plannerConfig?.maxAgentStepsPerCoordinatorStep ?: 10)
+            .coerceAtLeast(1)
 
         while (!result.finished &&
             subSteps < maxSubSteps &&
@@ -605,8 +674,11 @@ class PhoneAgent(
             }
 
             override fun onError(error: String) {
-                Logger.e(Logger.MODEL, "Model error: $error")
-                onError?.invoke(error)
+                // 仅记录日志，不触发 PhoneAgent.onError
+                // 原因：PhoneAgent.onError 会传播到 WakeWordService.onError，将状态重置为 IDLE，
+                // 但任务协程仍在运行，状态不一致会导致竞争条件（如协程被取消）
+                // 真正的错误会通过 modelClient.chat() 抛出异常来处理
+                Logger.e(Logger.MODEL, "Model streaming error (will throw): $error")
             }
         })
         Logger.endTimer("model_request", Logger.MODEL)

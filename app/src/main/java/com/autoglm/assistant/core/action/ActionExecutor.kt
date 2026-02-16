@@ -28,6 +28,12 @@ class ActionExecutor(
 
     var mode: Mode = Mode.AUTO
 
+    /**
+     * 控制 finish 操作时是否返回 AutoGLM 界面。
+     * 协调器模式下设为 false，避免子步骤完成时频繁弹回 app。
+     */
+    var returnToAppOnFinish: Boolean = true
+
     companion object {
         // 延时配置（根据操作类型优化，单位：毫秒）
         private const val DELAY_TAP = 800L              // 点击后等待 UI 响应
@@ -338,7 +344,10 @@ class ActionExecutor(
 
     private suspend fun executeFinish(action: ParsedAction): ActionResult {
         val message = action.params["message"] as? String
-        returnToAutoGLM()
+        // 仅在非协调器模式下返回 app（协调器模式下子步骤 finish 不应弹回）
+        if (returnToAppOnFinish) {
+            returnToAutoGLM()
+        }
         return ActionResult(success = true, message = message)
     }
 
