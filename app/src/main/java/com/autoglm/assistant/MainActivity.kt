@@ -56,6 +56,9 @@ import kotlinx.coroutines.launch
 import com.autoglm.assistant.core.agent.SerializableMessage
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import com.autoglm.assistant.ai.MessageBuilder
+import com.autoglm.assistant.core.planner.SmartCoordinator
+import com.autoglm.assistant.core.planner.PromptOptimizer
 
 class MainActivity : ComponentActivity() {
 
@@ -110,7 +113,8 @@ class MainActivity : ComponentActivity() {
                     getServiceState = { wakeWordService?.serviceState },
                     getLastRecognizedText = { wakeWordService?.lastRecognizedText },
                     getAgentMessage = { wakeWordService?.agentMessage },
-                    getCoordinatorMessage = { wakeWordService?.coordinatorMessage }
+                    getCoordinatorMessage = { wakeWordService?.coordinatorMessage },
+                    getLastWakeWordError = { wakeWordService?.lastWakeWordError }
                 )
             }
         }
@@ -245,7 +249,8 @@ fun MainScreen(
     getServiceState: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.ServiceState>?,
     getLastRecognizedText: () -> kotlinx.coroutines.flow.StateFlow<String>?,
     getAgentMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.AgentMessage?>?,
-    getCoordinatorMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.CoordinatorMessage?>?
+    getCoordinatorMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.CoordinatorMessage?>?,
+    getLastWakeWordError: () -> kotlinx.coroutines.flow.StateFlow<String?>? = { null }
 ) {
     var isServiceRunning by remember { mutableStateOf(false) }
     val conversations = remember { mutableStateListOf<Conversation>() }
@@ -256,6 +261,7 @@ fun MainScreen(
     val lastRecognizedText = getLastRecognizedText()?.collectAsState()
     val agentMessage = getAgentMessage()?.collectAsState()
     val coordinatorMessage = getCoordinatorMessage()?.collectAsState()
+    val wakeWordError = getLastWakeWordError()?.collectAsState()
 
     // Coordinator消息状态
     var lastCoordinatorContent by remember { mutableStateOf<String?>(null) }
@@ -670,9 +676,12 @@ fun MainScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // 状态指示器
+                    // 状态指示器（唤醒词错误优先展示）
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        val (icon, color, text) = when (serviceState?.value) {
+                        val errorText = wakeWordError?.value
+                        val (icon, color, text) = if (errorText != null) {
+                            Triple(Icons.Default.Warning, MaterialTheme.colorScheme.error, errorText.take(25))
+                        } else when (serviceState?.value) {
                             WakeWordService.ServiceState.LISTENING_WAKE_WORD -> Triple(Icons.Default.Mic, MaterialTheme.colorScheme.primary, "正在监听唤醒词")
                             WakeWordService.ServiceState.LISTENING_COMMAND -> Triple(Icons.Default.RecordVoiceOver, MaterialTheme.colorScheme.tertiary, "正在监听指令")
                             WakeWordService.ServiceState.EXECUTING_TASK -> Triple(Icons.Default.PlayArrow, MaterialTheme.colorScheme.secondary, "正在执行")
@@ -837,6 +846,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalApiUrl = remember { prefs.apiUrl }
     val originalApiKey = remember { prefs.apiKey }
     val originalModelName = remember { prefs.modelName }
+    val originalAgentSystemPrompt = remember { prefs.agentSystemPrompt }
     val originalPorcupineKey = remember { prefs.porcupineAccessKey }
     val originalWakeWordKeyword = remember { prefs.wakeWordKeyword }
     val originalMaxSteps = remember { prefs.maxSteps.toString() }
@@ -854,6 +864,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
     val originalCoordinatorModelName = remember { prefs.coordinatorModelName }
+    val originalCoordinatorSystemPrompt = remember { prefs.coordinatorSystemPrompt }
     val originalSupervisionEnabled = remember { prefs.supervisionEnabled }
     val originalMaxCorrections = remember { prefs.maxCorrections.toString() }
     val originalMaxCoordinatorSteps = remember { prefs.maxCoordinatorSteps.toString() }
@@ -873,45 +884,51 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalTaskSummaryEnabled = remember { prefs.taskSummaryEnabled }
     val originalOptimizerSystemPrompt = remember { prefs.optimizerSystemPrompt }
 
-    var apiUrl by remember { mutableStateOf(prefs.apiUrl) }
-    var apiKey by remember { mutableStateOf(prefs.apiKey) }
-    var modelName by remember { mutableStateOf(prefs.modelName) }
-    var porcupineKey by remember { mutableStateOf(prefs.porcupineAccessKey) }
+    var apiUrl by remember { mutableStateOf(TextFieldValue(prefs.apiUrl)) }
+    var apiKey by remember { mutableStateOf(TextFieldValue(prefs.apiKey)) }
+    var modelName by remember { mutableStateOf(TextFieldValue(prefs.modelName)) }
+    var agentSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.agentSystemPrompt)) }
+    var porcupineKey by remember { mutableStateOf(TextFieldValue(prefs.porcupineAccessKey)) }
     var wakeWordKeyword by remember { mutableStateOf(prefs.wakeWordKeyword) }
     var wakeWordDropdownExpanded by remember { mutableStateOf(false) }
-    var maxSteps by remember { mutableStateOf(prefs.maxSteps.toString()) }
+    var maxSteps by remember { mutableStateOf(TextFieldValue(prefs.maxSteps.toString())) }
     var language by remember { mutableStateOf(prefs.language) }
     var showAgentProcess by remember { mutableStateOf(prefs.showAgentProcess) }
     var smartCoordinatorEnabled by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
-    var coordinatorApiUrl by remember { mutableStateOf(prefs.coordinatorApiUrl) }
+    var coordinatorApiUrl by remember { mutableStateOf(TextFieldValue(prefs.coordinatorApiUrl)) }
     var coordinatorApiKey by remember {
         val model = prefs.coordinatorModelName
         mutableStateOf(
-            when {
-                model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
-                model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
-                model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
-                else -> prefs.coordinatorApiKey
-            }
+            TextFieldValue(
+                when {
+                    model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
+                    model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
+                    model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+                    else -> prefs.coordinatorApiKey
+                }
+            )
         )
     }
     var coordinatorModelName by remember { mutableStateOf(prefs.coordinatorModelName) }
+    var coordinatorSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.coordinatorSystemPrompt)) }
     var coordinatorModelDropdownExpanded by remember { mutableStateOf(false) }
     var supervisionEnabled by remember { mutableStateOf(prefs.supervisionEnabled) }
-    var maxCorrections by remember { mutableStateOf(prefs.maxCorrections.toString()) }
-    var maxCoordinatorSteps by remember { mutableStateOf(prefs.maxCoordinatorSteps.toString()) }
+    var maxCorrections by remember { mutableStateOf(TextFieldValue(prefs.maxCorrections.toString())) }
+    var maxCoordinatorSteps by remember { mutableStateOf(TextFieldValue(prefs.maxCoordinatorSteps.toString())) }
     // Prompt Optimizer states
     var promptOptimizerEnabled by remember { mutableStateOf(prefs.promptOptimizerEnabled) }
-    var optimizerApiUrl by remember { mutableStateOf(prefs.optimizerApiUrl) }
+    var optimizerApiUrl by remember { mutableStateOf(TextFieldValue(prefs.optimizerApiUrl)) }
     var optimizerApiKey by remember {
         val model = prefs.optimizerModelName
         mutableStateOf(
-            when {
-                model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
-                model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
-                model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
-                else -> prefs.optimizerApiKey
-            }
+            TextFieldValue(
+                when {
+                    model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
+                    model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
+                    model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
+                    else -> prefs.optimizerApiKey
+                }
+            )
         )
     }
     var optimizerModelName by remember { mutableStateOf(prefs.optimizerModelName) }
@@ -921,24 +938,26 @@ fun SettingsScreen(onBack: () -> Unit) {
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check if any setting has changed
-    val hasChanges = apiUrl != originalApiUrl ||
-            apiKey != originalApiKey ||
-            modelName != originalModelName ||
-            porcupineKey != originalPorcupineKey ||
+    val hasChanges = apiUrl.text != originalApiUrl ||
+            apiKey.text != originalApiKey ||
+            modelName.text != originalModelName ||
+            agentSystemPrompt.text != originalAgentSystemPrompt ||
+            porcupineKey.text != originalPorcupineKey ||
             wakeWordKeyword != originalWakeWordKeyword ||
-            maxSteps != originalMaxSteps ||
+            maxSteps.text != originalMaxSteps ||
             language != originalLanguage ||
             showAgentProcess != originalShowAgentProcess ||
             smartCoordinatorEnabled != originalSmartCoordinatorEnabled ||
-            coordinatorApiUrl != originalCoordinatorApiUrl ||
-            coordinatorApiKey != originalCoordinatorApiKey ||
+            coordinatorApiUrl.text != originalCoordinatorApiUrl ||
+            coordinatorApiKey.text != originalCoordinatorApiKey ||
             coordinatorModelName != originalCoordinatorModelName ||
+            coordinatorSystemPrompt.text != originalCoordinatorSystemPrompt ||
             supervisionEnabled != originalSupervisionEnabled ||
-            maxCorrections != originalMaxCorrections ||
-            maxCoordinatorSteps != originalMaxCoordinatorSteps ||
+            maxCorrections.text != originalMaxCorrections ||
+            maxCoordinatorSteps.text != originalMaxCoordinatorSteps ||
             promptOptimizerEnabled != originalPromptOptimizerEnabled ||
-            optimizerApiUrl != originalOptimizerApiUrl ||
-            optimizerApiKey != originalOptimizerApiKey ||
+            optimizerApiUrl.text != originalOptimizerApiUrl ||
+            optimizerApiKey.text != originalOptimizerApiKey ||
             optimizerModelName != originalOptimizerModelName ||
             taskSummaryEnabled != originalTaskSummaryEnabled ||
             optimizerSystemPrompt.text != originalOptimizerSystemPrompt
@@ -978,7 +997,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         val wakeWordLabel = if (isChinese) "唤醒词" else "Wake Word"
         val wakeWordHint = if (isChinese) "说出唤醒词来激活助手" else "Say the wake word to activate assistant"
         val agentSettings = if (isChinese) "Agent 设置" else "Agent Settings"
-        val maxStepsLabel = if (isChinese) "最大步数" else "Max Steps"
+        val maxStepsLabel = if (isChinese) "Agent 总操作步数上限" else "Agent Max Operation Steps"
         val languageLabel = if (isChinese) "语言: " else "Language: "
         val chinese = "中文"
         val english = "English"
@@ -992,8 +1011,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         val coordinatorModelLabel = if (isChinese) "协调器模型" else "Coordinator Model"
         val enableSupervision = if (isChinese) "启用执行监督" else "Enable Supervision"
         val supervisionDesc = if (isChinese) "检查每个子任务的执行结果" else "Check execution result of each subtask"
-        val maxCorrectionsLabel = if (isChinese) "最大纠正次数" else "Max Corrections"
-        val maxCoordinatorStepsLabel = if (isChinese) "协调器最大执行步数" else "Max Coordinator Steps"
+        val maxCorrectionsLabel = if (isChinese) "最大纠正次数（已废弃）" else "Max Corrections (Deprecated)"
+        val maxCoordinatorStepsLabel = if (isChinese) "协调器最大决策轮次" else "Max Coordinator Decision Rounds"
         // Prompt Optimizer strings
         val promptOptimizerSettings = if (isChinese) "指令优化器设置" else "Prompt Optimizer Settings"
         val enablePromptOptimizer = if (isChinese) "启用指令优化器" else "Enable Prompt Optimizer"
@@ -1020,56 +1039,60 @@ fun SettingsScreen(onBack: () -> Unit) {
     // Save function
     val saveSettings = {
         // 检测关键配置是否变化（影响 Agent/Coordinator/Optimizer）
-        val needsRestart = apiUrl != originalApiUrl ||
-                apiKey != originalApiKey ||
-                modelName != originalModelName ||
+        val needsRestart = apiUrl.text != originalApiUrl ||
+                apiKey.text != originalApiKey ||
+                modelName.text != originalModelName ||
+                agentSystemPrompt.text != originalAgentSystemPrompt ||
                 language != originalLanguage ||
-                maxSteps != originalMaxSteps ||
+                maxSteps.text != originalMaxSteps ||
                 smartCoordinatorEnabled != originalSmartCoordinatorEnabled ||
-                coordinatorApiUrl != originalCoordinatorApiUrl ||
-                coordinatorApiKey != originalCoordinatorApiKey ||
+                coordinatorApiUrl.text != originalCoordinatorApiUrl ||
+                coordinatorApiKey.text != originalCoordinatorApiKey ||
                 coordinatorModelName != originalCoordinatorModelName ||
+                coordinatorSystemPrompt.text != originalCoordinatorSystemPrompt ||
                 supervisionEnabled != originalSupervisionEnabled ||
-                maxCorrections != originalMaxCorrections ||
-                maxCoordinatorSteps != originalMaxCoordinatorSteps ||
+                maxCorrections.text != originalMaxCorrections ||
+                maxCoordinatorSteps.text != originalMaxCoordinatorSteps ||
                 promptOptimizerEnabled != originalPromptOptimizerEnabled ||
-                optimizerApiUrl != originalOptimizerApiUrl ||
-                optimizerApiKey != originalOptimizerApiKey ||
+                optimizerApiUrl.text != originalOptimizerApiUrl ||
+                optimizerApiKey.text != originalOptimizerApiKey ||
                 optimizerModelName != originalOptimizerModelName ||
                 taskSummaryEnabled != originalTaskSummaryEnabled ||
                 optimizerSystemPrompt.text != originalOptimizerSystemPrompt
 
         // 保存所有设置
-        prefs.apiUrl = apiUrl
-        prefs.apiKey = apiKey
-        prefs.modelName = modelName
-        prefs.porcupineAccessKey = porcupineKey
+        prefs.apiUrl = apiUrl.text
+        prefs.apiKey = apiKey.text
+        prefs.modelName = modelName.text
+        prefs.agentSystemPrompt = agentSystemPrompt.text
+        prefs.porcupineAccessKey = porcupineKey.text
         prefs.wakeWordKeyword = wakeWordKeyword
-        prefs.maxSteps = maxSteps.toIntOrNull() ?: 100
+        prefs.maxSteps = maxSteps.text.toIntOrNull() ?: 100
         prefs.language = language
         prefs.showAgentProcess = showAgentProcess
         prefs.smartCoordinatorEnabled = smartCoordinatorEnabled
-        prefs.coordinatorApiUrl = coordinatorApiUrl
+        prefs.coordinatorApiUrl = coordinatorApiUrl.text
         // Save coordinator API key to provider-specific slot
         when {
-            coordinatorModelName.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey
-            coordinatorModelName.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey
-            coordinatorModelName.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey
-            else -> prefs.coordinatorApiKey = coordinatorApiKey
+            coordinatorModelName.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey.text
+            coordinatorModelName.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey.text
+            coordinatorModelName.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey.text
+            else -> prefs.coordinatorApiKey = coordinatorApiKey.text
         }
+        prefs.coordinatorSystemPrompt = coordinatorSystemPrompt.text
         prefs.coordinatorModelName = coordinatorModelName
         prefs.supervisionEnabled = supervisionEnabled
-        prefs.maxCorrections = maxCorrections.toIntOrNull() ?: 2
-        prefs.maxCoordinatorSteps = maxCoordinatorSteps.toIntOrNull() ?: 20
+        prefs.maxCorrections = maxCorrections.text.toIntOrNull() ?: 2
+        prefs.maxCoordinatorSteps = maxCoordinatorSteps.text.toIntOrNull() ?: 20
         // Prompt Optimizer settings
         prefs.promptOptimizerEnabled = promptOptimizerEnabled
-        prefs.optimizerApiUrl = optimizerApiUrl
+        prefs.optimizerApiUrl = optimizerApiUrl.text
         // Save optimizer API key to provider-specific slot
         when {
-            optimizerModelName.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek = optimizerApiKey
-            optimizerModelName.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel = optimizerApiKey
-            optimizerModelName.startsWith("doubao") -> prefs.optimizerApiKeyDoubao = optimizerApiKey
-            else -> prefs.optimizerApiKey = optimizerApiKey
+            optimizerModelName.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek = optimizerApiKey.text
+            optimizerModelName.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel = optimizerApiKey.text
+            optimizerModelName.startsWith("doubao") -> prefs.optimizerApiKeyDoubao = optimizerApiKey.text
+            else -> prefs.optimizerApiKey = optimizerApiKey.text
         }
         prefs.optimizerModelName = optimizerModelName
         prefs.taskSummaryEnabled = taskSummaryEnabled
@@ -1146,6 +1169,75 @@ fun SettingsScreen(onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
+
+            // 自定义 Agent 系统提示词
+            var showAgentPromptEditor by remember { mutableStateOf(false) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (isChinese) "自定义 Agent 提示词" else "Custom Agent Prompt",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            if (agentSystemPrompt.text.isBlank()) {
+                                if (isChinese) "当前使用内置默认提示词" else "Using built-in default"
+                            } else {
+                                if (isChinese) "已配置（${agentSystemPrompt.text.length}字）" else "Configured (${agentSystemPrompt.text.length} chars)"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row {
+                        if (agentSystemPrompt.text.isNotBlank()) {
+                            TextButton(onClick = { agentSystemPrompt = TextFieldValue("") }) {
+                                Text(if (isChinese) "清空重置" else "Clear")
+                            }
+                        }
+                        TextButton(onClick = {
+                            val defaultPrompt = if (isChinese) com.autoglm.assistant.ai.MessageBuilder.DEFAULT_SYSTEM_PROMPT_CN else com.autoglm.assistant.ai.MessageBuilder.DEFAULT_SYSTEM_PROMPT_EN
+                            agentSystemPrompt = TextFieldValue(defaultPrompt)
+                            showAgentPromptEditor = true
+                        }) {
+                            Text(if (isChinese) "加载默认模板" else "Load Template")
+                        }
+                        TextButton(onClick = { showAgentPromptEditor = !showAgentPromptEditor }) {
+                            Text(if (showAgentPromptEditor) {
+                                if (isChinese) "收起" else "Collapse"
+                            } else {
+                                if (isChinese) "编辑" else "Edit"
+                            })
+                        }
+                    }
+                }
+                if (showAgentPromptEditor) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = agentSystemPrompt,
+                        onValueChange = { agentSystemPrompt = it },
+                        label = { Text(if (isChinese) "系统提示词（留空使用默认）" else "System Prompt (empty = default)") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 150.dp, max = 400.dp),
+                        maxLines = 20,
+                        supportingText = {
+                            Text(
+                                if (isChinese) "自定义 Agent 的系统角色设定，留空则使用内置的默认提示词"
+                                else "Customize Agent system role. Leave empty to use built-in default"
+                            )
+                        }
+                    )
+                }
+            }
 
             Divider()
 
@@ -1317,16 +1409,16 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 coordinatorModelName = model
                                 // Auto-switch Coordinator API URL based on selected model
                                 coordinatorApiUrl = when {
-                                    model.startsWith("deepseek") -> "https://api.deepseek.com/v1"
-                                    model.startsWith("glm-") -> "https://open.bigmodel.cn/api/paas/v4"
-                                    model.startsWith("doubao") -> "https://ark.cn-beijing.volces.com/api/v3"
+                                    model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
+                                    model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
+                                    model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
                                     else -> coordinatorApiUrl
                                 }
                                 // Auto-switch Coordinator API Key based on selected model
                                 coordinatorApiKey = when {
-                                    model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
-                                    model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
-                                    model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+                                    model.startsWith("deepseek") -> TextFieldValue(prefs.coordinatorApiKeyDeepseek)
+                                    model.startsWith("glm-") -> TextFieldValue(prefs.coordinatorApiKeyBigmodel)
+                                    model.startsWith("doubao") -> TextFieldValue(prefs.coordinatorApiKeyDoubao)
                                     else -> coordinatorApiKey
                                 }
                                 coordinatorModelDropdownExpanded = false
@@ -1336,6 +1428,75 @@ fun SettingsScreen(onBack: () -> Unit) {
                             } else null
                         )
                     }
+                }
+            }
+
+            // 自定义 Coordinator 系统提示词
+            var showCoordinatorPromptEditor by remember { mutableStateOf(false) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (isChinese) "自定义规划器提示词" else "Custom Planner Prompt",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            if (coordinatorSystemPrompt.text.isBlank()) {
+                                if (isChinese) "当前使用内置默认提示词" else "Using built-in default"
+                            } else {
+                                if (isChinese) "已配置（${coordinatorSystemPrompt.text.length}字）" else "Configured (${coordinatorSystemPrompt.text.length} chars)"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row {
+                        if (coordinatorSystemPrompt.text.isNotBlank()) {
+                            TextButton(onClick = { coordinatorSystemPrompt = TextFieldValue("") }) {
+                                Text(if (isChinese) "清空重置" else "Clear")
+                            }
+                        }
+                        TextButton(onClick = {
+                            val defaultPrompt = if (isChinese) com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_CN else com.autoglm.assistant.core.planner.SmartCoordinator.DECISION_SYSTEM_PROMPT_EN
+                            coordinatorSystemPrompt = TextFieldValue(defaultPrompt)
+                            showCoordinatorPromptEditor = true
+                        }) {
+                            Text(if (isChinese) "加载默认模板" else "Load Template")
+                        }
+                        TextButton(onClick = { showCoordinatorPromptEditor = !showCoordinatorPromptEditor }) {
+                            Text(if (showCoordinatorPromptEditor) {
+                                if (isChinese) "收起" else "Collapse"
+                            } else {
+                                if (isChinese) "编辑" else "Edit"
+                            })
+                        }
+                    }
+                }
+                if (showCoordinatorPromptEditor) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = coordinatorSystemPrompt,
+                        onValueChange = { coordinatorSystemPrompt = it },
+                        label = { Text(if (isChinese) "系统提示词（留空使用默认）" else "System Prompt (empty = default)") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 150.dp, max = 400.dp),
+                        maxLines = 20,
+                        supportingText = {
+                            Text(
+                                if (isChinese) "自定义协调器的系统提示词，留空则使用内置的 Task Coordinator System Prompt"
+                                else "Customize Coordinator system prompt. Leave empty to use built-in Task Coordinator System Prompt"
+                            )
+                        }
+                    )
                 }
             }
 
@@ -1452,16 +1613,16 @@ fun SettingsScreen(onBack: () -> Unit) {
                                     optimizerModelName = model
                                     // Auto-switch Optimizer API URL based on selected model
                                     optimizerApiUrl = when {
-                                        model.startsWith("deepseek") -> "https://api.deepseek.com/v1"
-                                        model.startsWith("glm-") -> "https://open.bigmodel.cn/api/paas/v4"
-                                        model.startsWith("doubao") -> "https://ark.cn-beijing.volces.com/api/v3"
+                                        model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
+                                        model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
+                                        model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
                                         else -> optimizerApiUrl
                                     }
                                     // Auto-switch Optimizer API Key based on selected model
                                     optimizerApiKey = when {
-                                        model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
-                                        model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
-                                        model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
+                                        model.startsWith("deepseek") -> TextFieldValue(prefs.optimizerApiKeyDeepseek)
+                                        model.startsWith("glm-") -> TextFieldValue(prefs.optimizerApiKeyBigmodel)
+                                        model.startsWith("doubao") -> TextFieldValue(prefs.optimizerApiKeyDoubao)
                                         else -> optimizerApiKey
                                     }
                                     optimizerModelDropdownExpanded = false
@@ -1529,8 +1690,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Row {
                             if (optimizerSystemPrompt.text.isNotBlank()) {
                                 TextButton(onClick = { optimizerSystemPrompt = TextFieldValue("") }) {
-                                    Text(if (isChinese) "恢复默认" else "Reset")
+                                    Text(if (isChinese) "清空重置" else "Clear")
                                 }
+                            }
+                            TextButton(onClick = {
+                                val defaultPrompt = if (isChinese) com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_CN else com.autoglm.assistant.core.planner.PromptOptimizer.SYSTEM_PROMPT_EN
+                                optimizerSystemPrompt = TextFieldValue(defaultPrompt)
+                                showPromptEditor = true
+                            }) {
+                                Text(if (isChinese) "加载默认模板" else "Load Template")
                             }
                             TextButton(onClick = { showPromptEditor = !showPromptEditor }) {
                                 Text(if (showPromptEditor) {
