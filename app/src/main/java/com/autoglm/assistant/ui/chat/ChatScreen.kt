@@ -4,6 +4,8 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,6 +30,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import android.widget.Toast
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
@@ -343,6 +349,7 @@ fun AnimatedMessageItem(message: ChatMessage) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatBubble(message: ChatMessage) {
     val isUser = message.isUser
@@ -354,6 +361,9 @@ fun ChatBubble(message: ChatMessage) {
     } else {
         RoundedCornerShape(20.dp, 20.dp, 20.dp, 4.dp)
     }
+
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -382,17 +392,32 @@ fun ChatBubble(message: ChatMessage) {
             Surface(
                 color = backgroundColor,
                 shape = shape,
-                modifier = Modifier.widthIn(min = 100.dp, max = 320.dp),
+                modifier = Modifier
+                    .widthIn(min = 100.dp, max = 320.dp)
+                    .combinedClickable(
+                        onClick = { },
+                        onLongClick = {
+                            clipboardManager.setText(AnnotatedString(message.content))
+                            Toast.makeText(context, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+                        }
+                    ),
                 shadowElevation = 1.dp
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    SelectionContainer {
+                    if (isUser) {
+                        SelectionContainer {
+                            Text(
+                                text = message.content,
+                                style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                            )
+                        }
+                    } else {
                         MarkdownText(
                             markdown = message.content,
-                            style = MaterialTheme.typography.bodyLarge.copy(color = textColor),
-                            modifier = Modifier.fillMaxWidth()
+                            style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
                         )
                     }
+
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = formatTime(message.timestamp),
