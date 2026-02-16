@@ -84,7 +84,13 @@ class WakeWordEngine(
     }
 
     fun startListening() {
-        if (_isListening.value || porcupine == null) {
+        if (_isListening.value) return
+        if (porcupine == null) {
+            // 步骤1: 引擎未初始化时通知错误，而非静默返回
+            val errorMsg = "唤醒词引擎未初始化，无法开始监听"
+            _lastError.value = errorMsg
+            onError?.invoke(errorMsg)
+            android.util.Log.e("WakeWordEngine", errorMsg)
             return
         }
 

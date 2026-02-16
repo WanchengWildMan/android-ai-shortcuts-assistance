@@ -355,7 +355,7 @@ fun HomeScreen(
                     inputText = TextFieldValue("")
                 }
             }),
-            singleLine = true
+            maxLines = 3
         )
     }
 

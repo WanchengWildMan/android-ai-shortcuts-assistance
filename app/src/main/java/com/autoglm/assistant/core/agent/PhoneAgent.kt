@@ -16,6 +16,7 @@ import com.autoglm.assistant.core.planner.SupervisionStatus
 import com.autoglm.assistant.core.screen.AppDetector
 import com.autoglm.assistant.core.screen.ScreenCapture
 import com.autoglm.assistant.util.Logger
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import com.google.gson.Gson
@@ -89,6 +90,9 @@ class PhoneAgent(
     
     // 协调器步数回调 — 用于在消息中显示当前步数
     var onCoordinatorStep: ((currentStep: Int, maxSteps: Int) -> Unit)? = null
+    // 截图生命周期回调 — 用于控制悬浮窗在截图时临时隐藏
+    var onBeforeScreenshot: (() -> Unit)? = null
+    var onAfterScreenshot: (() -> Unit)? = null
 
     // SmartCoordinator 回调 - 用于任务规划
     var onPlanningStart: (() -> Unit)? = null
@@ -313,8 +317,12 @@ class PhoneAgent(
         var coordinatorSteps = 0
         // 从协调器配置获取最大步数，避免硬编码
         val maxCoordinatorSteps = agentConfig.plannerConfig?.maxCoordinatorSteps ?: 20
+        var consecutiveDecisionFailures = 0
+        var consecutiveEmptyInstructions = 0
+        val maxConsecutiveDecisionFailures = 3
+        val maxConsecutiveEmptyInstructions = 3
 
-        while (coordinatorSteps < maxCoordinatorSteps && currentStep < agentConfig.maxSteps) {
+        while (coordinatorSteps < maxCoordinatorSteps) {
             if (stopRequested) {
                 Logger.i(Logger.AGENT, "Task stopped by user")
                 return generateTaskSummaryIfEnabled(task, stopped = true) ?: "Task stopped by user"
@@ -327,7 +335,7 @@ class PhoneAgent(
             onCoordinatorStep?.invoke(coordinatorSteps, maxCoordinatorSteps)
 
             // 获取当前截图
-            val screenshot = screenCapture.capture()
+            val screenshot = captureScreenWithOverlayControl()
 
             // 构建执行历史摘要
             val executionHistory = buildExecutionHistorySummary()
@@ -341,9 +349,23 @@ class PhoneAgent(
             )
 
             if (decision == null) {
-                Logger.e(Logger.AGENT, "Coordinator decision failed, falling back to direct execution")
-                return executeDirectly(task)
+                consecutiveDecisionFailures++
+                Logger.e(
+                    Logger.AGENT,
+                    "Coordinator decision failed ($consecutiveDecisionFailures/$maxConsecutiveDecisionFailures), retrying coordinator"
+                )
+                if (consecutiveDecisionFailures >= maxConsecutiveDecisionFailures) {
+                    val failMessage = if (agentConfig.language == "en") {
+                        "Coordinator decision failed repeatedly, task stopped"
+                    } else {
+                        "协调器连续决策失败，任务已停止"
+                    }
+                    onError?.invoke(failMessage)
+                    return failMessage
+                }
+                continue
             }
+            consecutiveDecisionFailures = 0
 
             Logger.i(Logger.AGENT, "Coordinator decision: ${decision.status}")
             Logger.i(Logger.AGENT, "Assessment: ${decision.assessment}")
@@ -369,14 +391,31 @@ class PhoneAgent(
 
                 com.autoglm.assistant.core.planner.DecisionStatus.CONTINUE -> {
                     if (decision.nextInstruction.isNullOrBlank()) {
-                        Logger.w(Logger.AGENT, "Coordinator returned CONTINUE but no instruction provided")
-                        break
+                        consecutiveEmptyInstructions++
+                        Logger.w(
+                            Logger.AGENT,
+                            "Coordinator returned CONTINUE but no instruction provided ($consecutiveEmptyInstructions/$maxConsecutiveEmptyInstructions)"
+                        )
+                        if (consecutiveEmptyInstructions >= maxConsecutiveEmptyInstructions) {
+                            val failMessage = if (agentConfig.language == "en") {
+                                "Coordinator did not provide next instruction repeatedly, task stopped"
+                            } else {
+                                "协调器连续未提供下一步指令，任务已停止"
+                            }
+                            onError?.invoke(failMessage)
+                            return failMessage
+                        }
+                        continue
                     }
+                    consecutiveEmptyInstructions = 0
 
                     Logger.i(Logger.AGENT, "Next instruction: ${decision.nextInstruction}")
 
                     // 执行UI Agent的步骤，直到它认为当前指令完成
-                    val result = executeUntilFinish(decision.nextInstruction)
+                    val result = executeUntilFinish(
+                        instruction = decision.nextInstruction,
+                        respectGlobalStepLimit = false
+                    )
 
                     if (result.needsHumanIntervention) {
                         Logger.w(Logger.AGENT, "Human intervention needed")
@@ -435,7 +474,10 @@ class PhoneAgent(
     /**
      * 执行UI Agent步骤直到FINISH或达到步数限制
      */
-    private suspend fun executeUntilFinish(instruction: String): StepResult {
+    private suspend fun executeUntilFinish(
+        instruction: String,
+        respectGlobalStepLimit: Boolean = true
+    ): StepResult {
         // 第一步：使用指令初始化
         var result = executeStep(instruction, isNewTask = true)
 
@@ -443,7 +485,10 @@ class PhoneAgent(
         var subSteps = 1
         val maxSubSteps = 10  // 每个指令最多10步
 
-        while (!result.finished && subSteps < maxSubSteps && currentStep < agentConfig.maxSteps) {
+        while (!result.finished &&
+            subSteps < maxSubSteps &&
+            (!respectGlobalStepLimit || currentStep < agentConfig.maxSteps)
+        ) {
             if (stopRequested) {
                 return result.copy(
                     success = false,
@@ -516,7 +561,7 @@ class PhoneAgent(
 
         // 1. 截取当前屏幕
         Logger.startTimer("screenshot")
-        val screenshot = screenCapture.capture()
+        val screenshot = captureScreenWithOverlayControl()
         val screenshotTime = Logger.endTimer("screenshot", Logger.SCREEN)
         val base64Image = screenshot?.base64Data
         Logger.screen("Screenshot: ${screenshot?.width}x${screenshot?.height}, sensitive=${screenshot?.isSensitive}, time=${screenshotTime}ms")
@@ -606,6 +651,15 @@ class PhoneAgent(
 
         onStepComplete?.invoke(stepResult)
         return stepResult
+    }
+
+    private suspend fun captureScreenWithOverlayControl() = try {
+        onBeforeScreenshot?.invoke()
+        // 给系统一个很短的窗口，把悬浮条从下一帧中移除
+        delay(90)
+        screenCapture.capture()
+    } finally {
+        onAfterScreenshot?.invoke()
     }
 
     /**

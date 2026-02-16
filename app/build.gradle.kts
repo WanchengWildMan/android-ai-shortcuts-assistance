@@ -85,7 +85,7 @@ dependencies {
     implementation("com.google.code.gson:gson:2.10.1")
 
     // Voice Wake Word - Porcupine
-    implementation("ai.picovoice:porcupine-android:3.0.2")
+    implementation("ai.picovoice:porcupine-android:4.0.0")
 
     // Image Loading
     implementation("io.coil-kt:coil-compose:2.5.0")

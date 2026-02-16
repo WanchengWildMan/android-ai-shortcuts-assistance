@@ -43,6 +43,7 @@ class WakeWordService : Service() {
     private lateinit var speechRecognizer: SpeechRecognizer
     private lateinit var textToSpeech: TextToSpeech
     private var phoneAgent: PhoneAgent? = null
+    private var agentStatusOverlay: AgentStatusOverlayController? = null
 
     // WakeLock 防止 CPU 休眠
     private var wakeLock: PowerManager.WakeLock? = null
@@ -53,6 +54,10 @@ class WakeWordService : Service() {
 
     private val _lastRecognizedText = MutableStateFlow("")
     val lastRecognizedText: StateFlow<String> = _lastRecognizedText
+
+    // 唤醒词引擎错误信息，供 UI 层观察展示
+    private val _lastWakeWordError = MutableStateFlow<String?>(null)
+    val lastWakeWordError: StateFlow<String?> = _lastWakeWordError
 
     // Agent 消息类型
     enum class AgentMessageType {
@@ -147,6 +152,7 @@ class WakeWordService : Service() {
             handleWakeWordDetected()
         }
         wakeWordEngine.onError = { error ->
+            _lastWakeWordError.value = error
             onError?.invoke(error)
         }
 
@@ -168,6 +174,8 @@ class WakeWordService : Service() {
 
         // 初始化 PhoneAgent
         initializePhoneAgent()
+        // 执行期状态悬浮条
+        agentStatusOverlay = AgentStatusOverlayController(this)
     }
 
     private fun initializePhoneAgent() {
@@ -201,7 +209,8 @@ class WakeWordService : Service() {
                 enableSupervision = prefs.supervisionEnabled,
                 supervisorModelConfig = coordinatorModelConfig,
                 maxCorrections = prefs.maxCorrections,
-                maxCoordinatorSteps = prefs.maxCoordinatorSteps
+                maxCoordinatorSteps = prefs.maxCoordinatorSteps,
+                customSystemPrompt = prefs.coordinatorSystemPrompt
             ).also {
                 android.util.Log.i("AutoGLM", "SmartCoordinator available: model=${prefs.coordinatorModelName}, defaultEnabled=${prefs.smartCoordinatorEnabled}, supervision=${prefs.supervisionEnabled}")
             }
@@ -239,6 +248,7 @@ class WakeWordService : Service() {
         val agentConfig = AgentConfig(
             maxSteps = prefs.maxSteps,
             language = prefs.language,
+            systemPrompt = prefs.agentSystemPrompt.ifBlank { null },
             plannerConfig = plannerConfig,
             optimizerConfig = optimizerConfig
         )
@@ -246,14 +256,27 @@ class WakeWordService : Service() {
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
             initialize()
 
+            onStepStart = { step ->
+                agentStatusOverlay?.updateStep(step)
+            }
+
             onThinking = { thinking ->
                 // 发送思考过程消息
                 _agentMessage.value = AgentMessage(thinking, AgentMessageType.THINKING)
+                agentStatusOverlay?.updateThinking(thinking)
             }
 
             onAction = { action ->
                 // 发送动作消息
                 _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
+            }
+
+            onBeforeScreenshot = {
+                agentStatusOverlay?.hideForScreenshot()
+            }
+
+            onAfterScreenshot = {
+                agentStatusOverlay?.restoreAfterScreenshot()
             }
 
             // Prompt 优化器回调 - 支持流式输出
@@ -354,6 +377,12 @@ class WakeWordService : Service() {
                 )
             }
 
+            onDecisionComplete = { decision ->
+                decision.nextInstruction
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { agentStatusOverlay?.updateCoordinatorTask(it) }
+            }
+
             phoneAgent?.onPlanningComplete = { taskPlan ->
                 if (taskPlan != null) {
                     // 使用TaskPlan的toReadableText方法，但去掉emoji前缀
@@ -394,6 +423,7 @@ class WakeWordService : Service() {
             }
 
             phoneAgent?.onSubTaskStart = { subTask ->
+                agentStatusOverlay?.updateCoordinatorTask(subTask.goal)
                 val subTaskText = buildString {
                     appendLine("### ▶️ 开始执行子任务 ${subTask.index}")
                     appendLine()
@@ -435,6 +465,7 @@ class WakeWordService : Service() {
 
             onTaskComplete = { message ->
                 _serviceState.value = ServiceState.IDLE
+                agentStatusOverlay?.onTaskFinished()
                 onTaskCompleted?.invoke(message)
                 // 清理coordinator消息
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -455,6 +486,7 @@ class WakeWordService : Service() {
 
             onError = { error ->
                 _serviceState.value = ServiceState.IDLE
+                agentStatusOverlay?.onTaskFinished()
                 this@WakeWordService.onError?.invoke(error)
                 // 清理coordinator消息
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -499,13 +531,15 @@ class WakeWordService : Service() {
             return
         }
 
+        // 步骤2: 语音唤醒执行任务时使用全局配置的默认设置
+        val prefs = App.instance.preferenceManager
+
         _lastRecognizedText.value = text
         _serviceState.value = ServiceState.EXECUTING_TASK
         onSpeechRecognized?.invoke(text)
         onTaskStarted?.invoke(text)
+        agentStatusOverlay?.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
 
-        // 步骤2: 语音唤醒执行任务时使用全局配置的默认设置
-        val prefs = App.instance.preferenceManager
         // Execute task with phone agent
         scope.launch {
             try {
@@ -513,35 +547,62 @@ class WakeWordService : Service() {
             } catch (e: Exception) {
                 onError?.invoke("Task error: ${e.message}")
                 startWakeWordListening()
+            } finally {
+                agentStatusOverlay?.onTaskFinished()
             }
         }
     }
 
     fun startWakeWordListening() {
-        // Log who called this and current state
         val stackTrace = Thread.currentThread().stackTrace
         val caller = if (stackTrace.size > 3) stackTrace[3].methodName else "unknown"
-        android.util.Log.e("AutoGLM", "=== startWakeWordListening called by: $caller, current state: ${_serviceState.value}")
+        android.util.Log.i("AutoGLM", "=== startWakeWordListening called by: $caller, current state: ${_serviceState.value}")
 
-        // Don't interrupt task execution!
+        // 步骤1: 任务执行中不打断
         if (_serviceState.value == ServiceState.EXECUTING_TASK) {
-            android.util.Log.e("AutoGLM", "=== SKIPPING startWakeWordListening - task is executing!")
+            android.util.Log.i("AutoGLM", "=== SKIPPING startWakeWordListening - task is executing!")
             return
         }
 
+        // 步骤2: 清除上次错误
+        _lastWakeWordError.value = null
+
         if (!wakeWordEngine.isInitialized()) {
             val prefs = App.instance.preferenceManager
-            if (prefs.porcupineAccessKey.isNotBlank()) {
-                val wakeWordKeyword = prefs.wakeWordKeyword
-                wakeWordEngine.initialize(keywordName = wakeWordKeyword)
-            } else {
-                onError?.invoke("Please configure Porcupine access key in settings")
+            if (prefs.porcupineAccessKey.isBlank()) {
+                val errorMsg = "请在设置中配置 Porcupine Access Key"
+                _lastWakeWordError.value = errorMsg
+                _serviceState.value = ServiceState.IDLE
                 return
+            }
+
+            val wakeWordKeyword = prefs.wakeWordKeyword
+            // 步骤3: 检查 initialize() 返回值
+            val initSuccess = wakeWordEngine.initialize(keywordName = wakeWordKeyword)
+
+            if (!initSuccess) {
+                // 步骤4: 降级策略 — 自定义唤醒词失败时尝试内置唤醒词
+                android.util.Log.w("AutoGLM", "自定义唤醒词 '$wakeWordKeyword' 初始化失败，尝试降级到内置唤醒词 PORCUPINE")
+                val fallbackSuccess = wakeWordEngine.initializeWithBuiltInKeyword(
+                    ai.picovoice.porcupine.Porcupine.BuiltInKeyword.PORCUPINE
+                )
+                if (!fallbackSuccess) {
+                    val errorMsg = "唤醒词引擎初始化失败，请检查 Access Key 是否有效"
+                    android.util.Log.e("AutoGLM", errorMsg)
+                    _lastWakeWordError.value = errorMsg
+                    _serviceState.value = ServiceState.IDLE
+                    return
+                } else {
+                    val warnMsg = "自定义唤醒词不兼容当前 SDK，已降级为内置唤醒词 'Porcupine'"
+                    android.util.Log.w("AutoGLM", warnMsg)
+                    _lastWakeWordError.value = warnMsg
+                }
             }
         }
 
+        // 步骤5: 只有初始化成功后才设置监听状态
         _serviceState.value = ServiceState.LISTENING_WAKE_WORD
-        android.util.Log.e("AutoGLM", "=== State changed to LISTENING_WAKE_WORD")
+        android.util.Log.i("AutoGLM", "=== State changed to LISTENING_WAKE_WORD")
         wakeWordEngine.startListening()
         updateNotification(getString(R.string.notification_listening))
     }
@@ -602,6 +663,7 @@ class WakeWordService : Service() {
         _serviceState.value = ServiceState.EXECUTING_TASK
         android.util.Log.d("AutoGLM", "State changed to EXECUTING_TASK")
         onTaskStarted?.invoke(task)
+        agentStatusOverlay?.onTaskStarted(withCoordinator = enablePlanning)
 
         currentTaskJob = scope.launch {
             // 获取 WakeLock 防止 CPU 休眠
@@ -616,6 +678,7 @@ class WakeWordService : Service() {
             } finally {
                 releaseWakeLock()
                 _serviceState.value = ServiceState.IDLE
+                agentStatusOverlay?.onTaskFinished()
             }
         }
     }
@@ -645,6 +708,7 @@ class WakeWordService : Service() {
         currentTaskJob?.cancel()
         phoneAgent?.stop()
         _serviceState.value = ServiceState.IDLE
+        agentStatusOverlay?.onTaskFinished()
     }
 
     private fun speak(text: String) {
@@ -700,5 +764,7 @@ class WakeWordService : Service() {
         speechRecognizer.release()
         textToSpeech.release()
         phoneAgent?.release()
+        agentStatusOverlay?.release()
+        agentStatusOverlay = null
     }
 }
