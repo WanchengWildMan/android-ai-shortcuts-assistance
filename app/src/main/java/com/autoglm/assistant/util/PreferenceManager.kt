@@ -37,6 +37,12 @@ class PreferenceManager(context: Context) {
         private const val KEY_MAX_CORRECTIONS = "max_corrections"
         // 协调器每次任务的最大决策轮次（每轮包括：分析截图+决策下一步+Agent执行）
         private const val KEY_MAX_COORDINATOR_STEPS = "max_coordinator_steps"
+        // 协调器单轮内，PhoneAgent 执行 nextInstruction 的最大连续决策轮次
+        private const val KEY_MAX_AGENT_STEPS_PER_COORDINATOR_STEP = "max_agent_steps_per_coordinator_step"
+        // 协调器模型是否支持 Vision（图片输入）
+        private const val KEY_COORDINATOR_ENABLE_VISION = "coordinator_enable_vision"
+        // 协调器是否启用模型思考/推理参数（仅对部分模型生效）
+        private const val KEY_COORDINATOR_ENABLE_THINKING = "coordinator_enable_thinking"
 
         // 提示词优化器设置
         private const val KEY_PROMPT_OPTIMIZER_ENABLED = "prompt_optimizer_enabled"
@@ -67,6 +73,8 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_COORDINATOR_MODEL_NAME = "deepseek-chat"
         const val DEFAULT_MAX_CORRECTIONS = 2  // 已废弃：监督模式的纠正次数
         const val DEFAULT_MAX_COORDINATOR_STEPS = 20  // 协调器每次任务的最大决策轮次
+        const val DEFAULT_MAX_AGENT_STEPS_PER_COORDINATOR_STEP = 10
+        const val DEFAULT_COORDINATOR_ENABLE_THINKING = true
         // 提示词优化器默认值 - 默认使用协调器设置
         const val DEFAULT_OPTIMIZER_MODEL_NAME = "deepseek-chat"
     }
@@ -154,10 +162,31 @@ class PreferenceManager(context: Context) {
 
     // 协调器每次任务的最大决策轮次
     // 每轮包括：1)协调器分析截图和执行历史 2)决策下一步操作 3)Agent执行具体指令
-    // 同时受maxSteps限制：当任一条件达到上限，任务执行便停止
     var maxCoordinatorSteps: Int
         get() = prefs.getInt(KEY_MAX_COORDINATOR_STEPS, DEFAULT_MAX_COORDINATOR_STEPS)
         set(value) = prefs.edit { putInt(KEY_MAX_COORDINATOR_STEPS, value) }
+
+    // 协调器单轮内，PhoneAgent 执行单条 nextInstruction 的最大连续决策轮次
+    var maxAgentStepsPerCoordinatorStep: Int
+        get() = prefs.getInt(
+            KEY_MAX_AGENT_STEPS_PER_COORDINATOR_STEP,
+            DEFAULT_MAX_AGENT_STEPS_PER_COORDINATOR_STEP
+        )
+        set(value) = prefs.edit { putInt(KEY_MAX_AGENT_STEPS_PER_COORDINATOR_STEP, value) }
+
+    // 协调器模型是否支持 Vision（图片输入）
+    // 默认 false，因为大多数模型（如 DeepSeek）不支持 vision
+    var coordinatorEnableVision: Boolean
+        get() = prefs.getBoolean(KEY_COORDINATOR_ENABLE_VISION, false)
+        set(value) = prefs.edit { putBoolean(KEY_COORDINATOR_ENABLE_VISION, value) }
+
+    // 协调器是否启用模型思考/推理参数（仅对 DeepSeek/Qwen 等支持模型生效）
+    var coordinatorEnableThinking: Boolean
+        get() = prefs.getBoolean(
+            KEY_COORDINATOR_ENABLE_THINKING,
+            DEFAULT_COORDINATOR_ENABLE_THINKING
+        )
+        set(value) = prefs.edit { putBoolean(KEY_COORDINATOR_ENABLE_THINKING, value) }
 
     // PromptOptimizer settings
     var promptOptimizerEnabled: Boolean

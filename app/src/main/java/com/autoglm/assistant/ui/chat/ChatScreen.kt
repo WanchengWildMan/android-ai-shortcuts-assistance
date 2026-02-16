@@ -206,7 +206,7 @@ fun ChatScreen(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.AccountTree,
@@ -233,7 +233,7 @@ fun ChatScreen(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.AutoFixHigh,
@@ -403,7 +403,7 @@ fun ChatBubble(message: ChatMessage) {
                     color = backgroundColor,
                     shape = shape,
                     modifier = Modifier
-                        .widthIn(max = 320.dp)
+                        .widthIn(min = 60.dp, max = 320.dp)
                         .combinedClickable(
                             onClick = { },
                             onLongClick = {

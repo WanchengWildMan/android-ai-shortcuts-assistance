@@ -43,6 +43,7 @@ android {
         compose = true
         viewBinding = true
         buildConfig = true
+        aidl = true  // HARD: 必须启用 AIDL 支持才能使用 IAccessibilityProvider 接口
     }
 
     composeOptions {

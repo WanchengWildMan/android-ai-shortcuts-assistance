@@ -223,7 +223,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 "$emoji 监督结果\n\n$content"
             }
             WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> {
-                "💭 协调器思考：\n${msg.content}"
+                "🎯 协调器指令：${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
                 // content 格式: "currentStep|maxSteps"

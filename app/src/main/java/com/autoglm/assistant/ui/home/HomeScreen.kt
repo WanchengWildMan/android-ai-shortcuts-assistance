@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import com.autoglm.assistant.service.WakeWordService
+import com.autoglm.assistant.ui.components.AccessibilityServiceStatusCard
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyGridState
 import java.util.Calendar
@@ -132,6 +133,19 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
+        
+        // 无障碍服务状态卡片
+        AccessibilityServiceStatusCard(
+            onOpenSettings = {
+                try {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (e: Exception) {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_SETTINGS))
+                }
+            },
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+        
         // 正在运行的任务卡片
         val wakeWordService = WakeWordService.instance
         if (wakeWordService != null) {
@@ -277,7 +291,7 @@ fun HomeScreen(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.AccountTree,
@@ -303,7 +317,7 @@ fun HomeScreen(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoFixHigh,

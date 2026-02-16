@@ -185,7 +185,7 @@ class ModelClient(private val config: ModelConfig) {
     private fun buildRequestBody(messages: List<Message>): String {
         val messagesArray = messages.map { it.toJsonMap() }
 
-        val body = mapOf(
+        val body = mutableMapOf<String, Any>(
             "model" to config.modelName,
             "messages" to messagesArray,
             "max_tokens" to config.maxTokens,
@@ -194,6 +194,7 @@ class ModelClient(private val config: ModelConfig) {
             "frequency_penalty" to config.frequencyPenalty,
             "stream" to true
         )
+        applyThinkingParamsIfNeeded(body)
 
         return gson.toJson(body)
     }
@@ -201,7 +202,7 @@ class ModelClient(private val config: ModelConfig) {
     private fun buildNonStreamRequestBody(messages: List<Message>): String {
         val messagesArray = messages.map { it.toJsonMap() }
 
-        val body = mapOf(
+        val body = mutableMapOf<String, Any>(
             "model" to config.modelName,
             "messages" to messagesArray,
             "max_tokens" to config.maxTokens,
@@ -210,8 +211,24 @@ class ModelClient(private val config: ModelConfig) {
             "frequency_penalty" to config.frequencyPenalty,
             "stream" to false
         )
+        applyThinkingParamsIfNeeded(body)
 
         return gson.toJson(body)
+    }
+
+    private fun applyThinkingParamsIfNeeded(body: MutableMap<String, Any>) {
+        val enableThinking = config.enableThinking ?: return
+        when {
+            config.modelName.startsWith("deepseek", ignoreCase = true) ||
+                config.modelName.startsWith("doubao", ignoreCase = true) -> {
+                body["thinking"] = mapOf(
+                    "type" to if (enableThinking) "enabled" else "disabled"
+                )
+            }
+            config.modelName.startsWith("qwen", ignoreCase = true) -> {
+                body["enable_thinking"] = enableThinking
+            }
+        }
     }
 
     private fun parseResponse(content: String): Pair<String, String> {
