@@ -309,7 +309,7 @@ class AccessibilityProviderService : AccessibilityService() {
     }
     
     /**
-     * 步骤10: 输入文本
+     * 步骤10: 输入文本（向当前焦点输入框）
      */
     fun inputTextInternal(text: String): Boolean {
         Log.d(TAG, "⌨️ 输入文本: '$text'")
@@ -330,6 +330,315 @@ class AccessibilityProviderService : AccessibilityService() {
         
         Log.d(TAG, if (result) "✅ 输入成功" else "❌ 输入失败")
         return result
+    }
+    
+    /**
+     * 步骤11: 查找焦点节点的bounds字符串（Operit方式）
+     * 
+     * 业务目的: 找到当前输入焦点所在的节点，返回其边界坐标字符串
+     * 操作实现: 遍历UI层级查找焦点，返回"[left,top][right,bottom]"格式的边界字符串
+     * 
+     * 注意: 使用bounds而非nodeId，避免跨进程缓存失效问题
+     */
+    fun findFocusedNodeIdInternal(): String? {
+        Log.d(TAG, "🔍 [Provider] 开始查找焦点节点")
+        
+        val root = rootInActiveWindow ?: run {
+            Log.e(TAG, "❌ [Provider] 无法获取根节点")
+            return null
+        }
+        
+        // 步骤1: 尝试多种方式查找焦点（某些应用焦点类型不同）
+        var targetNode: AccessibilityNodeInfo? = null
+        
+        // 1.1 输入焦点 (标准方式)
+        targetNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (targetNode != null) {
+            Log.d(TAG, "🔍 [Provider] FOCUS_INPUT 候选: class=${targetNode.className}, id=${targetNode.viewIdResourceName}, visible=${targetNode.isVisibleToUser}")
+            
+            // 获取bounds信息（即使为空也继续）
+            val rect = android.graphics.Rect()
+            targetNode.getBoundsInScreen(rect)
+            
+            // 对于微信等应用，输入框在初始状态bounds可能为空
+            // 我们仍然接受此节点，返回特殊标记让后续处理
+            if (rect.isEmpty) {
+                Log.w(TAG, "⚠️ [Provider] FOCUS_INPUT节点bounds为空，但仍使用: visible=${targetNode.isVisibleToUser}, bounds=$rect")
+                // 不设置为null，继续使用
+            } else {
+                Log.d(TAG, "✅ [Provider] FOCUS_INPUT有效: bounds=[$rect]")
+            }
+        }
+        
+        // 1.2 无障碍焦点 (某些应用使用此焦点)
+        if (targetNode == null) {
+            val accessibilityNode = root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+            if (accessibilityNode != null && (accessibilityNode.isEditable || accessibilityNode.className == "android.widget.EditText")) {
+                Log.d(TAG, "🔍 [Provider] FOCUS_ACCESSIBILITY 候选: class=${accessibilityNode.className}")
+                
+                val rect = android.graphics.Rect()
+                accessibilityNode.getBoundsInScreen(rect)
+                if (accessibilityNode.isVisibleToUser && !rect.isEmpty) {
+                    targetNode = accessibilityNode
+                    Log.d(TAG, "✅ [Provider] FOCUS_ACCESSIBILITY有效: bounds=[$rect]")
+                } else {
+                    Log.w(TAG, "⚠️ [Provider] FOCUS_ACCESSIBILITY节点无效: visible=${accessibilityNode.isVisibleToUser}, bounds=$rect")
+                }
+            }
+        }
+        
+        // 1.3 递归查找 isFocused 的可编辑节点（带bounds验证）
+        if (targetNode == null) {
+            targetNode = findFocusedEditableNode(root)
+            if (targetNode != null) {
+                val rect = android.graphics.Rect()
+                targetNode.getBoundsInScreen(rect)
+                Log.d(TAG, "🔍 [Provider] 递归找到候选: class=${targetNode.className}, bounds=[$rect]")
+                
+                if (!targetNode.isVisibleToUser || rect.isEmpty) {
+                    Log.w(TAG, "⚠️ [Provider] 递归节点无效: visible=${targetNode.isVisibleToUser}, bounds=$rect")
+                    targetNode = null
+                } else {
+                    Log.d(TAG, "✅ [Provider] 递归节点有效")
+                }
+            }
+        }
+        
+        if (targetNode == null) {
+            Log.e(TAG, "❌ [Provider] 所有方式均未找到有效焦点节点")
+            Log.e(TAG, "❌ [Provider] 请确保：1) 已点击输入框  2) 光标正在闪烁  3) 输入框可见  4) Provider无障碍服务已启用")
+            return null
+        }
+        
+        // 步骤2: 最终验证节点
+        val finalRect = android.graphics.Rect()
+        targetNode.getBoundsInScreen(finalRect)
+        Log.d(TAG, "🔍 [Provider] 最终节点: class=${targetNode.className}, editable=${targetNode.isEditable}, enabled=${targetNode.isEnabled}, visible=${targetNode.isVisibleToUser}, focused=${targetNode.isFocused}, bounds=$finalRect")
+        
+        // 步骤3: 返回bounds字符串
+        // 如果bounds为空，返回特殊标记"[FOCUS_INPUT]"让setTextOnNode直接查找FOCUS_INPUT节点
+        val boundsString = if (finalRect.isEmpty) {
+            Log.d(TAG, "✅ [Provider] 找到焦点节点但bounds为空，返回[FOCUS_INPUT]标记")
+            "[FOCUS_INPUT]"
+        } else {
+            "[${finalRect.left},${finalRect.top}][${finalRect.right},${finalRect.bottom}]"
+        }
+        
+        Log.d(TAG, "✅ [Provider] 成功找到焦点节点: bounds=$boundsString")
+        targetNode.recycle()
+        return boundsString
+    }
+    
+    /**
+     * 递归查找处于焦点状态的可编辑节点（带bounds验证）
+     */
+    private fun findFocusedEditableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // 检查当前节点是否同时满足：焦点 + 可编辑 + 可见 + 有效bounds
+        if (node.isFocused && (node.isEditable || node.className == "android.widget.EditText")) {
+            if (node.isVisibleToUser && node.isEnabled) {
+                // 额外检查bounds是否有效（不为空）
+                val rect = android.graphics.Rect()
+                node.getBoundsInScreen(rect)
+                if (!rect.isEmpty) {
+                    return AccessibilityNodeInfo.obtain(node)
+                } else {
+                    Log.w(TAG, "⚠️ [Provider] 递归找到焦点节点但bounds为空: class=${node.className}")
+                }
+            }
+        }
+        
+        // 递归查找子节点
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                val result = findFocusedEditableNode(child)
+                child.recycle()
+                if (result != null) {
+                    return result
+                }
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * 步骤12: 在指定bounds的节点上设置文本（Operit方式）
+     * 
+     * 业务目的: 向指定边界坐标的节点输入文本
+     * 操作实现: 通过bounds实时查找节点，执行ACTION_SET_TEXT操作
+     * 
+     * @param boundsString 格式: "[left,top][right,bottom]"
+     * @param text 要输入的文本
+     */
+    fun setTextOnNodeInternal(boundsString: String, text: String): Boolean {
+        Log.d(TAG, "⌨️ 设置节点文本: bounds=$boundsString, text='$text'")
+        
+        // 步骤1: 获取根节点
+        val root = rootInActiveWindow ?: run {
+            Log.e(TAG, "❌ 无法获取根节点")
+            return false
+        }
+        
+        // 步骤2: 查找目标节点
+        val targetNode = if (boundsString == "[FOCUS_INPUT]") {
+            // 特殊情况: bounds为空时直接查找FOCUS_INPUT节点
+            Log.d(TAG, "🔍 [TEXT_INPUT] 使用FOCUS_INPUT特殊标记，等待100ms后重新查找")
+            Thread.sleep(100)  // 等待键盘弹出和输入框初始化
+            
+            val node = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (node == null) {
+                Log.e(TAG, "❌ 重新查找FOCUS_INPUT失败")
+            } else {
+                Log.d(TAG, "✅ 重新找到FOCUS_INPUT节点: class=${node.className}")
+            }
+            node
+        } else {
+            // 常规情况: 通过bounds查找
+            val rect = parseBounds(boundsString)
+            if (rect.isEmpty) {
+                Log.e(TAG, "❌ bounds解析失败: $boundsString")
+                return false
+            }
+            
+            val node = findNodeByBounds(root, rect)
+            if (node == null) {
+                Log.e(TAG, "❌ 未找到匹配bounds的节点: $boundsString")
+            }
+            node
+        }
+        
+        if (targetNode == null) {
+            Log.e(TAG, "❌ 未能获取目标节点")
+            return false
+        }
+        
+        // 步骤3: 检查节点是否可编辑
+        if (!targetNode.isEditable && targetNode.className != "android.widget.EditText") {
+            Log.w(TAG, "⚠️ 节点不可编辑: class=${targetNode.className}, isEditable=${targetNode.isEditable}")
+        }
+        
+        var success = false
+        
+        try {
+            // 策略1: 先确保节点获得焦点
+            Log.d(TAG, "[TEXT_INPUT] 策略1: ACTION_FOCUS")
+            targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            Thread.sleep(50)  // 等待焦点稳定
+            
+            // 策略2: 先清空现有文本（如果有）
+            val currentText = targetNode.text?.toString() ?: ""
+            if (currentText.isNotEmpty()) {
+                Log.d(TAG, "[TEXT_INPUT] 策略2: 清空现有文本 (当前='$currentText')")
+                // 方法1: 全选 + 删除
+                val selectArgs = android.os.Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, currentText.length)
+                }
+                targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selectArgs)
+                Thread.sleep(30)
+                
+                // 方法2: 设置空文本清空
+                val clearArgs = android.os.Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                }
+                targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+                Thread.sleep(50)
+            }
+            
+            // 策略3: 设置新文本
+            Log.d(TAG, "[TEXT_INPUT] 策略3: ACTION_SET_TEXT")
+            val setArgs = android.os.Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            val setResult = targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setArgs)
+            Log.d(TAG, "[TEXT_INPUT] ACTION_SET_TEXT result=$setResult")
+            
+            if (setResult) {
+                Thread.sleep(50)
+                
+                // 策略4: 移动光标到文本末尾（某些应用需要）
+                Log.d(TAG, "[TEXT_INPUT] 策略4: 设置光标位置到末尾")
+                val cursorArgs = android.os.Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, text.length)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, text.length)
+                }
+                targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, cursorArgs)
+                
+                success = true
+            } else {
+                // 策略5: 尝试粘贴方式（复制到剪贴板 + ACTION_PASTE）
+                Log.d(TAG, "[TEXT_INPUT] 策略5: 尝试粘贴方式")
+                try {
+                    val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clip = android.content.ClipData.newPlainText("autoglm_input", text)
+                    clipboard.setPrimaryClip(clip)
+                    Thread.sleep(30)
+                    
+                    val pasteResult = targetNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                    Log.d(TAG, "[TEXT_INPUT] ACTION_PASTE result=$pasteResult")
+                    success = pasteResult
+                } catch (e: Exception) {
+                    Log.e(TAG, "[TEXT_INPUT] 粘贴方式失败: ${e.message}")
+                }
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 设置文本异常: ${e.message}", e)
+        } finally {
+            targetNode.recycle()
+        }
+        
+        Log.d(TAG, if (success) "✅ 设置文本成功" else "❌ 设置文本失败")
+        return success
+    }
+    
+    /**
+     * 解析bounds字符串 "[left,top][right,bottom]" -> Rect
+     */
+    private fun parseBounds(boundsString: String): android.graphics.Rect {
+        val rect = android.graphics.Rect()
+        try {
+            // 去除中括号，按逗号分割："[1,2][3,4]" -> "1,2,3,4,"
+            val parts = boundsString.replace("[", "").replace("]", ",").split(",")
+            if (parts.size >= 4) {
+                rect.left = parts[0].toInt()
+                rect.top = parts[1].toInt()
+                rect.right = parts[2].toInt()
+                rect.bottom = parts[3].toInt()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 解析bounds失败: $boundsString", e)
+        }
+        return rect
+    }
+    
+    /**
+     * 通过bounds递归查找匹配的节点
+     */
+    private fun findNodeByBounds(node: AccessibilityNodeInfo, targetRect: android.graphics.Rect): AccessibilityNodeInfo? {
+        val nodeRect = android.graphics.Rect()
+        node.getBoundsInScreen(nodeRect)
+        
+        // 检查当前节点是否匹配
+        if (nodeRect == targetRect) {
+            Log.d(TAG, "✅ 找到匹配节点: class=${node.className}")
+            return AccessibilityNodeInfo.obtain(node)
+        }
+        
+        // 递归查找子节点
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                val result = findNodeByBounds(child, targetRect)
+                child.recycle()
+                if (result != null) {
+                    return result
+                }
+            }
+        }
+        
+        return null
     }
     
     // ========== 辅助方法 ==========

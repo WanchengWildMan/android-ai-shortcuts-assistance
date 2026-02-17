@@ -113,7 +113,7 @@ class PreferenceManager(context: Context) {
 
     // true = 显示所有过程消息, false = 仅显示最终结果
     var showAgentProcess: Boolean
-        get() = prefs.getBoolean(KEY_SHOW_AGENT_PROCESS, false)
+        get() = prefs.getBoolean(KEY_SHOW_AGENT_PROCESS, true)  // 默认开启，方便调试
         set(value) = prefs.edit { putBoolean(KEY_SHOW_AGENT_PROCESS, value) }
 
     // 智能协调器设置

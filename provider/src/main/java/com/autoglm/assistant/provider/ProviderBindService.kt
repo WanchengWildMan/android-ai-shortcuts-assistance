@@ -96,15 +96,17 @@ class ProviderBindService : Service() {
                 Log.e(TAG, "❌ AccessibilityService 未启用")
                 return null
             }
-            // TODO: 实现查找焦点节点
-            return null
+            return service.findFocusedNodeIdInternal()
         }
         
         override fun setTextOnNode(nodeId: String, text: String): Boolean {
             Log.d(TAG, "⌨️ setTextOnNode: nodeId=$nodeId, text='$text'")
-            // TODO: 实现按节点ID设置文本
-            Log.w(TAG, "⚠️ setTextOnNode 暂未实现")
-            return false
+            val service = AccessibilityProviderService.instance
+            if (service == null) {
+                Log.e(TAG, "❌ AccessibilityService 未启用")
+                return false
+            }
+            return service.setTextOnNodeInternal(nodeId, text)
         }
         
         override fun takeScreenshot(fd: android.os.ParcelFileDescriptor, format: String): Boolean {

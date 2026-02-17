@@ -7,6 +7,20 @@
         android:theme="@style/Theme.AppCompat.Light">
         
         <!-- 
+            步骤0: 启动Activity（提供桌面图标）
+            业务目的：引导用户启用无障碍服务
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        
+        <!-- 
             步骤1: 无障碍服务
             业务目的：系统级无障碍能力，执行手势操作
         -->
