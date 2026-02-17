@@ -423,4 +423,78 @@ object UIHierarchyManager {
             false
         }
     }
+    
+    /**
+     * 步骤16：查找当前焦点节点
+     * 
+     * 业务目的：获取当前具有输入焦点的节点ID，用于后续文本输入
+     * 操作实现：调用 Provider 的 findFocusedNodeId AIDL 方法
+     * 
+     * @param context 应用上下文
+     * @return 焦点节点ID，如果没有焦点则返回 null
+     */
+    suspend fun findFocusedNodeId(context: Context): String? {
+        Log.d(TAG, "[TEXT_INPUT] 🔍 开始查找焦点节点")
+        Log.d(TAG, "[TEXT_INPUT] 当前绑定状态: isBound=${_isBound.value}, provider=${accessibilityProvider != null}")
+        
+        if (!ensureBound(context)) {
+            Log.e(TAG, "[TEXT_INPUT] ❌ 服务未绑定，无法查找焦点节点")
+            return null
+        }
+        
+        Log.d(TAG, "[TEXT_INPUT] ✅ 服务已绑定，调用 Provider.findFocusedNodeId()")
+        return try {
+            val nodeId = accessibilityProvider?.findFocusedNodeId()
+            if (nodeId != null) {
+                Log.d(TAG, "[TEXT_INPUT] ✅ 找到焦点节点: nodeId=$nodeId")
+            } else {
+                Log.w(TAG, "[TEXT_INPUT] ⚠️ Provider 返回 null (未找到焦点节点)")
+            }
+            nodeId
+        } catch (e: RemoteException) {
+            Log.e(TAG, "[TEXT_INPUT] ❌ 查找焦点节点失败 (RemoteException)", e)
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "[TEXT_INPUT] ❌ 查找焦点节点失败 (异常)", e)
+            null
+        }
+    }
+    
+    /**
+     * 步骤17：在指定节点上设置文本
+     * 
+     * 业务目的：向指定节点输入文本（非root方式）
+     * 操作实现：调用 Provider 的 setTextOnNode AIDL 方法
+     * 
+     * @param context 应用上下文
+     * @param nodeId 节点ID（通过 findFocusedNodeId 获取）
+     * @param text 要输入的文本
+     * @return 操作是否成功
+     */
+    suspend fun setTextOnNode(context: Context, nodeId: String, text: String): Boolean {
+        Log.d(TAG, "[TEXT_INPUT] ⌨️ 开始设置文本: nodeId=$nodeId, text='$text'")
+        Log.d(TAG, "[TEXT_INPUT] 当前绑定状态: isBound=${_isBound.value}, provider=${accessibilityProvider != null}")
+        
+        if (!ensureBound(context)) {
+            Log.e(TAG, "[TEXT_INPUT] ❌ 服务未绑定，无法设置文本")
+            return false
+        }
+        
+        Log.d(TAG, "[TEXT_INPUT] ✅ 服务已绑定，调用 Provider.setTextOnNode()")
+        return try {
+            val result = accessibilityProvider?.setTextOnNode(nodeId, text) ?: false
+            if (result) {
+                Log.d(TAG, "[TEXT_INPUT] ✅ 设置文本成功")
+            } else {
+                Log.w(TAG, "[TEXT_INPUT] ⚠️ Provider 返回 false (设置文本失败)")
+            }
+            result
+        } catch (e: RemoteException) {
+            Log.e(TAG, "[TEXT_INPUT] ❌ 设置文本失败 (RemoteException)", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "[TEXT_INPUT] ❌ 设置文本失败 (异常)", e)
+            false
+        }
+    }
 }

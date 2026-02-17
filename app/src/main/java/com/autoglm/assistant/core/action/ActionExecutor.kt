@@ -1,7 +1,14 @@
 package com.autoglm.assistant.core.action
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
 import com.autoglm.assistant.core.screen.AppDetector
 import com.autoglm.assistant.service.AutomationService
 import com.autoglm.assistant.util.Logger
@@ -200,21 +207,213 @@ class ActionExecutor(
     private suspend fun executeType(action: ParsedAction): ActionResult {
         val text = action.params["text"] as? String ?: return ActionResult(false, "未指定文本")
 
-        // 优先使用无障碍 ACTION_SET_TEXT（最可靠，不需要剪贴板）
-        val service = AutomationService.instance
-        if (service != null) {
-            Logger.d(Logger.ACTION, "[TYPE] 使用无障碍 ACTION_SET_TEXT")
-            val success = service.performTextInput(text)
-            if (success) {
-                return ActionResult(true, "通过无障碍输入了文本")
+        // 根据模式调整策略：
+        // - 无障碍模式(ACCESSIBILITY/AUTO): 优先剪贴板方案（清空→剪贴板→粘贴）- 最可靠
+        // - Shell模式(SHELL_INPUT): 优先ADB Keyboard
+        
+        if (mode == Mode.ACCESSIBILITY || mode == Mode.AUTO) {
+            // ========== 无障碍模式策略 ==========
+            Logger.d(Logger.ACTION, "[TYPE] 当前模式: $mode，使用无障碍优先策略")
+            
+            // 优先1: 强制剪贴板方案（清空→剪贴板→粘贴，不依赖焦点验证）
+            Logger.d(Logger.ACTION, "[TYPE] 优先1: 强制剪贴板方案 (清空→剪贴板→粘贴)")
+            val directPasteSuccess = performDirectClipboardInput(text)
+            if (directPasteSuccess) {
+                Logger.d(Logger.ACTION, "[TYPE] ✅ 强制剪贴板输入成功")
+                return ActionResult(true, "通过强制剪贴板方案输入了文本")
             }
-            Logger.d(Logger.ACTION, "[TYPE] 无障碍输入失败，尝试 ADB Keyboard")
+            Logger.w(Logger.ACTION, "[TYPE] ❌ 强制剪贴板方案失败")
+            
+            // 优先2: Provider 无障碍服务（独立进程，兼容性好）
+            Logger.d(Logger.ACTION, "[TYPE] 优先2: 尝试 Provider 无障碍服务")
+            try {
+                val nodeId = com.autoglm.assistant.accessibility.UIHierarchyManager.findFocusedNodeId(context)
+                if (nodeId != null) {
+                    Logger.d(Logger.ACTION, "[TYPE] 找到焦点节点 nodeId=$nodeId，调用 setTextOnNode()")
+                    val success = com.autoglm.assistant.accessibility.UIHierarchyManager.setTextOnNode(context, nodeId, text)
+                    if (success) {
+                        Logger.d(Logger.ACTION, "[TYPE] ✅ Provider 无障碍服务输入成功")
+                        return ActionResult(true, "通过 Provider 无障碍服务输入了文本")
+                    } else {
+                        Logger.w(Logger.ACTION, "[TYPE] ⚠️ setTextOnNode 返回 false")
+                    }
+                } else {
+                    Logger.w(Logger.ACTION, "[TYPE] ⚠️ findFocusedNodeId 返回 null (未找到焦点节点)")
+                }
+            } catch (e: Exception) {
+                Logger.e(Logger.ACTION, "[TYPE] ❌ Provider 输入异常: ${e.message}", e)
+            }
+            
+            // 优先3: 本地无障碍服务 ACTION_SET_TEXT
+            Logger.d(Logger.ACTION, "[TYPE] 优先3: 尝试本地无障碍 ACTION_SET_TEXT")
+            val service = AutomationService.instance
+            if (service != null) {
+                val success = service.performTextInput(text)
+                if (success) {
+                    Logger.d(Logger.ACTION, "[TYPE] ✅ 本地无障碍输入成功")
+                    return ActionResult(true, "通过本地无障碍服务输入了文本")
+                } else {
+                    Logger.w(Logger.ACTION, "[TYPE] ⚠️ 本地无障碍输入失败")
+                }
+            } else {
+                Logger.w(Logger.ACTION, "[TYPE] ⚠️ AutomationService 实例不存在")
+            }
+            
+            // 优先4: ADB Keyboard 降级方案
+            Logger.d(Logger.ACTION, "[TYPE] 优先4: 尝试 ADB Keyboard 降级")
+            val adbResult = ShellExecutor.typeTextViaAdbKeyboard(text, 300, context)
+            if (adbResult.success) {
+                Logger.d(Logger.ACTION, "[TYPE] ✅ ADB Keyboard 输入成功")
+                return ActionResult(true, "通过 ADB Keyboard 输入了文本")
+            }
+            Logger.w(Logger.ACTION, "[TYPE] ❌ ADB Keyboard 失败: ${adbResult.output}")
+            if (adbResult.output.contains("未安装", ignoreCase = true)) {
+                showAdbKeyboardDownloadToast()
+            }
+            
+            return ActionResult(false, "所有无障碍输入方式均失败: 强制剪贴板 / Provider / 本地无障碍 / ADB Keyboard")
+            
+        } else {
+            // ========== Shell模式策略 ==========
+            Logger.d(Logger.ACTION, "[TYPE] 当前模式: $mode，使用Shell优先策略")
+            
+            // 优先1: ADB Keyboard（shell 方式）
+            Logger.d(Logger.ACTION, "[TYPE] 优先1: 尝试 ADB Keyboard (shell)，文本='$text'")
+            val adbResult = ShellExecutor.typeTextViaAdbKeyboard(text, 300, context)
+            if (adbResult.success) {
+                Logger.d(Logger.ACTION, "[TYPE] ✅ ADB Keyboard 输入成功")
+                return ActionResult(true, "通过 ADB Keyboard 输入了文本")
+            }
+            Logger.w(Logger.ACTION, "[TYPE] ❌ ADB Keyboard 失败: ${adbResult.output}")
+            
+            // 检查是否因为未安装而失败，如果是则提示用户下载
+            if (adbResult.output.contains("未安装", ignoreCase = true)) {
+                showAdbKeyboardDownloadToast()
+            }
+            
+            return ActionResult(false, "Shell输入失败: ADB Keyboard(${adbResult.output})")
         }
-
-        // 回退：如果已是 ADB Keyboard 则直接发送，否则失败
-        Logger.d(Logger.ACTION, "[TYPE] 使用 ADB Keyboard")
-        val result = ShellExecutor.typeTextViaAdbKeyboard(text, 300)
-        return ActionResult(result.success, if (result.success) "通过 ADB Keyboard 输入了文本" else result.output)
+    }
+    
+    /**
+     * 强制剪贴板输入方案（不依赖焦点验证）
+     * 业务目的: agent刚点击输入框后，焦点一定在那里，直接清空→剪贴板→粘贴
+     * 操作实现: 1) 清空当前输入框 2) 写入剪贴板 3) 执行粘贴
+     * 
+     * 关键: 不验证bounds/isEditable等属性，只要有FOCUS_INPUT就操作
+     */
+    private suspend fun performDirectClipboardInput(text: String): Boolean {
+        try {
+            val service = AutomationService.instance
+            if (service == null) {
+                Logger.w(Logger.ACTION, "[DIRECT_PASTE] AutomationService不可用")
+                return false
+            }
+            
+            val rootNode = service.rootInActiveWindow
+            if (rootNode == null) {
+                Logger.w(Logger.ACTION, "[DIRECT_PASTE] 无法获取根节点")
+                return false
+            }
+            
+            // 步骤1: 查找焦点节点（不验证任何属性）
+            var focusNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focusNode == null) {
+                // 备选: 尝试无障碍焦点
+                focusNode = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+            }
+            
+            if (focusNode == null) {
+                Logger.w(Logger.ACTION, "[DIRECT_PASTE] 未找到任何焦点节点")
+                return false
+            }
+            
+            Logger.d(Logger.ACTION, "[DIRECT_PASTE] 找到焦点节点: class=${focusNode.className}")
+            
+            // 步骤2: 清空输入框
+            try {
+                Logger.d(Logger.ACTION, "[DIRECT_PASTE] 步骤1: 清空输入框")
+                
+                // 直接设置空文本清空
+                val clearArgs = android.os.Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                }
+                focusNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+                delay(50)  // 使用delay替代Thread.sleep
+                Logger.d(Logger.ACTION, "[DIRECT_PASTE] 清空完成")
+            } catch (e: Exception) {
+                Logger.w(Logger.ACTION, "[DIRECT_PASTE] 清空失败: ${e.message}，继续执行")
+            }
+            
+            // 步骤3: 直接设置文本（不用剪贴板，更可靠）
+            Logger.d(Logger.ACTION, "[DIRECT_PASTE] 步骤2: 直接设置文本")
+            val setTextArgs = android.os.Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            val setTextResult = focusNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs)
+            
+            if (setTextResult) {
+                Logger.d(Logger.ACTION, "[DIRECT_PASTE] ✅ ACTION_SET_TEXT成功")
+                focusNode.recycle()
+                return true
+            }
+            
+            // 步骤4: 降级方案 - 尝试剪贴板+粘贴
+            Logger.w(Logger.ACTION, "[DIRECT_PASTE] ACTION_SET_TEXT失败，尝试剪贴板方案")
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = ClipData.newPlainText("autoglm_input", text)
+            clipboard.setPrimaryClip(clip)
+            delay(100)
+            
+            val pasteResult = focusNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            focusNode.recycle()
+            
+            if (pasteResult) {
+                Logger.d(Logger.ACTION, "[DIRECT_PASTE] ✅ 剪贴板粘贴成功")
+                return true
+            } else {
+                Logger.w(Logger.ACTION, "[DIRECT_PASTE] ⚠️ 所有方式均失败")
+                return false
+            }
+            
+        } catch (e: Exception) {
+            Logger.e(Logger.ACTION, "[DIRECT_PASTE] 异常: ${e.message}", e)
+            return false
+        }
+    }
+    
+    /**
+     * 显示ADB Keyboard下载提示
+     * 包含可点击的下载链接
+     */
+    private fun showAdbKeyboardDownloadToast() {
+        val downloadUrl = "https://github.com/senzhk/ADBKeyBoard/releases"
+        
+        Handler(Looper.getMainLooper()).post {
+            // 显示Toast提示
+            Toast.makeText(
+                context,
+                "⌨️ ADB Keyboard 未安装\n点击通知栏消息可下载",
+                Toast.LENGTH_LONG
+            ).show()
+            
+            // 尝试打开浏览器（方便用户直接下载）
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                Logger.d(Logger.ACTION, "[TYPE] 已打开ADB Keyboard下载页面: $downloadUrl")
+            } catch (e: Exception) {
+                Logger.e(Logger.ACTION, "[TYPE] 无法打开下载页面: ${e.message}")
+                // 再次Toast显示链接
+                Toast.makeText(
+                    context,
+                    "请手动访问: $downloadUrl",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     private suspend fun executeLongPress(action: ParsedAction): ActionResult {
@@ -378,10 +577,14 @@ class ActionExecutor(
     private fun getEffectiveMode(): Mode {
         return when (mode) {
             Mode.AUTO -> {
-                // 检查无障碍服务是否可用
-                if (AutomationService.instance != null) {
+                // 步骤1: 优先考虑 root 权限（更稳定可靠）
+                if (ShellExecutor.globalUseRoot) {
+                    Mode.SHELL_INPUT
+                } else if (AutomationService.instance != null) {
+                    // 步骤2: 无 root 时使用无障碍服务
                     Mode.ACCESSIBILITY
                 } else {
+                    // 步骤3: 都不可用时回退到 SHELL_INPUT（尝试非 root 命令）
                     Mode.SHELL_INPUT
                 }
             }

@@ -342,13 +342,103 @@ object ShellExecutor {
     }
 
     /**
+     * 检查ADB Keyboard是否已安装
+     */
+    suspend fun isAdbKeyboardInstalled(): Boolean {
+        val result = execute("pm list packages | grep adbkeyboard", useRoot = false)
+        val installed = result.success && result.stdout.contains("adbkeyboard")
+        Logger.d(TAG, "[ADB_KEYBOARD] 安装状态: $installed")
+        return installed
+    }
+    
+    /**
+     * 自动安装ADB Keyboard
+     * 
+     * 业务目的：确保ADB Keyboard已安装，用于文本输入
+     * 操作实现：从GitHub下载并通过pm install命令安装
+     */
+    suspend fun ensureAdbKeyboardInstalled(context: android.content.Context): Result {
+        // 步骤1: 检查是否已安装
+        if (isAdbKeyboardInstalled()) {
+            Logger.d(TAG, "[ADB_KEYBOARD] ✅ 已安装，无需重复安装")
+            return Result(true, "ADB Keyboard already installed", "", 0)
+        }
+        
+        Logger.d(TAG, "[ADB_KEYBOARD] ⚠️ 未安装，开始自动安装...")
+        
+        try {
+            // 步骤2: 下载APK到临时目录
+            val cacheDir = context.cacheDir
+            val apkFile = java.io.File(cacheDir, "adbkeyboard.apk")
+            
+            Logger.d(TAG, "[ADB_KEYBOARD] 📥 正在下载 ADB Keyboard APK...")
+            
+            // GitHub releases URL
+            val downloadUrl = "https://github.com/senzhk/ADBKeyBoard/releases/download/v2.0/ADBKeyboard.apk"
+            
+            // 使用wget或curl下载（需要root）
+            val downloadResult = execute(
+                "wget -O ${apkFile.absolutePath} $downloadUrl || curl -L -o ${apkFile.absolutePath} $downloadUrl",
+                useRoot = true
+            )
+            
+            if (!downloadResult.success || !apkFile.exists()) {
+                Logger.e(TAG, "[ADB_KEYBOARD] ❌ 下载失败")
+                return Result(false, "", "下载 ADB Keyboard 失败", -1)
+            }
+            
+            Logger.d(TAG, "[ADB_KEYBOARD] ✅ 下载成功: ${apkFile.length()} bytes")
+            
+            // 步骤3: 安装APK（需要root）
+            Logger.d(TAG, "[ADB_KEYBOARD] 📦 正在安装...")
+            val installResult = execute("pm install -r ${apkFile.absolutePath}", useRoot = true)
+            
+            // 步骤4: 清理临时文件
+            apkFile.delete()
+            
+            if (installResult.success) {
+                Logger.d(TAG, "[ADB_KEYBOARD] ✅ 安装成功")
+                
+                // 步骤5: 启用输入法
+                val enableResult = execute("ime enable com.android.adbkeyboard/.AdbIME", useRoot = true)
+                if (enableResult.success) {
+                    Logger.d(TAG, "[ADB_KEYBOARD] ✅ 已启用输入法")
+                }
+                
+                return Result(true, "ADB Keyboard installed successfully", "", 0)
+            } else {
+                Logger.e(TAG, "[ADB_KEYBOARD] ❌ 安装失败: ${installResult.stderr}")
+                return installResult
+            }
+            
+        } catch (e: Exception) {
+            Logger.e(TAG, "[ADB_KEYBOARD] ❌ 安装异常", e)
+            return Result(false, "", "安装异常: ${e.message}", -1)
+        }
+    }
+
+    /**
      * 通过 ADB Keyboard 输入文本（备用方式）
      * 注意：切换输入法会导致输入框失去焦点
      */
-    suspend fun typeTextViaAdbKeyboard(text: String, delayMs: Int = 300): Result {
+    suspend fun typeTextViaAdbKeyboard(text: String, delayMs: Int = 300, context: android.content.Context? = null): Result {
         Logger.d(TAG, "[TYPE_ADB] text=${text.take(30)}..., delayMs=$delayMs")
 
         try {
+            // 步骤0: 确保ADB Keyboard已安装
+            if (context != null && !isAdbKeyboardInstalled()) {
+                Logger.w(TAG, "[TYPE_ADB] ADB Keyboard 未安装，尝试自动安装...")
+                val installResult = ensureAdbKeyboardInstalled(context)
+                if (!installResult.success) {
+                    return Result(
+                        false, 
+                        "", 
+                        "ADB Keyboard 未安装且自动安装失败。请手动安装：https://github.com/senzhk/ADBKeyBoard/releases", 
+                        -1
+                    )
+                }
+            }
+            
             val adbKeyboardId = "com.android.adbkeyboard/.AdbIME"
 
             // 1. 获取当前输入法
