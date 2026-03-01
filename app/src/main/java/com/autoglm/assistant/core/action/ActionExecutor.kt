@@ -208,13 +208,78 @@ class ActionExecutor(
         val text = action.params["text"] as? String ?: return ActionResult(false, "未指定文本")
 
         // 根据模式调整策略：
-        // - 无障碍模式(ACCESSIBILITY/AUTO): 优先剪贴板方案（清空→剪贴板→粘贴）- 最可靠
-        // - Shell模式(SHELL_INPUT): 优先ADB Keyboard
-        
-        if (mode == Mode.ACCESSIBILITY || mode == Mode.AUTO) {
-            // ========== 无障碍模式策略 ==========
-            Logger.d(Logger.ACTION, "[TYPE] 当前模式: $mode，使用无障碍优先策略")
-            
+        // - AUTO模式: ADB Keyboard 优先（速度快、兼容性好），失败后降级到无障碍方案
+        // - ACCESSIBILITY模式: 仅使用无障碍服务方案
+        // - SHELL_INPUT模式: 仅使用 ADB Keyboard
+
+        if (mode == Mode.AUTO) {
+            // ========== AUTO模式: ADB优先策略 ==========
+            Logger.d(Logger.ACTION, "[TYPE] 当前模式: AUTO，使用ADB优先策略")
+
+            // 优先1: ADB Keyboard（速度快、兼容性好）
+            Logger.d(Logger.ACTION, "[TYPE] 优先1: 尝试 ADB Keyboard，文本='$text'")
+            val adbResult = ShellExecutor.typeTextViaAdbKeyboard(text, 300, context)
+            if (adbResult.success) {
+                Logger.d(Logger.ACTION, "[TYPE] ✅ ADB Keyboard 输入成功")
+                return ActionResult(true, "通过 ADB Keyboard 输入了文本")
+            }
+            Logger.w(Logger.ACTION, "[TYPE] ❌ ADB Keyboard 失败: ${adbResult.output}")
+
+            // 检查是否因为未安装而失败
+            if (adbResult.output.contains("未安装", ignoreCase = true)) {
+                showAdbKeyboardDownloadToast()
+            }
+
+            // 优先2: 强制剪贴板方案（清空→剪贴板→粘贴，不依赖焦点验证）
+            Logger.d(Logger.ACTION, "[TYPE] 优先2: 降级到强制剪贴板方案")
+            val directPasteSuccess = performDirectClipboardInput(text)
+            if (directPasteSuccess) {
+                Logger.d(Logger.ACTION, "[TYPE] ✅ 强制剪贴板输入成功")
+                return ActionResult(true, "通过强制剪贴板方案输入了文本")
+            }
+            Logger.w(Logger.ACTION, "[TYPE] ❌ 强制剪贴板方案失败")
+
+            // 优先3: Provider 无障碍服务（独立进程，兼容性好）
+            Logger.d(Logger.ACTION, "[TYPE] 优先3: 尝试 Provider 无障碍服务")
+            try {
+                val nodeId = com.autoglm.assistant.accessibility.UIHierarchyManager.findFocusedNodeId(context)
+                if (nodeId != null) {
+                    Logger.d(Logger.ACTION, "[TYPE] 找到焦点节点 nodeId=$nodeId，调用 setTextOnNode()")
+                    val success = com.autoglm.assistant.accessibility.UIHierarchyManager.setTextOnNode(context, nodeId, text)
+                    if (success) {
+                        Logger.d(Logger.ACTION, "[TYPE] ✅ Provider 无障碍服务输入成功")
+                        return ActionResult(true, "通过 Provider 无障碍服务输入了文本")
+                    } else {
+                        Logger.w(Logger.ACTION, "[TYPE] ⚠️ setTextOnNode 返回 false")
+                    }
+                } else {
+                    Logger.w(Logger.ACTION, "[TYPE] ⚠️ findFocusedNodeId 返回 null (未找到焦点节点)")
+                }
+            } catch (e: Exception) {
+                Logger.e(Logger.ACTION, "[TYPE] ❌ Provider 输入异常: ${e.message}", e)
+            }
+
+            // 优先4: 本地无障碍服务 ACTION_SET_TEXT
+            Logger.d(Logger.ACTION, "[TYPE] 优先4: 尝试本地无障碍 ACTION_SET_TEXT")
+            val service = AutomationService.instance
+            if (service != null) {
+                val success = service.performTextInput(text)
+                if (success) {
+                    Logger.d(Logger.ACTION, "[TYPE] ✅ 本地无障碍输入成功")
+                    return ActionResult(true, "通过本地无障碍服务输入了文本")
+                } else {
+                    Logger.w(Logger.ACTION, "[TYPE] ⚠️ 本地无障碍输入失败")
+                }
+            } else {
+                Logger.w(Logger.ACTION, "[TYPE] ⚠️ AutomationService 实例不存在")
+            }
+
+            return ActionResult(false, "所有输入方式均失败: ADB Keyboard / 强制剪贴板 / Provider / 本地无障碍")
+
+        } else if (mode == Mode.ACCESSIBILITY) {
+            // ========== 无障碍模式: 仅使用无障碍方案 ==========
+            Logger.d(Logger.ACTION, "[TYPE] 当前模式: ACCESSIBILITY，使用无障碍优先策略")
+
             // 优先1: 强制剪贴板方案（清空→剪贴板→粘贴，不依赖焦点验证）
             Logger.d(Logger.ACTION, "[TYPE] 优先1: 强制剪贴板方案 (清空→剪贴板→粘贴)")
             val directPasteSuccess = performDirectClipboardInput(text)
@@ -223,7 +288,7 @@ class ActionExecutor(
                 return ActionResult(true, "通过强制剪贴板方案输入了文本")
             }
             Logger.w(Logger.ACTION, "[TYPE] ❌ 强制剪贴板方案失败")
-            
+
             // 优先2: Provider 无障碍服务（独立进程，兼容性好）
             Logger.d(Logger.ACTION, "[TYPE] 优先2: 尝试 Provider 无障碍服务")
             try {
@@ -243,7 +308,7 @@ class ActionExecutor(
             } catch (e: Exception) {
                 Logger.e(Logger.ACTION, "[TYPE] ❌ Provider 输入异常: ${e.message}", e)
             }
-            
+
             // 优先3: 本地无障碍服务 ACTION_SET_TEXT
             Logger.d(Logger.ACTION, "[TYPE] 优先3: 尝试本地无障碍 ACTION_SET_TEXT")
             val service = AutomationService.instance
@@ -258,39 +323,25 @@ class ActionExecutor(
             } else {
                 Logger.w(Logger.ACTION, "[TYPE] ⚠️ AutomationService 实例不存在")
             }
-            
-            // 优先4: ADB Keyboard 降级方案
-            Logger.d(Logger.ACTION, "[TYPE] 优先4: 尝试 ADB Keyboard 降级")
-            val adbResult = ShellExecutor.typeTextViaAdbKeyboard(text, 300, context)
-            if (adbResult.success) {
-                Logger.d(Logger.ACTION, "[TYPE] ✅ ADB Keyboard 输入成功")
-                return ActionResult(true, "通过 ADB Keyboard 输入了文本")
-            }
-            Logger.w(Logger.ACTION, "[TYPE] ❌ ADB Keyboard 失败: ${adbResult.output}")
-            if (adbResult.output.contains("未安装", ignoreCase = true)) {
-                showAdbKeyboardDownloadToast()
-            }
-            
-            return ActionResult(false, "所有无障碍输入方式均失败: 强制剪贴板 / Provider / 本地无障碍 / ADB Keyboard")
-            
+
+            return ActionResult(false, "所有无障碍输入方式均失败: 强制剪贴板 / Provider / 本地无障碍")
+
         } else {
-            // ========== Shell模式策略 ==========
-            Logger.d(Logger.ACTION, "[TYPE] 当前模式: $mode，使用Shell优先策略")
-            
-            // 优先1: ADB Keyboard（shell 方式）
-            Logger.d(Logger.ACTION, "[TYPE] 优先1: 尝试 ADB Keyboard (shell)，文本='$text'")
+            // ========== Shell模式: 仅使用ADB Keyboard ==========
+            Logger.d(Logger.ACTION, "[TYPE] 当前模式: SHELL_INPUT，使用ADB Keyboard")
+
             val adbResult = ShellExecutor.typeTextViaAdbKeyboard(text, 300, context)
             if (adbResult.success) {
                 Logger.d(Logger.ACTION, "[TYPE] ✅ ADB Keyboard 输入成功")
                 return ActionResult(true, "通过 ADB Keyboard 输入了文本")
             }
             Logger.w(Logger.ACTION, "[TYPE] ❌ ADB Keyboard 失败: ${adbResult.output}")
-            
+
             // 检查是否因为未安装而失败，如果是则提示用户下载
             if (adbResult.output.contains("未安装", ignoreCase = true)) {
                 showAdbKeyboardDownloadToast()
             }
-            
+
             return ActionResult(false, "Shell输入失败: ADB Keyboard(${adbResult.output})")
         }
     }

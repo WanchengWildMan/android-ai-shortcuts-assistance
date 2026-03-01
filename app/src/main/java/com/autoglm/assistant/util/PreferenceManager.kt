@@ -22,6 +22,18 @@ class PreferenceManager(context: Context) {
         private const val KEY_WAKE_WORD_KEYWORD = "wake_word_keyword"
         private const val KEY_SHOW_AGENT_PROCESS = "show_agent_process"
 
+        // 多引擎唤醒配置
+        private const val KEY_WAKE_ENGINE_TYPE = "wake_engine_type"
+        private const val KEY_WAKE_SENSITIVITY = "wake_sensitivity"
+        private const val KEY_WAKE_GREETING_ENABLED = "wake_greeting_enabled"
+        private const val KEY_WAKE_GREETING_TEXT = "wake_greeting_text"
+
+        // STT 唤醒配置
+        private const val KEY_STT_WAKE_PHRASE = "stt_wake_phrase"
+        private const val KEY_STT_WAKE_REGEX_ENABLED = "stt_wake_regex_enabled"
+        private const val KEY_STT_WAKE_LANGUAGE = "stt_wake_language"
+        private const val KEY_STT_WAKE_COOLDOWN_MS = "stt_wake_cooldown_ms"
+
         // 智能协调器设置
         private const val KEY_SMART_COORDINATOR_ENABLED = "smart_coordinator_enabled"
         private const val KEY_COORDINATOR_API_URL = "coordinator_api_url"
@@ -68,6 +80,14 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_MODEL_NAME = "autoglm-phone"
         const val DEFAULT_LANGUAGE = "cn"
         const val DEFAULT_MAX_STEPS = 100  // Agent执行单个任务的总操作步数上限
+        // 多引擎唤醒默认值
+        const val DEFAULT_WAKE_ENGINE_TYPE = "STT_SYSTEM"  // 默认使用免费的系统 STT
+        const val DEFAULT_WAKE_SENSITIVITY = 0.7f
+        const val DEFAULT_WAKE_GREETING_TEXT = "我在听"
+        // STT 唤醒默认值
+        const val DEFAULT_STT_WAKE_PHRASE = "小爱"
+        const val DEFAULT_STT_WAKE_LANGUAGE = "zh-CN"
+        const val DEFAULT_STT_WAKE_COOLDOWN_MS = 3000L
         // 智能协调器默认值 - DeepSeek
         const val DEFAULT_COORDINATOR_API_URL = "https://api.deepseek.com/v1"
         const val DEFAULT_COORDINATOR_MODEL_NAME = "deepseek-chat"
@@ -110,6 +130,40 @@ class PreferenceManager(context: Context) {
     var wakeWordKeyword: String
         get() = prefs.getString(KEY_WAKE_WORD_KEYWORD, DEFAULT_WAKE_WORD) ?: DEFAULT_WAKE_WORD
         set(value) = prefs.edit { putString(KEY_WAKE_WORD_KEYWORD, value) }
+
+    // 多引擎唤醒配置
+    var wakeEngineType: String
+        get() = prefs.getString(KEY_WAKE_ENGINE_TYPE, DEFAULT_WAKE_ENGINE_TYPE) ?: DEFAULT_WAKE_ENGINE_TYPE
+        set(value) = prefs.edit { putString(KEY_WAKE_ENGINE_TYPE, value) }
+
+    var wakeSensitivity: Float
+        get() = prefs.getFloat(KEY_WAKE_SENSITIVITY, DEFAULT_WAKE_SENSITIVITY)
+        set(value) = prefs.edit { putFloat(KEY_WAKE_SENSITIVITY, value) }
+
+    var wakeGreetingEnabled: Boolean
+        get() = prefs.getBoolean(KEY_WAKE_GREETING_ENABLED, true)
+        set(value) = prefs.edit { putBoolean(KEY_WAKE_GREETING_ENABLED, value) }
+
+    var wakeGreetingText: String
+        get() = prefs.getString(KEY_WAKE_GREETING_TEXT, DEFAULT_WAKE_GREETING_TEXT) ?: DEFAULT_WAKE_GREETING_TEXT
+        set(value) = prefs.edit { putString(KEY_WAKE_GREETING_TEXT, value) }
+
+    // STT 唤醒配置
+    var sttWakePhrase: String
+        get() = prefs.getString(KEY_STT_WAKE_PHRASE, DEFAULT_STT_WAKE_PHRASE) ?: DEFAULT_STT_WAKE_PHRASE
+        set(value) = prefs.edit { putString(KEY_STT_WAKE_PHRASE, value) }
+
+    var sttWakeRegexEnabled: Boolean
+        get() = prefs.getBoolean(KEY_STT_WAKE_REGEX_ENABLED, false)
+        set(value) = prefs.edit { putBoolean(KEY_STT_WAKE_REGEX_ENABLED, value) }
+
+    var sttWakeLanguage: String
+        get() = prefs.getString(KEY_STT_WAKE_LANGUAGE, DEFAULT_STT_WAKE_LANGUAGE) ?: DEFAULT_STT_WAKE_LANGUAGE
+        set(value) = prefs.edit { putString(KEY_STT_WAKE_LANGUAGE, value) }
+
+    var sttWakeCooldownMs: Long
+        get() = prefs.getLong(KEY_STT_WAKE_COOLDOWN_MS, DEFAULT_STT_WAKE_COOLDOWN_MS)
+        set(value) = prefs.edit { putLong(KEY_STT_WAKE_COOLDOWN_MS, value) }
 
     // true = 显示所有过程消息, false = 仅显示最终结果
     var showAgentProcess: Boolean
