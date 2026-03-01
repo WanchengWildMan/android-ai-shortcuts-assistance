@@ -27,7 +27,9 @@ import com.autoglm.assistant.core.agent.SerializableMessage
 import com.autoglm.assistant.core.planner.TaskPlannerConfig
 import com.autoglm.assistant.voice.SpeechRecognizer
 import com.autoglm.assistant.voice.TextToSpeech
-import com.autoglm.assistant.voice.WakeWordEngine
+import com.autoglm.assistant.voice.wake.WakeEngine
+import com.autoglm.assistant.voice.wake.WakeEngineConfig
+import com.autoglm.assistant.voice.wake.WakeEngineManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,7 +47,7 @@ class WakeWordService : Service() {
     // 使用 Default 而不是 Main，避免切后台时协程被取消
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private lateinit var wakeWordEngine: WakeWordEngine
+    lateinit var wakeEngineManager: WakeEngineManager
     private lateinit var speechRecognizer: SpeechRecognizer
     private lateinit var textToSpeech: TextToSpeech
     private var phoneAgent: PhoneAgent? = null
@@ -60,6 +62,10 @@ class WakeWordService : Service() {
 
     private val _lastRecognizedText = MutableStateFlow("")
     val lastRecognizedText: StateFlow<String> = _lastRecognizedText
+
+    // STT 实时识别结果（用于调试）
+    private val _lastSttResult = MutableStateFlow("")
+    val lastSttResult: StateFlow<String> = _lastSttResult
 
     // 唤醒词引擎错误信息，供 UI 层观察展示
     private val _lastWakeWordError = MutableStateFlow<String?>(null)
@@ -211,15 +217,8 @@ class WakeWordService : Service() {
     private fun initializeComponents() {
         val prefs = App.instance.preferenceManager
 
-        // 初始化唤醒词引擎
-        wakeWordEngine = WakeWordEngine(this, prefs.porcupineAccessKey)
-        wakeWordEngine.onWakeWordDetected = {
-            handleWakeWordDetected()
-        }
-        wakeWordEngine.onError = { error ->
-            _lastWakeWordError.value = error
-            onError?.invoke(error)
-        }
+        // 初始化唤醒引擎管理器
+        wakeEngineManager = WakeEngineManager(this)
 
         // 初始化语音识别
         speechRecognizer = SpeechRecognizer(this)
@@ -608,19 +607,33 @@ class WakeWordService : Service() {
         _serviceState.value = ServiceState.LISTENING_COMMAND
         onWakeWordDetected?.invoke()
 
-        // Stop wake word listening
-        wakeWordEngine.stopListening()
+        // 使用 Main 线程执行，确保顺序
+        scope.launch(Dispatchers.Main) {
+            // 步骤1: 停止唤醒词监听并释放引擎占用的资源
+            wakeEngineManager.stopListening()
+            
+            // 显示 Toast 提示用户唤醒成功
+            android.widget.Toast.makeText(
+                this@WakeWordService,
+                "✓ 唤醒成功，请说话...",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
 
-        // Vibrate to provide feedback
-        vibrate()
+            // Vibrate to provide feedback
+            vibrate()
 
-        // Play acknowledgment sound or speak
-        speak("我在听")
+            // Play acknowledgment sound or speak (使用配置的问候语)
+            val prefs = App.instance.preferenceManager
+            if (prefs.wakeGreetingEnabled) {
+                speak(prefs.wakeGreetingText)
+            }
 
-        // Start speech recognition
-        speechRecognizer.startListening(
-            if (App.instance.preferenceManager.language == "cn") "zh-CN" else "en-US"
-        )
+            // 步骤2: 启动语音识别（稍作延迟确保麦克风资源释放）
+            delay(300)
+            speechRecognizer.startListening(
+                if (App.instance.preferenceManager.language == "cn") "zh-CN" else "en-US"
+            )
+        }
     }
 
     private fun handleSpeechResult(text: String) {
@@ -672,56 +685,107 @@ class WakeWordService : Service() {
         // 步骤2: 清除上次错误
         _lastWakeWordError.value = null
 
-        if (!wakeWordEngine.isInitialized()) {
-            val prefs = App.instance.preferenceManager
-            if (prefs.porcupineAccessKey.isBlank()) {
-                val errorMsg = "请在设置中配置 Porcupine Access Key"
+        val prefs = App.instance.preferenceManager
+
+        // 步骤3: 根据配置的引擎类型初始化
+        scope.launch {
+            try {
+                val engineType = try {
+                    WakeEngine.EngineType.valueOf(prefs.wakeEngineType)
+                } catch (e: IllegalArgumentException) {
+                    android.util.Log.w("AutoGLM", "未知引擎类型: ${prefs.wakeEngineType}，降级为 PORCUPINE")
+                    WakeEngine.EngineType.PORCUPINE
+                }
+
+                // 如果引擎未初始化或类型变更，需要切换引擎
+                if (!wakeEngineManager.isInitialized || wakeEngineManager.activeEngineType.value != engineType) {
+                    val config = createEngineConfig(engineType, prefs)
+                    val success = wakeEngineManager.switchEngine(engineType, config)
+
+                    if (!success) {
+                        val errorMsg = "引擎初始化失败: $engineType"
+                        android.util.Log.e("AutoGLM", errorMsg)
+                        _lastWakeWordError.value = wakeEngineManager.lastError.value ?: errorMsg
+                        _serviceState.value = ServiceState.IDLE
+                        return@launch
+                    }
+                }
+
+                // 步骤4: 开始监听
+                _serviceState.value = ServiceState.LISTENING_WAKE_WORD
+                android.util.Log.i("AutoGLM", "=== State changed to LISTENING_WAKE_WORD")
+
+                wakeEngineManager.startListening { confidence ->
+                    android.util.Log.i("AutoGLM", "唤醒检测，置信度: $confidence")
+                    handleWakeWordDetected()
+                }
+
+                updateNotification(getString(R.string.notification_listening))
+            } catch (e: Exception) {
+                val errorMsg = "启动唤醒监听失败: ${e.message}"
+                android.util.Log.e("AutoGLM", errorMsg, e)
                 _lastWakeWordError.value = errorMsg
                 _serviceState.value = ServiceState.IDLE
-                return
-            }
-
-            val wakeWordKeyword = prefs.wakeWordKeyword
-            // 步骤3: 检查 initialize() 返回值
-            val initSuccess = wakeWordEngine.initialize(keywordName = wakeWordKeyword)
-
-            if (!initSuccess) {
-                // 步骤4: 降级策略 — 自定义唤醒词失败时尝试内置唤醒词
-                android.util.Log.w("AutoGLM", "自定义唤醒词 '$wakeWordKeyword' 初始化失败，尝试降级到内置唤醒词 PORCUPINE")
-                val fallbackSuccess = wakeWordEngine.initializeWithBuiltInKeyword(
-                    ai.picovoice.porcupine.Porcupine.BuiltInKeyword.PORCUPINE
-                )
-                if (!fallbackSuccess) {
-                    val errorMsg = "唤醒词引擎初始化失败，请检查 Access Key 是否有效"
-                    android.util.Log.e("AutoGLM", errorMsg)
-                    _lastWakeWordError.value = errorMsg
-                    _serviceState.value = ServiceState.IDLE
-                    return
-                } else {
-                    val warnMsg = "自定义唤醒词不兼容当前 SDK，已降级为内置唤醒词 'Porcupine'"
-                    android.util.Log.w("AutoGLM", warnMsg)
-                    _lastWakeWordError.value = warnMsg
-                }
             }
         }
+    }
 
-        // 步骤5: 只有初始化成功后才设置监听状态
-        _serviceState.value = ServiceState.LISTENING_WAKE_WORD
-        android.util.Log.i("AutoGLM", "=== State changed to LISTENING_WAKE_WORD")
-        wakeWordEngine.startListening()
-        updateNotification(getString(R.string.notification_listening))
+    /**
+     * 根据引擎类型和配置创建对应的 WakeEngineConfig
+     */
+    private fun createEngineConfig(
+        engineType: WakeEngine.EngineType,
+        prefs: com.autoglm.assistant.util.PreferenceManager
+    ): WakeEngineConfig {
+        return when (engineType) {
+            WakeEngine.EngineType.PORCUPINE -> {
+                WakeEngineConfig.PorcupineConfig(
+                    accessKey = prefs.porcupineAccessKey,
+                    keywordName = prefs.wakeWordKeyword,
+                    sensitivity = prefs.wakeSensitivity
+                )
+            }
+            WakeEngine.EngineType.PERSONAL_TEMPLATE -> {
+                // TODO: Phase 2 实现，从 prefs 读取模板
+                WakeEngineConfig.PersonalTemplateConfig()
+            }
+            WakeEngine.EngineType.STT_SYSTEM,
+            WakeEngine.EngineType.STT_SHERPA -> {
+                WakeEngineConfig.SttWakeConfig(
+                    wakePhrase = prefs.sttWakePhrase,
+                    regexEnabled = prefs.sttWakeRegexEnabled,
+                    language = prefs.sttWakeLanguage,
+                    cooldownMs = prefs.sttWakeCooldownMs
+                )
+            }
+        }
     }
 
     fun stopWakeWordListening() {
-        wakeWordEngine.stopListening()
+        scope.launch {
+            wakeEngineManager.stopListening()
+        }
         _serviceState.value = ServiceState.IDLE
     }
 
     fun reinitializeWakeWord() {
-        val wasListening = wakeWordEngine.isListening.value
-        wakeWordEngine.release()
-        if (wasListening) {
-            startWakeWordListening()
+        scope.launch {
+            val wasListening = wakeEngineManager.isListening
+            wakeEngineManager.stopListening()
+
+            val prefs = App.instance.preferenceManager
+            val engineType = try {
+                WakeEngine.EngineType.valueOf(prefs.wakeEngineType)
+            } catch (e: IllegalArgumentException) {
+                WakeEngine.EngineType.PORCUPINE
+            }
+
+            val config = createEngineConfig(engineType, prefs)
+            wakeEngineManager.reinitialize(config)
+
+            if (wasListening) {
+                startWakeWordListening()
+            }
         }
     }
 
@@ -883,9 +947,9 @@ class WakeWordService : Service() {
             android.util.Log.w("AutoGLM", "=== 任务正在执行，不取消任务，仅清理唤醒词相关资源 ===")
             // 只释放唤醒词相关资源，保持任务继续执行
             try {
-                wakeWordEngine.release()
+                wakeEngineManager.release()
             } catch (e: Exception) {
-                android.util.Log.e("AutoGLM", "释放唤醒词引擎失败", e)
+                android.util.Log.e("AutoGLM", "释放唤醒引擎失败", e)
             }
             try {
                 speechRecognizer.release()
@@ -904,7 +968,7 @@ class WakeWordService : Service() {
             // 无任务执行时才完全清理
             stopCurrentTask()
             scope.cancel()
-            wakeWordEngine.release()
+            wakeEngineManager.release()
             speechRecognizer.release()
             textToSpeech.release()
             phoneAgent?.release()

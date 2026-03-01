@@ -206,9 +206,8 @@ class MainActivity : ComponentActivity() {
         }
 
         // 步骤3: 启动语音唤醒服务（需要麦克风权限）
-        // HARD: 暂时禁用唤醒词功能，仅启动前台服务
         val serviceIntent = Intent(this, WakeWordService::class.java).apply {
-            putExtra("START_WAKE_WORD", false)  // HARD: 禁用唤醒词，避免服务被停止导致任务中断
+            putExtra("START_WAKE_WORD", App.instance.preferenceManager.wakeWordEnabled)
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -991,6 +990,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalAgentSystemPrompt = remember { prefs.agentSystemPrompt }
     val originalPorcupineKey = remember { prefs.porcupineAccessKey }
     val originalWakeWordKeyword = remember { prefs.wakeWordKeyword }
+    val originalWakeEngineType = remember { prefs.wakeEngineType }
+    val originalSttWakePhrase = remember { prefs.sttWakePhrase }
     val originalMaxSteps = remember { prefs.maxSteps.toString() }
     val originalLanguage = remember { prefs.language }
     val originalShowAgentProcess = remember { prefs.showAgentProcess }
@@ -1036,6 +1037,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     var porcupineKey by remember { mutableStateOf(TextFieldValue(prefs.porcupineAccessKey)) }
     var wakeWordKeyword by remember { mutableStateOf(prefs.wakeWordKeyword) }
     var wakeWordDropdownExpanded by remember { mutableStateOf(false) }
+    var wakeEngineType by remember { mutableStateOf(prefs.wakeEngineType) }
+    var wakeEngineDropdownExpanded by remember { mutableStateOf(false) }
+    var sttWakePhrase by remember { mutableStateOf(TextFieldValue(prefs.sttWakePhrase)) }
     var maxSteps by remember { mutableStateOf(TextFieldValue(prefs.maxSteps.toString())) }
     var language by remember { mutableStateOf(prefs.language) }
     var showAgentProcess by remember { mutableStateOf(prefs.showAgentProcess) }
@@ -1094,6 +1098,8 @@ fun SettingsScreen(onBack: () -> Unit) {
             agentSystemPrompt.text != originalAgentSystemPrompt ||
             porcupineKey.text != originalPorcupineKey ||
             wakeWordKeyword != originalWakeWordKeyword ||
+            wakeEngineType != originalWakeEngineType ||
+            sttWakePhrase.text != originalSttWakePhrase ||
             maxSteps.text != originalMaxSteps ||
             language != originalLanguage ||
             showAgentProcess != originalShowAgentProcess ||
@@ -1232,8 +1238,10 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.apiKey = apiKey.text
         prefs.modelName = modelName.text
         prefs.agentSystemPrompt = agentSystemPrompt.text
+        prefs.wakeEngineType = wakeEngineType
         prefs.porcupineAccessKey = porcupineKey.text
         prefs.wakeWordKeyword = wakeWordKeyword
+        prefs.sttWakePhrase = sttWakePhrase.text
         prefs.maxSteps = maxSteps.text.toIntOrNull() ?: 100
         prefs.language = language
         prefs.showAgentProcess = showAgentProcess
@@ -1414,21 +1422,70 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             Text(strings.voiceSettings, style = MaterialTheme.typography.titleMedium)
 
-            OutlinedTextField(
-                value = porcupineKey,
-                onValueChange = { porcupineKey = it },
-                label = { Text(strings.porcupineLabel) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = { Text(strings.porcupineHint) }
-            )
-
-            // Wake word dropdown
+            // 唤醒引擎选择
             ExposedDropdownMenuBox(
-                expanded = wakeWordDropdownExpanded,
-                onExpandedChange = { wakeWordDropdownExpanded = it }
+                expanded = wakeEngineDropdownExpanded,
+                onExpandedChange = { wakeEngineDropdownExpanded = it }
             ) {
                 OutlinedTextField(
+                    value = when (wakeEngineType) {
+                        "PORCUPINE" -> "Porcupine (需要 API Key)"
+                        "STT_SYSTEM" -> "系统 STT (免费)"
+                        else -> wakeEngineType
+                    },
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text(if (isChinese) "唤醒引擎" else "Wake Engine") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = wakeEngineDropdownExpanded) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor(),
+                    supportingText = { Text(if (isChinese) "选择语音唤醒引擎" else "Select wake engine") }
+                )
+                ExposedDropdownMenu(
+                    expanded = wakeEngineDropdownExpanded,
+                    onDismissRequest = { wakeEngineDropdownExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Porcupine (需要 API Key)") },
+                        onClick = {
+                            wakeEngineType = "PORCUPINE"
+                            wakeEngineDropdownExpanded = false
+                        },
+                        leadingIcon = if (wakeEngineType == "PORCUPINE") {
+                            { Icon(Icons.Default.Check, contentDescription = null) }
+                        } else null
+                    )
+                    DropdownMenuItem(
+                        text = { Text("系统 STT (免费)") },
+                        onClick = {
+                            wakeEngineType = "STT_SYSTEM"
+                            wakeEngineDropdownExpanded = false
+                        },
+                        leadingIcon = if (wakeEngineType == "STT_SYSTEM") {
+                            { Icon(Icons.Default.Check, contentDescription = null) }
+                        } else null
+                    )
+                }
+            }
+
+            // Porcupine 配置（仅在选择 Porcupine 时显示）
+            if (wakeEngineType == "PORCUPINE") {
+                OutlinedTextField(
+                    value = porcupineKey,
+                    onValueChange = { porcupineKey = it },
+                    label = { Text(strings.porcupineLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text(strings.porcupineHint) }
+                )
+
+                // Wake word dropdown
+                ExposedDropdownMenuBox(
+                    expanded = wakeWordDropdownExpanded,
+                    onExpandedChange = { wakeWordDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
                     value = availableWakeWords.find { it.first == wakeWordKeyword }?.second ?: "Porcupine",
                     onValueChange = {},
                     readOnly = true,
@@ -1456,6 +1513,19 @@ fun SettingsScreen(onBack: () -> Unit) {
                         )
                     }
                 }
+            }
+            }
+
+            // STT 配置（仅在选择 STT_SYSTEM 时显示）
+            if (wakeEngineType == "STT_SYSTEM") {
+                OutlinedTextField(
+                    value = sttWakePhrase,
+                    onValueChange = { sttWakePhrase = it },
+                    label = { Text(if (isChinese) "STT 唤醒词" else "STT Wake Phrase") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text(if (isChinese) "使用系统 STT 时的唤醒词（免费，无需 API Key）" else "Wake phrase for System STT (free, no API key required)") }
+                )
             }
 
             Divider()

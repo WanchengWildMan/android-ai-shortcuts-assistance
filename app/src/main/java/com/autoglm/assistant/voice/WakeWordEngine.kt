@@ -10,6 +10,17 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
+/**
+ * @deprecated 已废弃，请使用 com.autoglm.assistant.voice.wake.WakeEngineManager
+ * 和 com.autoglm.assistant.voice.wake.PorcupineWakeEngine
+ */
+@Deprecated(
+    message = "使用新的多引擎架构: WakeEngineManager + PorcupineWakeEngine",
+    replaceWith = ReplaceWith(
+        "WakeEngineManager",
+        "com.autoglm.assistant.voice.wake.WakeEngineManager"
+    )
+)
 class WakeWordEngine(
     private val context: Context,
     private val accessKey: String
