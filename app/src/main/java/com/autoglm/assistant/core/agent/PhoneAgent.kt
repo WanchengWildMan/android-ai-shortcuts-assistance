@@ -49,6 +49,10 @@ class PhoneAgent(
     private val modelConfig: ModelConfig,
     private val agentConfig: AgentConfig = AgentConfig()
 ) {
+    companion object {
+        private const val MIN_SAMPLE_INTERVAL_MS = 300L
+    }
+
     private lateinit var modelClient: ModelClient
     private lateinit var screenCapture: ScreenCapture
     private lateinit var actionExecutor: ActionExecutor
@@ -64,6 +68,11 @@ class PhoneAgent(
     private var lastAgentThinking: String = ""
     private var lastAgentAction: String = ""
 
+
+    // 任务规划相关状态
+    private var currentTaskPlan: TaskPlan? = null
+    private var currentSubTaskIndex: Int = 0
+    private var lastSampleTimestampMs: Long = 0L
 
     // 回调
     var onStepStart: ((Int) -> Unit)? = null
@@ -628,9 +637,17 @@ class PhoneAgent(
         Logger.startTimer("step_$currentStep")
         onStepStart?.invoke(currentStep)
 
+        // 给屏幕采样增加最小间隔，避免过于频繁地抓取导致状态抖动。
+        val now = System.currentTimeMillis()
+        val elapsedSinceLastSample = now - lastSampleTimestampMs
+        if (lastSampleTimestampMs > 0 && elapsedSinceLastSample < MIN_SAMPLE_INTERVAL_MS) {
+            delay(MIN_SAMPLE_INTERVAL_MS - elapsedSinceLastSample)
+        }
+
         // 1. 截取当前屏幕
         Logger.startTimer("screenshot")
         val screenshot = captureScreenWithOverlayControl()
+        lastSampleTimestampMs = System.currentTimeMillis()
         val screenshotTime = Logger.endTimer("screenshot", Logger.SCREEN)
         val base64Image = screenshot?.base64Data
         Logger.screen("Screenshot: ${screenshot?.width}x${screenshot?.height}, sensitive=${screenshot?.isSensitive}, time=${screenshotTime}ms")

@@ -38,7 +38,7 @@ class WakeWordService : Service() {
 
     companion object {
         private const val TAG = "WakeWordService"
-        
+        private const val COORDINATOR_STREAM_DEBOUNCE_MS = 300L
         var instance: WakeWordService? = null
             private set
     }
@@ -326,6 +326,20 @@ class WakeWordService : Service() {
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
             initialize()
 
+            var lastCoordinatorStreamEmitAtMs = 0L
+
+            fun emitCoordinatorStream(type: CoordinatorMessageType, content: String, force: Boolean = false) {
+                val now = System.currentTimeMillis()
+                if (!force && (now - lastCoordinatorStreamEmitAtMs) < COORDINATOR_STREAM_DEBOUNCE_MS) {
+                    return
+                }
+                lastCoordinatorStreamEmitAtMs = now
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = type,
+                    content = content
+                )
+            }
+
             onStepStart = { step ->
                 agentStatusOverlay?.updateStep(step)
             }
@@ -359,9 +373,10 @@ class WakeWordService : Service() {
             onPromptOptimizing = {
                 isOptimizing = true
                 optimizerStreamingContent.clear()
-                _coordinatorMessage.value = CoordinatorMessage(
+                emitCoordinatorStream(
                     type = CoordinatorMessageType.OPTIMIZER_STREAMING,
-                    content = ""
+                    content = "",
+                    force = true
                 )
             }
 
@@ -377,9 +392,10 @@ class WakeWordService : Service() {
                 isSummarizing = true
                 summaryAlreadySent = false  // 为新的总结生成重置标志
                 summaryStreamingContent.clear()
-                _coordinatorMessage.value = CoordinatorMessage(
+                emitCoordinatorStream(
                     type = CoordinatorMessageType.SUMMARY_STREAMING,
-                    content = ""
+                    content = "",
+                    force = true
                 )
             }
 
@@ -399,9 +415,10 @@ class WakeWordService : Service() {
             phoneAgent?.onPlanningStart = {
                 isPlanning = true
                 plannerStreamingContent.clear()
-                _coordinatorMessage.value = CoordinatorMessage(
+                emitCoordinatorStream(
                     type = CoordinatorMessageType.PLANNING_STREAMING,
-                    content = ""
+                    content = "",
+                    force = true
                 )
             }
 
@@ -409,19 +426,19 @@ class WakeWordService : Service() {
                 // 流式显示内容 - 根据当前状态决定是优化器、规划器还是总结器
                 if (isOptimizing) {
                     optimizerStreamingContent.append(token)
-                    _coordinatorMessage.value = CoordinatorMessage(
+                    emitCoordinatorStream(
                         type = CoordinatorMessageType.OPTIMIZER_STREAMING,
                         content = optimizerStreamingContent.toString()
                     )
                 } else if (isPlanning) {
                     plannerStreamingContent.append(token)
-                    _coordinatorMessage.value = CoordinatorMessage(
+                    emitCoordinatorStream(
                         type = CoordinatorMessageType.PLANNING_STREAMING,
                         content = plannerStreamingContent.toString()
                     )
                 } else if (isSummarizing) {
                     summaryStreamingContent.append(token)
-                    _coordinatorMessage.value = CoordinatorMessage(
+                    emitCoordinatorStream(
                         type = CoordinatorMessageType.SUMMARY_STREAMING,
                         content = summaryStreamingContent.toString()
                     )
