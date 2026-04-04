@@ -186,6 +186,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun handleCoordinatorMessage(msg: WakeWordService.CoordinatorMessage) {
+        val showCoordinatorThinking = App.instance.preferenceManager.showCoordinatorThinking
+        if (msg.type == WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING && !showCoordinatorThinking) {
+            return
+        }
+
         val displayContent = when (msg.type) {
             WakeWordService.CoordinatorMessageType.OPTIMIZER_STREAMING -> {
                 if (msg.content.isBlank()) "✨ 正在优化指令..." 

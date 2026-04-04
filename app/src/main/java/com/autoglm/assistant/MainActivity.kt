@@ -257,6 +257,9 @@ fun MainScreen(
 
     // Coordinator消息状态
     var lastCoordinatorContent by remember { mutableStateOf<String?>(null) }
+    var latestExecutorHint by remember { mutableStateOf<String?>(null) }
+    var latestCoordinatorHint by remember { mutableStateOf<String?>(null) }
+    var coordinatorThinkingActive by remember { mutableStateOf(false) }
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
@@ -337,6 +340,26 @@ fun MainScreen(
         }
     }
 
+    fun compactStatusText(raw: String): String {
+        return raw
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+    }
+
+    fun keepFirstLines(raw: String, maxLines: Int): String {
+        if (maxLines <= 0) return ""
+        val normalized = compactStatusText(raw)
+        if (normalized.isBlank()) return ""
+        return normalized
+            .lineSequence()
+            .take(maxLines)
+            .joinToString("\n")
+    }
+
     LaunchedEffect(lastRecognizedText?.value) {
         lastRecognizedText?.value?.let { text ->
             if (text.isNotBlank() && currentRoute == "chat") {
@@ -365,6 +388,7 @@ fun MainScreen(
     LaunchedEffect(coordinatorMessage?.value) {
         val msg = coordinatorMessage?.value ?: return@LaunchedEffect
         val showProcess = App.instance.preferenceManager.showAgentProcess
+        val showCoordinatorThinking = App.instance.preferenceManager.showCoordinatorThinking
 
         // CLEAR类型：重置索引
         if (msg.type == WakeWordService.CoordinatorMessageType.CLEAR) {
@@ -373,6 +397,33 @@ fun MainScreen(
             plannerMessageIndex = -1
             summaryMessageIndex = -1
             hasShownSubtaskCards = false
+            latestCoordinatorHint = null
+            coordinatorThinkingActive = false
+            return@LaunchedEffect
+        }
+
+        coordinatorThinkingActive = msg.type == WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING
+        latestCoordinatorHint = when (msg.type) {
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_STREAMING -> {
+                if (msg.content.isBlank()) "协调器正在优化指令..." else "协调器优化中：${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_COMPLETE -> "协调器已完成指令优化"
+            WakeWordService.CoordinatorMessageType.PLANNING_STREAMING -> {
+                if (msg.content.isBlank()) "协调器正在规划任务..." else "协调器规划中：${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.PLAN_COMPLETE -> "协调器规划完成"
+            WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> "协调器已生成子任务"
+            WakeWordService.CoordinatorMessageType.SUBTASK_START -> "协调器正在执行子任务"
+            WakeWordService.CoordinatorMessageType.SUPERVISION_RESULT -> "协调器已完成执行监督"
+            WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> "协调器正在思考..."
+            WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING -> {
+                if (msg.content.isBlank()) "协调器正在生成总结..." else "协调器总结中：${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> "协调器任务总结完成"
+            WakeWordService.CoordinatorMessageType.CLEAR -> null
+        }
+
+        if (msg.type == WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING && !showCoordinatorThinking) {
             return@LaunchedEffect
         }
 
@@ -513,6 +564,16 @@ fun MainScreen(
 
     LaunchedEffect(agentMessage?.value) {
         agentMessage?.value?.let { msg ->
+            latestExecutorHint = when (msg.type) {
+                WakeWordService.AgentMessageType.THINKING -> {
+                    if (msg.content.isBlank()) "执行器正在思考..." else "执行器思考：${msg.content}"
+                }
+                WakeWordService.AgentMessageType.ACTION -> {
+                    if (msg.content.isBlank()) "执行器正在执行操作..." else "执行器操作：${msg.content}"
+                }
+                WakeWordService.AgentMessageType.RESULT -> null
+            }
+
             // 只有在 chat 页面时才处理消息
             if (currentRoute != "chat") return@LaunchedEffect
 
@@ -580,6 +641,28 @@ fun MainScreen(
             }
         }
     }
+
+    val isExecutingTask = serviceState?.value == WakeWordService.ServiceState.EXECUTING_TASK
+    val coordinatorBannerSource = when {
+        coordinatorThinkingActive -> "协调器正在思考..."
+        !latestCoordinatorHint.isNullOrBlank() -> latestCoordinatorHint!!
+        else -> ""
+    }
+    val executorBannerLines = if (coordinatorBannerSource.isNotBlank()) 2 else 3
+    val coordinatorBannerLines = if (!latestExecutorHint.isNullOrBlank()) 1 else 2
+    val executorBannerText = keepFirstLines(latestExecutorHint ?: "", executorBannerLines)
+    val coordinatorBannerText = keepFirstLines(coordinatorBannerSource, coordinatorBannerLines)
+    val bottomStatusText = buildString {
+        if (executorBannerText.isNotBlank()) {
+            append(executorBannerText)
+        }
+        if (coordinatorBannerText.isNotBlank()) {
+            if (isNotEmpty()) append("\n")
+            append("协调中：")
+            append(coordinatorBannerText)
+        }
+    }
+    val shouldShowBottomBanner = currentRoute == "home" || currentRoute == "chat"
 
     Scaffold(
         topBar = {
@@ -782,6 +865,27 @@ fun MainScreen(
                     )
                 }
             }
+
+            if (shouldShowBottomBanner && isExecutingTask && bottomStatusText.isNotBlank()) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .navigationBarsPadding(),
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f),
+                    tonalElevation = 0.dp,
+                    shadowElevation = 0.dp
+                ) {
+                    Text(
+                        text = bottomStatusText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -816,6 +920,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalLanguage = remember { prefs.language }
     val originalShowAgentProcess = remember { prefs.showAgentProcess }
     val originalSmartCoordinatorEnabled = remember { prefs.smartCoordinatorEnabled }
+    val originalShowCoordinatorThinking = remember { prefs.showCoordinatorThinking }
     val originalCoordinatorApiUrl = remember { prefs.coordinatorApiUrl }
     val originalCoordinatorApiKey = remember {
         val model = prefs.coordinatorModelName
@@ -854,6 +959,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var language by remember { mutableStateOf(prefs.language) }
     var showAgentProcess by remember { mutableStateOf(prefs.showAgentProcess) }
     var smartCoordinatorEnabled by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
+    var showCoordinatorThinking by remember { mutableStateOf(prefs.showCoordinatorThinking) }
     var coordinatorApiUrl by remember { mutableStateOf(prefs.coordinatorApiUrl) }
     var coordinatorApiKey by remember {
         val model = prefs.coordinatorModelName
@@ -899,6 +1005,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             language != originalLanguage ||
             showAgentProcess != originalShowAgentProcess ||
             smartCoordinatorEnabled != originalSmartCoordinatorEnabled ||
+            showCoordinatorThinking != originalShowCoordinatorThinking ||
             coordinatorApiUrl != originalCoordinatorApiUrl ||
             coordinatorApiKey != originalCoordinatorApiKey ||
             coordinatorModelName != originalCoordinatorModelName ||
@@ -954,6 +1061,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         val smartCoordinatorSettings = if (isChinese) "智能协调器设置" else "Smart Coordinator Settings"
         val enableSmartCoordinator = if (isChinese) "默认启用规划" else "Enable Planning by Default"
         val smartCoordinatorDesc = if (isChinese) "新建快捷指令和手动输入任务时默认启用规划（各任务可独立控制）" else "Enable planning by default for new shortcuts and manual tasks (each task can be controlled independently)"
+        val showCoordinatorThinking = if (isChinese) "显示协调器思考正文" else "Show Coordinator Thinking Details"
+        val showCoordinatorThinkingDesc = if (isChinese) "关闭后不在对话里显示协调器思考全文，仅保留下方状态提示" else "Hide coordinator thinking text in chat and keep only bottom status hint"
         val coordinatorApiUrlLabel = if (isChinese) "协调器 API URL" else "Coordinator API URL"
         val coordinatorApiKeyLabel = if (isChinese) "协调器 API Key" else "Coordinator API Key"
         val coordinatorModelLabel = if (isChinese) "协调器模型" else "Coordinator Model"
@@ -1013,6 +1122,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.language = language
         prefs.showAgentProcess = showAgentProcess
         prefs.smartCoordinatorEnabled = smartCoordinatorEnabled
+        prefs.showCoordinatorThinking = showCoordinatorThinking
         prefs.coordinatorApiUrl = coordinatorApiUrl
         // Save coordinator API key to provider-specific slot
         when {
@@ -1226,6 +1336,25 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Switch(
                     checked = smartCoordinatorEnabled,
                     onCheckedChange = { smartCoordinatorEnabled = it }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(strings.showCoordinatorThinking, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        strings.showCoordinatorThinkingDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = showCoordinatorThinking,
+                    onCheckedChange = { showCoordinatorThinking = it }
                 )
             }
 
