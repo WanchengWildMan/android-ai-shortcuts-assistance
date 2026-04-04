@@ -36,6 +36,7 @@ class PreferenceManager(context: Context) {
 
         // 智能协调器设置
         private const val KEY_SMART_COORDINATOR_ENABLED = "smart_coordinator_enabled"
+        private const val KEY_SHOW_COORDINATOR_THINKING = "show_coordinator_thinking"
         private const val KEY_COORDINATOR_API_URL = "coordinator_api_url"
         private const val KEY_COORDINATOR_API_KEY = "coordinator_api_key"
         private const val KEY_COORDINATOR_API_KEY_DEEPSEEK = "coordinator_api_key_deepseek"
@@ -174,6 +175,11 @@ class PreferenceManager(context: Context) {
     var smartCoordinatorEnabled: Boolean
         get() = prefs.getBoolean(KEY_SMART_COORDINATOR_ENABLED, false)
         set(value) = prefs.edit { putBoolean(KEY_SMART_COORDINATOR_ENABLED, value) }
+
+    // 是否显示协调器思考正文（默认关闭，仅显示协调器结果）
+    var showCoordinatorThinking: Boolean
+        get() = prefs.getBoolean(KEY_SHOW_COORDINATOR_THINKING, false)
+        set(value) = prefs.edit { putBoolean(KEY_SHOW_COORDINATOR_THINKING, value) }
 
     var coordinatorApiUrl: String
         get() = prefs.getString(KEY_COORDINATOR_API_URL, DEFAULT_COORDINATOR_API_URL) ?: DEFAULT_COORDINATOR_API_URL
