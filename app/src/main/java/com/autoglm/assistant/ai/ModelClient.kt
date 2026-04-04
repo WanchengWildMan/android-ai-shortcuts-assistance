@@ -89,8 +89,9 @@ class ModelClient(private val config: ModelConfig) {
                             }
                             contentBuilder.append(content)
 
-                            // 如果已经在操作阶段，只需累积内容
+                            // 如果已经在操作阶段，发送 token 后继续累积
                             if (inActionPhase) {
+                                callback?.onToken(content)
                                 continue
                             }
 
@@ -113,10 +114,8 @@ class ModelClient(private val config: ModelConfig) {
                                 }
                             }
 
-                            if (!markerFound) {
-                                // 仅在思考阶段调用 onToken
-                                callback?.onToken(content)
-                            }
+                            // 始终发送 token，无论思考还是操作阶段（悬浮窗实时显示）
+                            callback?.onToken(content)
                         }
                     }
                 } catch (e: Exception) {

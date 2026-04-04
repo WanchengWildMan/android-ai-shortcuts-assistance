@@ -16,6 +16,7 @@ import com.autoglm.assistant.core.planner.SupervisionStatus
 import com.autoglm.assistant.core.screen.AppDetector
 import com.autoglm.assistant.core.screen.ScreenCapture
 import com.autoglm.assistant.util.Logger
+import com.autoglm.assistant.util.ShellExecutor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,12 +59,14 @@ class PhoneAgent(
     private lateinit var actionExecutor: ActionExecutor
     private var smartCoordinator: SmartCoordinator? = null
     private var promptOptimizer: PromptOptimizer? = null
+    private var intentRecognizer: com.autoglm.assistant.ai.IntentRecognizer? = null
 
     private val conversationHistory = mutableListOf<Message>()
     private var currentStep = 0
     private var currentTaskId: String? = null
     private var stopRequested = false  // 用于检测停止请求
-    
+    private var lastOriginalTask: String = ""  // 保存原始任务描述，干预优化时使用
+
     // Agent执行状态 - 用于监督器
     private var lastAgentThinking: String = ""
     private var lastAgentAction: String = ""
@@ -82,6 +85,7 @@ class PhoneAgent(
     var onTaskComplete: ((String) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onHumanInterventionNeeded: ((String) -> Unit)? = null
+    var onUserQuestionAsked: (suspend (String) -> String)? = null  // Agent中途提问回调：传入问题，挂起等待用户回答
     var onMaxStepsReached: ((Int, String) -> Unit)? = null  // (步数, 任务ID) 达到最大步数时回调
     var onTaskSaved: ((String) -> Unit)? = null  // 任务保存时回调
     // 流式输出回调 - 用于打字机效果（如果需要）
@@ -97,12 +101,20 @@ class PhoneAgent(
     var onPromptOptimized: ((String) -> Unit)? = null   // prompt 优化完成
     var onTaskSummarizing: (() -> Unit)? = null         // 正在生成任务总结
     var onTaskSummary: ((String) -> Unit)? = null       // 任务总结完成
+    // 意图识别器回调
+    var onIntentRecognizing: (() -> Unit)? = null       // 正在识别意图
+    var onIntentRecognized: ((com.autoglm.assistant.ai.IntentResult) -> Unit)? = null // 意图识别完成
+    // 干预回调
+    var onInterventionProcessed: ((String) -> Unit)? = null  // 干预指令被处理后通知
     
     // 协调器步数回调 — 用于在消息中显示当前步数
     var onCoordinatorStep: ((currentStep: Int, maxSteps: Int) -> Unit)? = null
     // 截图生命周期回调 — 用于控制悬浮窗在截图时临时隐藏
     var onBeforeScreenshot: (() -> Unit)? = null
     var onAfterScreenshot: (() -> Unit)? = null
+    // 操作执行生命周期回调 — 控制悬浮窗在点击/滑动等操作时隐藏，避免遮挡目标
+    var onBeforeAction: (() -> Unit)? = null
+    var onAfterAction: (() -> Unit)? = null
 
     // SmartCoordinator 回调 - 用于任务规划
     var onPlanningStart: (() -> Unit)? = null
@@ -182,7 +194,7 @@ class PhoneAgent(
                         this@PhoneAgent.onPromptOptimized?.invoke(optimizedPrompt)
                     }
                     onStreamToken = { token ->
-                        Logger.d(Logger.AGENT, "[OPTIMIZER->UI] Token: $token")
+                        // Logger.d(Logger.AGENT, "[OPTIMIZER->UI] Token: $token")
                         this@PhoneAgent.onStreamToken?.invoke(token)
                     }
                     onSummarizing = {
@@ -193,6 +205,21 @@ class PhoneAgent(
                     }
                 }
                 Logger.i(Logger.AGENT, "PromptOptimizer initialized with model: ${config.modelConfig.modelName}")
+            }
+        }
+
+        // 初始化意图识别器（如果配置了）
+        agentConfig.intentConfig?.let { config ->
+            if (config.enabled && config.modelConfig != null) {
+                intentRecognizer = com.autoglm.assistant.ai.IntentRecognizer(config.modelConfig).apply {
+                    onRecognizing = {
+                        this@PhoneAgent.onIntentRecognizing?.invoke()
+                    }
+                    onRecognized = { result ->
+                        this@PhoneAgent.onIntentRecognized?.invoke(result)
+                    }
+                }
+                Logger.i(Logger.AGENT, "IntentRecognizer initialized with model: ${config.modelConfig.modelName}")
             }
         }
     }
@@ -210,6 +237,94 @@ class PhoneAgent(
         return run(task, true, contextMessages, enablePlanning, enableOptimizer)
     }
 
+    /**
+     * 干预恢复执行 — 停止当前任务后，注入干预指令并重新开始执行
+     * 流程：用户点击 ✎ → stop() 中断当前执行 → 用户输入指令 → 调用此方法
+     * 行为：保留已有对话历史，注入干预消息，跳过意图识别但可选 prompt 优化，直接恢复协调器或 Agent 执行
+     * 优化条件：promptOptimizer 存在且干预指令长度 > 5 字符时，结合执行上下文优化干预指令
+     */
+    suspend fun resumeWithIntervention(instruction: String): String {
+        if (_isRunning.value) {
+            Logger.agent("Agent is already running, cannot resume with intervention")
+            return "Agent is already running"
+        }
+
+        Logger.i(Logger.AGENT, "========== RESUME WITH INTERVENTION ==========")
+        Logger.i(Logger.AGENT, "Intervention: $instruction")
+
+        _isRunning.value = true
+        stopRequested = false
+
+        // 步骤1: 干预指令优化 — 当优化器可用且指令>5字符时，结合执行上下文优化
+        val effectiveInstruction = if (promptOptimizer != null && instruction.length > 5) {
+            Logger.i(Logger.AGENT, "[Intervention] Optimizing intervention with context...")
+            val executionHistory = conversationHistory.mapNotNull { msg ->
+                when (msg) {
+                    is Message.User -> "user" to msg.text
+                    is Message.Assistant -> "assistant" to msg.content
+                    else -> null
+                }
+            }
+            promptOptimizer!!.optimizeIntervention(
+                interventionInstruction = instruction,
+                originalTask = lastOriginalTask,
+                executionHistory = executionHistory,
+                language = agentConfig.language
+            )
+        } else {
+            instruction
+        }
+
+        Logger.i(Logger.AGENT, "Effective intervention: $effectiveInstruction")
+
+        // 步骤2: 清理对话历史末尾的 finish/总结消息，避免模型误认为任务已完成
+        // 从后往前找到最后一条包含 finish( 的 assistant 消息，移除它及之后的所有消息
+        val lastFinishIndex = conversationHistory.indexOfLast { msg ->
+            msg is Message.Assistant && msg.content.contains("finish(")
+        }
+        if (lastFinishIndex >= 0) {
+            val removedCount = conversationHistory.size - lastFinishIndex
+            while (conversationHistory.size > lastFinishIndex) {
+                conversationHistory.removeAt(conversationHistory.size - 1)
+            }
+            Logger.i(Logger.AGENT, "[Intervention] Removed $removedCount trailing finish/summary messages from history")
+        }
+
+        // 步骤3: 注入干预消息到已有对话历史
+        conversationHistory.add(Message.User(
+            "【用户干预】用户要求调整执行方向：$effectiveInstruction"
+        ))
+        onInterventionProcessed?.invoke(instruction)
+
+        // 步骤4: 干预恢复执行前开启任务级输入法会话（任务结束/打断时自动恢复）
+        val imeSessionStarted = ShellExecutor.beginAdbKeyboardSession(context)
+        Logger.i(Logger.AGENT, "[IME_SESSION] intervention start result=$imeSessionStarted")
+
+        try {
+            // 根据配置恢复协调器或直接执行模式
+            val useCoordinator = smartCoordinator != null
+            return if (useCoordinator) {
+                executeWithCoordinator(instruction)
+            } else {
+                executeDirectly(instruction)
+            }
+        } catch (e: CancellationException) {
+            Logger.w(Logger.AGENT, "Intervention task coroutine cancelled, rethrowing")
+            throw e
+        } catch (e: Exception) {
+            val error = "Error: ${e.message}"
+            Logger.e(Logger.AGENT, "Intervention task failed: $error", e)
+            onError?.invoke(error)
+            return error
+        } finally {
+            if (imeSessionStarted) {
+                ShellExecutor.endAdbKeyboardSession()
+            }
+            _isRunning.value = false
+            _currentTask.value = null
+        }
+    }
+
     suspend fun run(task: String, resetHistory: Boolean = true, context: List<SerializableMessage> = emptyList(), enablePlanning: Boolean = true, enableOptimizer: Boolean = true): String {
         if (_isRunning.value) {
             Logger.agent("Agent is already running, ignoring task: $task")
@@ -223,9 +338,10 @@ class PhoneAgent(
 
         _isRunning.value = true
         _currentTask.value = task
+        lastOriginalTask = task  // 保存原始任务，供干预优化使用
         stopRequested = false
 
-        val shouldUseCoordinator = smartCoordinator != null && enablePlanning
+        var shouldUseCoordinator = smartCoordinator != null && enablePlanning
 
         // 如果用户想使用规划但协调器未配置，给出提示
         if (enablePlanning && smartCoordinator == null) {
@@ -236,6 +352,32 @@ class PhoneAgent(
             }
             Logger.w(Logger.AGENT, warningMsg)
             onThinking?.invoke(warningMsg)
+        }
+
+        // 步骤: 意图识别 — 将用户自然语言输入匹配到快捷指令
+        // 业务目的: 如果匹配到快捷指令，使用其结构化模板替代原始输入（提升执行准确度）
+        var intentTask = task
+        if (intentRecognizer != null) {
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user before intent recognition")
+                return "Task stopped by user"
+            }
+            Logger.i(Logger.AGENT, "[PhoneAgent] Running intent recognition...")
+            val shortcuts = com.autoglm.assistant.ui.home.ShortcutManager(this.context).loadShortcuts()
+            val intentResult = intentRecognizer!!.recognize(task, shortcuts, agentConfig.language)
+            if (intentResult.matched && intentResult.filledPrompt != null) {
+                Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Intent matched: ${intentResult.matchedShortcutTitle}")
+                Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Filled prompt: ${intentResult.filledPrompt}")
+                intentTask = intentResult.filledPrompt
+                // 使用快捷指令自身的 enablePlanning 设置覆盖
+                shouldUseCoordinator = smartCoordinator != null && intentResult.enablePlanning
+            } else {
+                Logger.i(Logger.AGENT, "[PhoneAgent] Intent not matched, using original task")
+            }
+            if (stopRequested) {
+                Logger.i(Logger.AGENT, "Task stopped by user after intent recognition")
+                return "Task stopped by user"
+            }
         }
 
         // 使用Prompt优化器优化任务描述（如果启用）
@@ -249,7 +391,7 @@ class PhoneAgent(
             Logger.i(Logger.AGENT, "[PhoneAgent] Optimizing prompt with PromptOptimizer...")
             // 将对话上下文转换为优化器需要的格式
             val conversationContext = context.map { msg -> msg.role to msg.content }
-            val optimized = promptOptimizer!!.optimize(task, agentConfig.language, conversationContext)
+            val optimized = promptOptimizer!!.optimize(intentTask, agentConfig.language, conversationContext)
             
             if (stopRequested) {
                 Logger.i(Logger.AGENT, "Task stopped by user after optimization")
@@ -262,7 +404,7 @@ class PhoneAgent(
             if (promptOptimizer != null && shouldUseCoordinator) {
                 Logger.i(Logger.AGENT, "[PhoneAgent] Skipping PromptOptimizer because SmartCoordinator is enabled")
             }
-            task
+            intentTask
         }
 
         if (resetHistory) {
@@ -286,6 +428,10 @@ class PhoneAgent(
                 }
             }
         }
+
+        // 步骤: 任务执行前开启输入法会话，避免每次输入来回切换 IME
+        val imeSessionStarted = ShellExecutor.beginAdbKeyboardSession(context)
+        Logger.i(Logger.AGENT, "[IME_SESSION] task start result=$imeSessionStarted")
 
         try {
             if (stopRequested) {
@@ -313,6 +459,9 @@ class PhoneAgent(
             onError?.invoke(error)
             return error
         } finally {
+            if (imeSessionStarted) {
+                ShellExecutor.endAdbKeyboardSession()
+            }
             _isRunning.value = false
             _currentTask.value = null
         }
@@ -402,7 +551,11 @@ class PhoneAgent(
                     actionExecutor.returnToAppOnFinish = true
                     actionExecutor.returnToAutoGLM()
                     val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: decision.assessment
-                    onTaskComplete?.invoke(summaryMessage)
+                    if (!stopRequested) {
+                        onTaskComplete?.invoke(summaryMessage)
+                    } else {
+                        Logger.w(Logger.AGENT, "Stop requested during coordinator summary, skipping onTaskComplete")
+                    }
                     return summaryMessage
                 }
 
@@ -442,6 +595,15 @@ class PhoneAgent(
 
                     Logger.i(Logger.AGENT, "Next instruction: ${decision.nextInstruction}")
 
+                    // 步骤: 协调器发出新指令时压缩上下文
+                    // 业务目的: 避免将全部多轮对话历史传给 AutoGLM（token 浪费且容易混淆），
+                    // 只保留系统 prompt + 总体目标 + 已完成子任务摘要 + 当前指令
+                    compressConversationForNewSubTask(
+                        originalTask = task,
+                        completedInstructions = coordinatorInstructions,
+                        currentInstruction = decision.nextInstruction
+                    )
+
                     // 执行UI Agent的步骤，直到它认为当前指令完成
                     val result = executeUntilFinish(
                         instruction = decision.nextInstruction,
@@ -454,11 +616,20 @@ class PhoneAgent(
                         return result.message ?: "Task paused for human intervention"
                     }
 
-                    // 业务目的：记录该指令的完成状态
+                    // 业务目的：记录该指令的完成状态及干预信息
                     // 当Agent调用finish时，标记为已完成，避免协调器重复执行相同指令
+                    // 干预指令以 "用户干预：" 前缀标识，附加到指令记录中供协调器参考
                     val isSubTaskFinished = result.finished
-                    coordinatorInstructions.add(decision.nextInstruction to isSubTaskFinished)
-                    Logger.i(Logger.AGENT, "Sub-task finished: $isSubTaskFinished")
+                    val isIntervention = result.message?.startsWith("用户干预：") == true
+                    if (isIntervention) {
+                        // 干预时记录两条：原指令被中断 + 干预内容，确保协调器看到用户修正
+                        coordinatorInstructions.add(decision.nextInstruction to false)
+                        coordinatorInstructions.add(result.message!! to true)
+                        Logger.i(Logger.AGENT, "Sub-task interrupted by intervention: ${result.message}")
+                    } else {
+                        coordinatorInstructions.add(decision.nextInstruction to isSubTaskFinished)
+                        Logger.i(Logger.AGENT, "Sub-task finished: $isSubTaskFinished")
+                    }
 
                     // 继续下一轮协调
                 }
@@ -519,6 +690,12 @@ class PhoneAgent(
                     append("\n\n最近执行的操作：\n")
                     append(recentAgentActions)
                 }
+                // 步骤：将Agent最近的思考过程纳入协调器决策输入，
+                // 帮助协调器理解Agent当前的判断和遇到的问题
+                if (lastAgentThinking.isNotBlank()) {
+                    append("\n\nAgent最近的思考：\n")
+                    append(lastAgentThinking.take(500))
+                }
             }
         }
         
@@ -544,8 +721,61 @@ class PhoneAgent(
         return if (recentMessages.isBlank()) {
             "尚未执行任何步骤"
         } else {
-            recentMessages
+            buildString {
+                append(recentMessages)
+                // 步骤：回退路径同样包含Agent思考，保持两条路径口径一致
+                if (lastAgentThinking.isNotBlank()) {
+                    append("\n\nAgent最近的思考：\n")
+                    append(lastAgentThinking.take(500))
+                }
+            }
         }
+    }
+
+    /**
+     * 协调器发出新指令时压缩对话上下文。
+     * 业务目的：每次协调器切换子任务时，清空旧的多轮对话历史（避免 token 浪费和上下文干扰），
+     * 只保留系统 prompt，并将总体目标 + 已完成进度 + 当前指令合成为一条上下文消息。
+     * 注意：子任务内部的多步执行仍保留完整对话上下文（不清空）。
+     */
+    private fun compressConversationForNewSubTask(
+        originalTask: String,
+        completedInstructions: List<Pair<String, Boolean>>,
+        currentInstruction: String
+    ) {
+        // 步骤1: 提取系统 prompt（必须保留）
+        val systemMessage = conversationHistory.firstOrNull { it is Message.System }
+            ?: Message.System(agentConfig.getEffectiveSystemPrompt())
+
+        // 步骤2: 清空对话历史
+        val oldSize = conversationHistory.size
+        conversationHistory.clear()
+
+        // 步骤3: 恢复系统 prompt
+        conversationHistory.add(systemMessage)
+
+        // 步骤4: 构建压缩后的上下文消息（总体目标 + 进度 + 当前指令）
+        val contextSummary = buildString {
+            append("【总体任务目标】\n$originalTask\n\n")
+            if (completedInstructions.isNotEmpty()) {
+                append("【已完成的子任务】\n")
+                completedInstructions.forEachIndexed { index, (instruction, finished) ->
+                    val status = if (finished) "✓ 已完成" else "→ 已执行"
+                    append("${index + 1}. $instruction [$status]\n")
+                }
+                append("\n")
+            }
+            append("【当前子任务】\n$currentInstruction")
+        }
+        // 步骤5: 以 user 消息注入上下文摘要，再加 assistant 确认，
+        // 这样后续 executeStep 添加指令时模型能看到完整任务背景
+        conversationHistory.add(Message.User(contextSummary))
+        conversationHistory.add(Message.Assistant(
+            "<think>了解任务背景和进度，当前需要执行：$currentInstruction</think>" +
+            "<answer>好的，我将执行当前子任务。</answer>"
+        ))
+
+        Logger.i(Logger.AGENT, "Compressed conversation: $oldSize -> ${conversationHistory.size} messages")
     }
 
     /**
@@ -577,6 +807,21 @@ class PhoneAgent(
 
             if (result.needsHumanIntervention) {
                 return result
+            }
+
+            // 步骤：处理Agent中途提问 — 暂停执行，等待用户回答，注入对话后继续
+            if (result.userQuestion != null) {
+                val question = result.userQuestion!!
+                Logger.i(Logger.AGENT, "Agent asks user question: $question")
+                val answer = onUserQuestionAsked?.invoke(question)
+                if (answer != null) {
+                    Logger.i(Logger.AGENT, "User answered: $answer")
+                    conversationHistory.add(Message.User("【用户回答】$answer"))
+                } else {
+                    Logger.w(Logger.AGENT, "No onUserQuestionAsked callback or user cancelled")
+                    conversationHistory.add(Message.User("【用户回答】用户未回答，请自行决定"))
+                }
+                // 继续执行下一步，不返回
             }
 
             result = executeStep(isNewTask = false)
@@ -611,6 +856,20 @@ class PhoneAgent(
                 break
             }
 
+            // 步骤：处理Agent中途提问 — 暂停执行，等待用户回答，注入对话后继续
+            if (result.userQuestion != null) {
+                val question = result.userQuestion!!
+                Logger.i(Logger.AGENT, "Agent asks user question (direct mode): $question")
+                val answer = onUserQuestionAsked?.invoke(question)
+                if (answer != null) {
+                    Logger.i(Logger.AGENT, "User answered: $answer")
+                    conversationHistory.add(Message.User("【用户回答】$answer"))
+                } else {
+                    Logger.w(Logger.AGENT, "No onUserQuestionAsked callback or user cancelled")
+                    conversationHistory.add(Message.User("【用户回答】用户未回答，请自行决定"))
+                }
+            }
+
             result = executeStep(isNewTask = false)
         }
 
@@ -620,6 +879,13 @@ class PhoneAgent(
 
         // 生成任务总结（如果启用）
         val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
+
+        // 防御：如果总结生成期间用户触发了干预（stop），不触发 onTaskComplete
+        // 否则会覆盖干预流程设置的 EXECUTING_TASK 状态
+        if (stopRequested) {
+            Logger.w(Logger.AGENT, "Stop requested during summary, skipping onTaskComplete")
+            return summaryMessage
+        }
 
         onTaskComplete?.invoke(summaryMessage)
         return summaryMessage
@@ -679,7 +945,8 @@ class PhoneAgent(
         Logger.model("Calling model: ${modelConfig.modelName}, messages: ${conversationHistory.size}")
         val response = modelClient.chat(conversationHistory, object : ModelClient.StreamCallback {
             override fun onToken(token: String) {
-                // 可以使用流式 token 更新 UI
+                // 流式 token 转发到 UI，悬浮窗实时显示思考内容
+                onStreamToken?.invoke(token)
             }
 
             override fun onThinkingComplete(thinking: String) {
@@ -718,7 +985,10 @@ class PhoneAgent(
         Logger.action("Parsed: type=${parsedAction.type}, params=${parsedAction.params}")
 
         Logger.startTimer("action_execute")
+        onBeforeAction?.invoke()  // 操作执行前隐藏悬浮窗，避免遮挡点击目标
+        delay(300)  // 等一帧，确保主线程完成悬浮窗 GONE 渲染后再执行点击
         val actionResult = actionExecutor.execute(parsedAction)
+        onAfterAction?.invoke()   // 操作执行后恢复悬浮窗
         val actionTime = Logger.endTimer("action_execute", Logger.ACTION)
         Logger.action("Result: success=${actionResult.success}, message=${actionResult.message}, time=${actionTime}ms")
 
@@ -732,7 +1002,8 @@ class PhoneAgent(
             action = response.action,
             thinking = response.thinking,
             message = actionResult.message,
-            needsHumanIntervention = actionResult.needsHumanIntervention
+            needsHumanIntervention = actionResult.needsHumanIntervention,
+            userQuestion = actionResult.userQuestion
         )
 
         val stepTime = Logger.endTimer("step_$currentStep")
@@ -832,6 +1103,11 @@ class PhoneAgent(
 
             return finalSummary
 
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // CancellationException 必须重新抛出，否则干预时 cancel 被吞掉，
+            // 导致 executeDirectly 继续执行 onTaskComplete 把状态设回 IDLE
+            Logger.w(Logger.AGENT, "Task summary cancelled, rethrowing")
+            throw e
         } catch (e: Exception) {
             Logger.e(Logger.AGENT, "Failed to generate task summary", e)
             return null

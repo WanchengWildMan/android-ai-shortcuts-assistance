@@ -39,6 +39,7 @@ class WakeWordService : Service() {
     companion object {
         private const val TAG = "WakeWordService"
         private const val COORDINATOR_STREAM_DEBOUNCE_MS = 300L
+        const val ACTION_SHOW_INTERVENTION = "com.autoglm.assistant.ACTION_SHOW_INTERVENTION"
         var instance: WakeWordService? = null
             private set
     }
@@ -52,6 +53,7 @@ class WakeWordService : Service() {
     private lateinit var textToSpeech: TextToSpeech
     private var phoneAgent: PhoneAgent? = null
     private var agentStatusOverlay: AgentStatusOverlayController? = null
+    private var interventionOverlay: InterventionInputOverlay? = null
 
     // WakeLock 防止 CPU 休眠
     private var wakeLock: PowerManager.WakeLock? = null
@@ -142,6 +144,12 @@ class WakeWordService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 处理干预操作请求（通知栏按钮触发）
+        if (intent?.action == ACTION_SHOW_INTERVENTION) {
+            showInterventionInput()
+            return START_STICKY
+        }
+
         // 步骤1: 只在明确请求启动语音唤醒时才启动 microphone 前台服务
         val startWakeWord = intent?.getBooleanExtra("START_WAKE_WORD", false) ?: false
         
@@ -239,7 +247,16 @@ class WakeWordService : Service() {
         // 初始化 PhoneAgent
         initializePhoneAgent()
         // 执行期状态悬浮条
-        agentStatusOverlay = AgentStatusOverlayController(this)
+        agentStatusOverlay = AgentStatusOverlayController(this).apply {
+            onStopRequested = { stopCurrentTask() }
+            onInterventionRequested = {
+                // 立即中断当前执行（cancel 协程 + stop agent），但保留对话历史和服务状态
+                currentTaskJob?.cancel()
+                phoneAgent?.stop()
+                // 保持 ServiceState.EXECUTING_TASK 以允许输入框弹出
+                showInterventionInput()
+            }
+        }
     }
 
     private fun initializePhoneAgent() {
@@ -315,18 +332,44 @@ class WakeWordService : Service() {
             null
         }
 
+        // 创建意图识别器配置（如果启用）
+        val intentConfig = if (prefs.intentRecognizerEnabled) {
+            val intentApiKey = when {
+                prefs.intentModelName.startsWith("deepseek") -> prefs.intentApiKeyDeepseek
+                prefs.intentModelName.startsWith("glm-") -> prefs.intentApiKeyBigmodel
+                prefs.intentModelName.startsWith("doubao") -> prefs.intentApiKeyDoubao
+                else -> prefs.intentApiKey
+            }
+            val intentModelConfig = ModelConfig(
+                baseUrl = prefs.intentApiUrl,
+                apiKey = intentApiKey,
+                modelName = prefs.intentModelName
+            )
+            com.autoglm.assistant.core.agent.IntentRecognizerConfig(
+                enabled = true,
+                modelConfig = intentModelConfig
+            ).also {
+                android.util.Log.i("AutoGLM", "IntentRecognizer enabled: model=${prefs.intentModelName}")
+            }
+        } else {
+            android.util.Log.i("AutoGLM", "IntentRecognizer disabled")
+            null
+        }
+
         val agentConfig = AgentConfig(
             maxSteps = prefs.maxSteps,
             language = prefs.language,
             systemPrompt = prefs.agentSystemPrompt.ifBlank { null },
             plannerConfig = plannerConfig,
-            optimizerConfig = optimizerConfig
+            optimizerConfig = optimizerConfig,
+            intentConfig = intentConfig
         )
 
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
             initialize()
 
             var lastCoordinatorStreamEmitAtMs = 0L
+            var agentStreamingContent = StringBuilder()  // Agent执行阶段的流式内容
 
             fun emitCoordinatorStream(type: CoordinatorMessageType, content: String, force: Boolean = false) {
                 val now = System.currentTimeMillis()
@@ -342,6 +385,9 @@ class WakeWordService : Service() {
 
             onStepStart = { step ->
                 agentStatusOverlay?.updateStep(step)
+                agentStreamingContent.clear()  // 新步骤开始，清空流式缓冲
+                // 步骤：同步通知栏显示当前执行步数
+                updateNotification("执行中 第${step}步...")
             }
 
             onThinking = { thinking ->
@@ -353,14 +399,29 @@ class WakeWordService : Service() {
             onAction = { action ->
                 // 发送动作消息
                 _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
+                // 悬浮窗同步显示当前操作
+                agentStatusOverlay?.updateActionStatus(action)
             }
 
             onBeforeScreenshot = {
                 agentStatusOverlay?.hideForScreenshot()
+                interventionOverlay?.hideForScreenshot()
             }
 
             onAfterScreenshot = {
                 agentStatusOverlay?.restoreAfterScreenshot()
+                interventionOverlay?.restoreAfterScreenshot()
+            }
+
+            // 操作执行时隐藏悬浮窗 — 避免遮挡点击/滑动目标
+            onBeforeAction = {
+                agentStatusOverlay?.hideForScreenshot()
+                interventionOverlay?.hideForScreenshot()
+            }
+
+            onAfterAction = {
+                agentStatusOverlay?.restoreAfterScreenshot()
+                interventionOverlay?.restoreAfterScreenshot()
             }
 
             // Prompt 优化器回调 - 支持流式输出
@@ -373,6 +434,7 @@ class WakeWordService : Service() {
             onPromptOptimizing = {
                 isOptimizing = true
                 optimizerStreamingContent.clear()
+                agentStatusOverlay?.updatePlannerStatus("✨ 正在优化指令...")
                 emitCoordinatorStream(
                     type = CoordinatorMessageType.OPTIMIZER_STREAMING,
                     content = "",
@@ -382,10 +444,31 @@ class WakeWordService : Service() {
 
             onPromptOptimized = { optimizedPrompt ->
                 isOptimizing = false
+                agentStatusOverlay?.updatePlannerStatus("")  // 清除优化状态
                 _coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.OPTIMIZER_COMPLETE,
                     content = optimizedPrompt
                 )
+            }
+
+            // 意图识别器回调
+            onIntentRecognizing = {
+                android.util.Log.d("AutoGLM", "IntentRecognizer: recognizing...")
+                agentStatusOverlay?.updatePlannerStatus("🔍 正在识别意图...")
+            }
+
+            onIntentRecognized = { result ->
+                agentStatusOverlay?.updatePlannerStatus("")  // 清除识别状态
+                if (result.matched) {
+                    android.util.Log.d("AutoGLM", "IntentRecognizer: matched shortcut '${result.matchedShortcutTitle}', prompt: ${result.filledPrompt}")
+                } else {
+                    android.util.Log.d("AutoGLM", "IntentRecognizer: no match")
+                }
+            }
+
+            // 干预处理完成回调
+            onInterventionProcessed = { instruction ->
+                android.util.Log.i("AutoGLM", "Intervention processed by Agent: $instruction")
             }
 
             onTaskSummarizing = {
@@ -415,6 +498,7 @@ class WakeWordService : Service() {
             phoneAgent?.onPlanningStart = {
                 isPlanning = true
                 plannerStreamingContent.clear()
+                agentStatusOverlay?.updatePlannerStatus("🤔 正在规划任务...")
                 emitCoordinatorStream(
                     type = CoordinatorMessageType.PLANNING_STREAMING,
                     content = "",
@@ -442,6 +526,10 @@ class WakeWordService : Service() {
                         type = CoordinatorMessageType.SUMMARY_STREAMING,
                         content = summaryStreamingContent.toString()
                     )
+                } else {
+                    // Agent执行阶段：流式更新悬浮窗显示实时思考内容
+                    agentStreamingContent.append(token)
+                    agentStatusOverlay?.updateStreamingTail(agentStreamingContent.toString())
                 }
             }
 
@@ -452,10 +540,13 @@ class WakeWordService : Service() {
                     type = CoordinatorMessageType.COORDINATOR_THINKING,
                     content = thinking
                 )
+                // 悬浮窗同步显示协调器思考尾部
+                agentStatusOverlay?.updatePlannerStatus("🤔 ${thinking.takeLast(30)}")
             }
 
             onStreamEnd = {
                 isPlanning = false
+                agentStatusOverlay?.updatePlannerStatus("")  // 清除规划状态
             }
 
             // 协调器步数回调 — 在消息中显示当前执行步数
@@ -572,6 +663,8 @@ class WakeWordService : Service() {
             onTaskComplete = { message ->
                 _serviceState.value = ServiceState.IDLE
                 agentStatusOverlay?.onTaskFinished()
+                // 步骤：任务完成时更新通知栏状态
+                updateNotification("任务已完成")
                 onTaskCompleted?.invoke(message)
                 // 清理coordinator消息
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -616,6 +709,36 @@ class WakeWordService : Service() {
                 speak(message)
                 // Emit as action message
                 _agentMessage.value = AgentMessage(message, AgentMessageType.ACTION)
+            }
+
+            // Agent中途提问回调 — 显示悬浮窗等待用户输入，返回用户回答
+            onUserQuestionAsked = { question ->
+                android.util.Log.i(TAG, "Agent asks question: $question")
+                speak(question)
+                _agentMessage.value = AgentMessage("💬 $question", AgentMessageType.ACTION)
+
+                // 使用CompletableDeferred挂起等待用户回答
+                val answerDeferred = kotlinx.coroutines.CompletableDeferred<String>()
+
+                // 在主线程创建并显示提问浮窗
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    val questionOverlay = InterventionInputOverlay(this@WakeWordService).apply {
+                        customTitle = "助手提问"
+                        customHint = question
+                        customInputHint = "请输入你的回答..."
+                        onInterventionSubmit = { answer ->
+                            answerDeferred.complete(answer)
+                            dismiss()
+                        }
+                    }
+                    questionOverlay.show()
+                }
+
+                // 挂起等待用户回答
+                val answer = answerDeferred.await()
+                android.util.Log.i(TAG, "User answered question: $answer")
+                _agentMessage.value = AgentMessage("用户回答：$answer", AgentMessageType.ACTION)
+                answer
             }
         }
     }
@@ -860,6 +983,8 @@ class WakeWordService : Service() {
         android.util.Log.d("AutoGLM", "State changed to EXECUTING_TASK")
         onTaskStarted?.invoke(task)
         agentStatusOverlay?.onTaskStarted(withCoordinator = enablePlanning)
+        // 步骤：任务开始时同步更新通知栏
+        updateNotification("正在执行任务...")
 
         currentTaskJob = scope.launch {
             // 获取 WakeLock 防止 CPU 休眠
@@ -905,6 +1030,66 @@ class WakeWordService : Service() {
         phoneAgent?.stop()
         _serviceState.value = ServiceState.IDLE
         agentStatusOverlay?.onTaskFinished()
+        interventionOverlay?.dismiss()
+    }
+
+    /**
+     * 显示干预输入浮窗
+     * 调用位置：通知栏"干预"按钮 → onStartCommand → 此方法
+     */
+    private fun showInterventionInput() {
+        android.util.Log.i(TAG, "showInterventionInput called, serviceState=${_serviceState.value}")
+        if (_serviceState.value != ServiceState.EXECUTING_TASK) {
+            android.util.Log.w(TAG, "No task running, ignore intervention request (state=${_serviceState.value})")
+            return
+        }
+        if (interventionOverlay == null) {
+            interventionOverlay = InterventionInputOverlay(this).apply {
+                onInterventionSubmit = { instruction ->
+                    handleIntervention(instruction)
+                }
+            }
+        }
+        interventionOverlay?.show()
+    }
+
+    /**
+     * 处理用户的干预指令
+     * 流程：stop 已中断当前执行 → 注入干预消息到对话历史 → 重新启动 agent 执行
+     * 行为类似"发送新对话"，但保留已有对话上下文
+     */
+    private fun handleIntervention(instruction: String) {
+        android.util.Log.i(TAG, "Handling intervention (resume): $instruction")
+        interventionOverlay?.dismiss()
+
+        // 恢复执行状态和悬浮窗（旧协程 cancel 后 finally 会关闭它们）
+        _serviceState.value = ServiceState.EXECUTING_TASK
+        val prefs = App.instance.preferenceManager
+        agentStatusOverlay?.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
+        agentStatusOverlay?.updateCoordinatorTask("干预: ${instruction.take(30)}...")
+        updateNotification("正在处理干预：${instruction.take(30)}...")
+
+        // 通知 UI 添加干预消息气泡（利用 _lastRecognizedText 驱动 LaunchedEffect）
+        // 先清空再设值，确保 StateFlow 能触发（即使内容相同）
+        _lastRecognizedText.value = ""
+        _lastRecognizedText.value = "✎ $instruction"
+
+        // 以干预指令重新启动执行（保留对话历史）
+        currentTaskJob = scope.launch {
+            acquireWakeLock()
+            try {
+                val result = phoneAgent?.resumeWithIntervention(instruction) ?: "No agent"
+                android.util.Log.i(TAG, "Intervention task completed: ${result.take(100)}")
+            } catch (e: CancellationException) {
+                android.util.Log.i(TAG, "Intervention task cancelled")
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Intervention task error: ${e.message}", e)
+                onError?.invoke("Intervention error: ${e.message}")
+            } finally {
+                releaseWakeLock()
+                // 注意：不设 IDLE，让 onTaskComplete/onError 回调处理状态转换
+            }
+        }
     }
 
     private fun speak(text: String) {
@@ -939,13 +1124,31 @@ class WakeWordService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        val notification = NotificationCompat.Builder(this, App.NOTIFICATION_CHANNEL_ID)
+        // 构建干预操作的 PendingIntent（仅任务执行中时显示）
+        val isExecuting = _serviceState.value == ServiceState.EXECUTING_TASK
+
+        val builder = NotificationCompat.Builder(this, App.NOTIFICATION_CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
-            .build()
 
+        if (isExecuting) {
+            val interventionIntent = Intent(this, WakeWordService::class.java).apply {
+                action = ACTION_SHOW_INTERVENTION
+            }
+            val interventionPending = PendingIntent.getService(
+                this, 1, interventionIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(
+                android.R.drawable.ic_dialog_info,
+                "干预",
+                interventionPending
+            )
+        }
+
+        val notification = builder.build()
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         notificationManager.notify(App.NOTIFICATION_ID, notification)
     }

@@ -10,10 +10,22 @@ import java.util.UUID
 
 data class Conversation(
     val id: String = UUID.randomUUID().toString(),
-    var title: String = "New Chat",
+    var title: String = DEFAULT_CONVERSATION_TITLE,
     var timestamp: Long = System.currentTimeMillis(),
     val messages: MutableList<ChatMessage> = mutableListOf()
-)
+) {
+    companion object {
+        const val DEFAULT_CONVERSATION_TITLE = "新对话"
+        /** 截取用户消息前N字符作为对话标题 */
+        private const val TITLE_TRUNCATE_LENGTH = 30
+
+        /** 根据用户首条消息自动生成标题 */
+        fun generateTitle(userMessage: String): String {
+            return userMessage.take(TITLE_TRUNCATE_LENGTH) +
+                if (userMessage.length > TITLE_TRUNCATE_LENGTH) "..." else ""
+        }
+    }
+}
 
 class MessageManager(private val context: Context) {
     private val gson = Gson()

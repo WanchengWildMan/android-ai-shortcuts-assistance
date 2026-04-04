@@ -147,21 +147,38 @@ class SmartCoordinator(
             Logger.e(Logger.AGENT, "Decision making failed: ${e.javaClass.simpleName}", e)
             Logger.e(Logger.AGENT, "[DEBUG] Exception message: ${e.message}")
             Logger.e(Logger.AGENT, "[DEBUG] Exception cause: ${e.cause?.message}")
-            when (e) {
-                is kotlinx.coroutines.TimeoutCancellationException -> {
-                    Logger.e(Logger.AGENT, "[DEBUG] Timeout after ${config.planningTimeout}ms")
+
+            // 根据异常类型生成明确的错误描述，区分 API 调用错误和决策逻辑错误
+            val errorDetail = when {
+                e is RuntimeException && e.message?.startsWith("API Error:") == true -> {
+                    // API 调用返回错误码（如 401、429、500 等）
+                    e.message ?: "API 调用失败"
                 }
-                is java.net.UnknownHostException -> {
-                    Logger.e(Logger.AGENT, "[DEBUG] Cannot resolve host: ${e.message}")
+                e is kotlinx.coroutines.TimeoutCancellationException -> {
+                    "协调器请求超时（${config.planningTimeout}ms）"
                 }
-                is java.net.SocketTimeoutException -> {
-                    Logger.e(Logger.AGENT, "[DEBUG] Socket timeout")
+                e is java.net.UnknownHostException -> {
+                    "无法连接服务器：${e.message}"
                 }
-                is javax.net.ssl.SSLException -> {
-                    Logger.e(Logger.AGENT, "[DEBUG] SSL error: ${e.message}")
+                e is java.net.SocketTimeoutException -> {
+                    "网络连接超时"
+                }
+                e is javax.net.ssl.SSLException -> {
+                    "SSL/TLS 连接错误：${e.message}"
+                }
+                else -> {
+                    "协调器内部错误：${e.javaClass.simpleName} - ${e.message}"
                 }
             }
-            return null
+
+            // 返回带明确错误信息的 FAILED decision，而非 null
+            // 使 PhoneAgent 能向用户展示具体的失败原因
+            return CoordinatorDecision(
+                status = DecisionStatus.FAILED,
+                assessment = errorDetail,
+                nextInstruction = null,
+                gatheredInfo = ""
+            )
         }
     }
 
@@ -179,33 +196,21 @@ class SmartCoordinator(
             if (language == "en") "(none yet)" else "（暂无）"
         }
 
-        return when (language) {
-            "en" -> buildString {
-                appendLine("Original task: $originalTask")
-                appendLine()
-                appendLine("Execution history so far:")
-                appendLine(historySection)
-                if (isFirstStep) {
-                    appendLine()
-                    appendLine("Current state: User is on the AutoGLM assistant main page. No screenshot needed for this known interface.")
-                }
-                appendLine()
-                appendLine("Please analyze and decide the next step.")
-            }.trimEnd()
+        val key = if (language == "en") com.autoglm.assistant.ai.PromptKey.COORDINATOR_USER_EN
+                  else com.autoglm.assistant.ai.PromptKey.COORDINATOR_USER_CN
+        var prompt = com.autoglm.assistant.ai.PromptRegistry.get(key, mapOf(
+            "original_task" to originalTask,
+            "execution_history" to historySection
+        ))
 
-            else -> buildString {
-                appendLine("原始任务：$originalTask")
-                appendLine()
-                appendLine("已执行的步骤：")
-                appendLine(historySection)
-                if (isFirstStep) {
-                    appendLine()
-                    appendLine("当前状态：用户处于 AutoGLM 助手主页面，这是已知界面，无需截图。")
-                }
-                appendLine()
-                appendLine("请分析当前状态并决定下一步操作。")
-            }.trimEnd()
+        // 首步附加提示：当前处于 AutoGLM 主页（已知界面，无需截图）
+        if (isFirstStep) {
+            val firstStepKey = if (language == "en") com.autoglm.assistant.ai.PromptKey.COORDINATOR_FIRST_STEP_EN
+                               else com.autoglm.assistant.ai.PromptKey.COORDINATOR_FIRST_STEP_CN
+            prompt += "\n\n" + com.autoglm.assistant.ai.PromptRegistry.get(firstStepKey)
         }
+
+        return prompt
     }
 
     /**
@@ -331,9 +336,14 @@ class SmartCoordinator(
         result = result.replace(Regex("""\s{2,}"""), " ").trim()
         
         if (result.isBlank() && text.isNotBlank()) {
-            Logger.w(Logger.AGENT, "[COORDINATOR] Output was entirely action commands, stripped to blank. Returning original: ${text.take(100)}")
-            // 过滤后变空了，返回原文让 PhoneAgent 自己处理
-            // 总比返回一个无意义的兜底文本好（如"继续执行上一步目标"对第一次协调无意义）
+            Logger.w(Logger.AGENT, "[COORDINATOR] Output was entirely action commands: ${text.take(100)}")
+            // 尝试从 Launch 动作中提取应用名，转为自然语言指令
+            val launchMatch = Regex("""do\s*\(\s*action\s*=\s*["']Launch["']\s*,\s*app\s*=\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE).find(text)
+            if (launchMatch != null) {
+                val appName = launchMatch.groupValues[1]
+                return "打开${appName}应用"
+            }
+            // 其他动作类型无法转换，返回原文让 PhoneAgent 自己处理
             return text
         }
         return result
@@ -441,74 +451,10 @@ class SmartCoordinator(
         )
 
         /**
-         * 决策系统提示词（中文）
+         * 决策系统提示词 — 统一通过 PromptRegistry 获取
          */
-        val DECISION_SYSTEM_PROMPT_CN = """你是任务协调器。你的职责是为 PhoneAgent 规划下一步目标。
-
-## 输出格式（严格遵守）
-
-只输出一句简短的自然语言目标描述，例如：
-
-打开地图应用并搜索星巴克
-
-如果任务完成：
-[COMPLETE] 已成功找到目标信息
-
-如果任务失败：
-[FAILED] 页面无法继续操作
-
-## 禁止输出的格式（绝对不要输出）
-
-❌ do(action="Tap", x=100, y=200)
-❌ finish(message="完成")
-❌ {"status": "continue", "instruction": "..."}
-❌ 点击坐标(500,300)
-❌ 向下滑动屏幕
-❌ 输入文字"测试"
-
-## 角色边界
-
-你是"规划者"，不是"执行者"：
-- ✅ 你说：打开微信并找到张三的聊天
-- ❌ 你不说：点击微信图标，然后点击搜索框，输入"张三"
-
-你只负责描述目标，PhoneAgent 会自己决定如何操作屏幕。
-"""
-
-        /**
-         * 决策系统提示词（英文）
-         */
-        val DECISION_SYSTEM_PROMPT_EN = """You are a task coordinator. Your job is to plan the next goal for PhoneAgent.
-
-## Output format (strictly follow)
-
-Write exactly one line of natural language goal description, example:
-
-Open map app and search for Starbucks
-
-If task is complete:
-[COMPLETE] Successfully found the target information
-
-If task failed:
-[FAILED] Cannot proceed from current page
-
-## Forbidden output formats (NEVER output these)
-
-❌ do(action="Tap", x=100, y=200)
-❌ finish(message="Done")
-❌ {"status": "continue", "instruction": "..."}
-❌ tap coordinates(500,300)
-❌ swipe down the screen
-❌ type text "test"
-
-## Role boundary
-
-You are a "planner", not an "executor":
-- ✅ You say: Open WeChat and find the chat with John
-- ❌ You don't say: Tap WeChat icon, then tap search box, type "John"
-
-You only describe the goal; PhoneAgent will figure out how to operate the screen.
-"""
+        val DECISION_SYSTEM_PROMPT_CN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.COORDINATOR_SYSTEM_CN)
+        val DECISION_SYSTEM_PROMPT_EN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.COORDINATOR_SYSTEM_EN)
     }
 }
 
