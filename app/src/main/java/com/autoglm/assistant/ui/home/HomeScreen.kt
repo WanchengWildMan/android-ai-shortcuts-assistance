@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import com.autoglm.assistant.service.WakeWordService
 import com.autoglm.assistant.ui.components.AccessibilityServiceStatusCard
+import com.autoglm.assistant.ui.components.BatteryRestrictionCard
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyGridState
 import java.util.Calendar
@@ -146,131 +147,15 @@ fun HomeScreen(
             modifier = Modifier.padding(bottom = 16.dp)
         )
 
-        // 唤醒服务状态卡片
+        // 电池限制状态卡片（MIUI等系统后台冻结检测）
+        BatteryRestrictionCard(
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // 正在运行的任务卡片（唤醒服务状态已在顶部状态栏显示，此处仅展示执行中的任务）
         val wakeWordService = WakeWordService.instance
         if (wakeWordService != null) {
             val serviceState by wakeWordService.serviceState.collectAsState()
-            val engineState by wakeWordService.wakeEngineManager.engineState.collectAsState()
-            val activeEngineType by wakeWordService.wakeEngineManager.activeEngineType.collectAsState()
-            val lastError by wakeWordService.wakeEngineManager.lastError.collectAsState()
-
-            // 唤醒服务状态卡片
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = when (serviceState) {
-                        WakeWordService.ServiceState.LISTENING_WAKE_WORD -> MaterialTheme.colorScheme.secondaryContainer
-                        WakeWordService.ServiceState.IDLE -> MaterialTheme.colorScheme.surfaceVariant
-                        else -> MaterialTheme.colorScheme.errorContainer
-                    }
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = when (serviceState) {
-                                WakeWordService.ServiceState.LISTENING_WAKE_WORD -> Icons.Default.Mic
-                                WakeWordService.ServiceState.IDLE -> Icons.Default.MicOff
-                                else -> Icons.Default.Error
-                            },
-                            contentDescription = null,
-                            tint = when (serviceState) {
-                                WakeWordService.ServiceState.LISTENING_WAKE_WORD -> MaterialTheme.colorScheme.onSecondaryContainer
-                                WakeWordService.ServiceState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
-                                else -> MaterialTheme.colorScheme.onErrorContainer
-                            },
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = when (serviceState) {
-                                    WakeWordService.ServiceState.LISTENING_WAKE_WORD -> "正在监听唤醒词"
-                                    WakeWordService.ServiceState.LISTENING_COMMAND -> "正在识别指令"
-                                    WakeWordService.ServiceState.EXECUTING_TASK -> "正在执行任务"
-                                    WakeWordService.ServiceState.PROCESSING -> "正在处理"
-                                    WakeWordService.ServiceState.IDLE -> "唤醒服务未启动"
-                                },
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = when (serviceState) {
-                                    WakeWordService.ServiceState.LISTENING_WAKE_WORD -> MaterialTheme.colorScheme.onSecondaryContainer
-                                    WakeWordService.ServiceState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
-                                    else -> MaterialTheme.colorScheme.onErrorContainer
-                                }
-                            )
-                            if (activeEngineType != null) {
-                                Text(
-                                    text = "引擎: ${activeEngineType?.name ?: "未知"} | 状态: ${engineState.name}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = when (serviceState) {
-                                        WakeWordService.ServiceState.LISTENING_WAKE_WORD -> MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-                                        WakeWordService.ServiceState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                        else -> MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
-                                    }
-                                )
-                            }
-                            if (lastError != null) {
-                                val errorText = lastError ?: ""
-                                Text(
-                                    text = "错误: $errorText",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    maxLines = 3,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                // 如果是 STT 不可用错误，提供解决方案
-                                if (errorText.contains("不支持") || errorText.contains("无法创建")) {
-                                    Text(
-                                        text = "💡 建议：在设置中切换到 Porcupine 引擎（需要 API Key）",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                                    )
-                                }
-                            }
-                            // 调试提示
-                            if (serviceState == WakeWordService.ServiceState.LISTENING_WAKE_WORD && activeEngineType == com.autoglm.assistant.voice.wake.WakeEngine.EngineType.STT_SYSTEM) {
-                                Text(
-                                    text = "提示：系统 STT 需要网络连接，请说话测试",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = when (serviceState) {
-                                        WakeWordService.ServiceState.LISTENING_WAKE_WORD -> MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f)
-                                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                    },
-                                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.weight(1f))
-                        // 启动/停止按钮
-                        Button(
-                            onClick = {
-                                if (serviceState == WakeWordService.ServiceState.IDLE) {
-                                    wakeWordService.startWakeWordListening()
-                                } else {
-                                    wakeWordService.stopWakeWordListening()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = when (serviceState) {
-                                    WakeWordService.ServiceState.LISTENING_WAKE_WORD -> MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.primary
-                                }
-                            )
-                        ) {
-                            Text(
-                                text = if (serviceState == WakeWordService.ServiceState.IDLE) "启动" else "停止",
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 正在运行的任务卡片
             val currentTask by wakeWordService.lastRecognizedText.collectAsState()
 
             if (serviceState == WakeWordService.ServiceState.EXECUTING_TASK) {

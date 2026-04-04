@@ -367,7 +367,6 @@ fun MainScreen(
     getCoordinatorMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.CoordinatorMessage?>?,
     getLastWakeWordError: () -> kotlinx.coroutines.flow.StateFlow<String?>? = { null }
 ) {
-    var isServiceRunning by remember { mutableStateOf(false) }
     val conversations = remember { mutableStateListOf<Conversation>() }
     var currentConversation by remember { mutableStateOf<Conversation?>(null) }
     val messages = remember { mutableStateListOf<ChatMessage>() }
@@ -376,6 +375,10 @@ fun MainScreen(
     val lastRecognizedText = getLastRecognizedText()?.collectAsState()
     val agentMessage = getAgentMessage()?.collectAsState()
     val coordinatorMessage = getCoordinatorMessage()?.collectAsState()
+
+    // 从实际服务状态派生运行状态，避免UI与服务不同步
+    val isServiceRunning = serviceState?.value != null &&
+        serviceState?.value != WakeWordService.ServiceState.IDLE
     val wakeWordError = getLastWakeWordError()?.collectAsState()
 
     // Coordinator消息状态
@@ -462,8 +465,9 @@ fun MainScreen(
         conv.messages.add(message)
         conv.timestamp = System.currentTimeMillis()
         // 从第一条用户消息自动生成标题
-        if (conv.title == "新对话" && message.isUser) {
-            conv.title = message.content.take(30) + if (message.content.length > 30) "..." else ""
+        // 自动生成标题：新对话收到第一条用户消息时截取内容作为标题
+        if (conv.title == Conversation.DEFAULT_CONVERSATION_TITLE && message.isUser) {
+            conv.title = Conversation.generateTitle(message.content)
         }
         // 更新列表顺序
         conversations.remove(conv)
@@ -572,6 +576,7 @@ fun MainScreen(
                 if (msg.content.isBlank()) "协调器正在生成总结..." else "协调器总结中：${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> "协调器任务总结完成"
+            WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> "协调器第 ${msg.content} 步"
             WakeWordService.CoordinatorMessageType.CLEAR -> null
         }
 
@@ -845,7 +850,7 @@ fun MainScreen(
                     TopAppBar(
                         title = {
                             Text(
-                                currentConversation?.title ?: "新对话",
+                                currentConversation?.title ?: Conversation.DEFAULT_CONVERSATION_TITLE,
                                 style = MaterialTheme.typography.titleLarge,
                                 maxLines = 1
                             )
@@ -932,10 +937,8 @@ fun MainScreen(
                             onClick = {
                         if (isServiceRunning) {
                             onStopService()
-                            isServiceRunning = false
                         } else {
                             onStartService()
-                            isServiceRunning = true
                         }
                             },
                             colors = IconButtonDefaults.filledTonalIconButtonColors(
@@ -1134,10 +1137,28 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalOptimizerModelName = remember { prefs.optimizerModelName }
     val originalTaskSummaryEnabled = remember { prefs.taskSummaryEnabled }
     val originalOptimizerSystemPrompt = remember { prefs.optimizerSystemPrompt }
+    // Intent Recognizer originals
+    val originalIntentRecognizerEnabled = remember { prefs.intentRecognizerEnabled }
+    val originalIntentApiUrl = remember { prefs.intentApiUrl }
+    val originalIntentApiKey = remember {
+        val model = prefs.intentModelName
+        when {
+            model.startsWith("deepseek") -> prefs.intentApiKeyDeepseek
+            model.startsWith("glm-") -> prefs.intentApiKeyBigmodel
+            model.startsWith("doubao") -> prefs.intentApiKeyDoubao
+            else -> prefs.intentApiKey
+        }
+    }
+    val originalIntentModelName = remember { prefs.intentModelName }
 
     var apiUrl by remember { mutableStateOf(TextFieldValue(prefs.apiUrl)) }
     var apiKey by remember { mutableStateOf(TextFieldValue(prefs.apiKey)) }
     var modelName by remember { mutableStateOf(TextFieldValue(prefs.modelName)) }
+    // Agent API URL 下拉选择状态
+    var apiUrlDropdownExpanded by remember { mutableStateOf(false) }
+    // Agent /models 获取模型列表状态
+    var agentFetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var agentFetchingModels by remember { mutableStateOf(false) }
     var agentSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.agentSystemPrompt)) }
     var porcupineKey by remember { mutableStateOf(TextFieldValue(prefs.porcupineAccessKey)) }
     var wakeWordKeyword by remember { mutableStateOf(prefs.wakeWordKeyword) }
@@ -1167,6 +1188,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     var coordinatorModelName by remember { mutableStateOf(TextFieldValue(prefs.coordinatorModelName)) }
     var coordinatorSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.coordinatorSystemPrompt)) }
     var coordinatorModelDropdownExpanded by remember { mutableStateOf(false) }
+    var coordinatorApiUrlDropdownExpanded by remember { mutableStateOf(false) }
+    var coordinatorFetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var coordinatorFetchingModels by remember { mutableStateOf(false) }
     var coordinatorEnableVision by remember { mutableStateOf(prefs.coordinatorEnableVision) }
     var coordinatorEnableThinking by remember { mutableStateOf(prefs.coordinatorEnableThinking) }
     var supervisionEnabled by remember { mutableStateOf(prefs.supervisionEnabled) }
@@ -1193,8 +1217,33 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
     var optimizerModelName by remember { mutableStateOf(TextFieldValue(prefs.optimizerModelName)) }
     var optimizerModelDropdownExpanded by remember { mutableStateOf(false) }
+    var optimizerApiUrlDropdownExpanded by remember { mutableStateOf(false) }
+    var optimizerFetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var optimizerFetchingModels by remember { mutableStateOf(false) }
     var taskSummaryEnabled by remember { mutableStateOf(prefs.taskSummaryEnabled) }
     var optimizerSystemPrompt by remember { mutableStateOf(TextFieldValue(prefs.optimizerSystemPrompt)) }
+    // Intent Recognizer states
+    var intentRecognizerEnabled by remember { mutableStateOf(prefs.intentRecognizerEnabled) }
+    var intentApiUrl by remember { mutableStateOf(TextFieldValue(prefs.intentApiUrl)) }
+    var intentApiKey by remember {
+        val model = prefs.intentModelName
+        mutableStateOf(
+            TextFieldValue(
+                when {
+                    model.startsWith("deepseek") -> prefs.intentApiKeyDeepseek
+                    model.startsWith("glm-") -> prefs.intentApiKeyBigmodel
+                    model.startsWith("doubao") -> prefs.intentApiKeyDoubao
+                    else -> prefs.intentApiKey
+                }
+            )
+        )
+    }
+    var intentModelName by remember { mutableStateOf(TextFieldValue(prefs.intentModelName)) }
+    var intentModelDropdownExpanded by remember { mutableStateOf(false) }
+    var intentApiUrlDropdownExpanded by remember { mutableStateOf(false) }
+    // /models API 获取的模型列表
+    var intentFetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var intentFetchingModels by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check if any setting has changed
@@ -1226,7 +1275,11 @@ fun SettingsScreen(onBack: () -> Unit) {
             optimizerApiKey.text != originalOptimizerApiKey ||
             optimizerModelName.text != originalOptimizerModelName ||
             taskSummaryEnabled != originalTaskSummaryEnabled ||
-            optimizerSystemPrompt.text != originalOptimizerSystemPrompt
+            optimizerSystemPrompt.text != originalOptimizerSystemPrompt ||
+            intentRecognizerEnabled != originalIntentRecognizerEnabled ||
+            intentApiUrl.text != originalIntentApiUrl ||
+            intentApiKey.text != originalIntentApiKey ||
+            intentModelName.text != originalIntentModelName
 
     // Available wake words
     val availableWakeWords = listOf(
@@ -1300,6 +1353,14 @@ fun SettingsScreen(onBack: () -> Unit) {
         val optimizerApiKeyLabel = if (isChinese) "优化器 API Key" else "Optimizer API Key"
         val optimizerModelLabel = if (isChinese) "优化器模型" else "Optimizer Model"
         val unsavedChanges = if (isChinese) "未保存的更改" else "Unsaved Changes"
+        val intentRecognizerSettings = if (isChinese) "意图识别设置" else "Intent Recognition Settings"
+        val enableIntentRecognizer = if (isChinese) "启用意图识别" else "Enable Intent Recognition"
+        val intentRecognizerDesc = if (isChinese) "自动将自然语言匹配到快捷指令" else "Auto-match natural language to shortcut commands"
+        val intentApiUrlLabel = if (isChinese) "识别器 API URL" else "Recognizer API URL"
+        val intentApiKeyLabel = if (isChinese) "识别器 API Key" else "Recognizer API Key"
+        val intentModelLabel = if (isChinese) "识别器模型" else "Recognizer Model"
+        val fetchModelsLabel = if (isChinese) "获取模型列表" else "Fetch Models"
+        val fetchingModelsLabel = if (isChinese) "获取中..." else "Fetching..."
         val unsavedChangesMsg = if (isChinese) "是否保存更改？" else "Do you want to save changes?"
         val saveBtn = if (isChinese) "保存" else "Save"
         val discardBtn = if (isChinese) "不保存" else "Discard"
@@ -1340,7 +1401,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                 optimizerApiKey.text != originalOptimizerApiKey ||
                 optimizerModelName.text != originalOptimizerModelName ||
                 taskSummaryEnabled != originalTaskSummaryEnabled ||
-                optimizerSystemPrompt.text != originalOptimizerSystemPrompt
+                optimizerSystemPrompt.text != originalOptimizerSystemPrompt ||
+                intentRecognizerEnabled != originalIntentRecognizerEnabled ||
+                intentApiUrl.text != originalIntentApiUrl ||
+                intentApiKey.text != originalIntentApiKey ||
+                intentModelName.text != originalIntentModelName
 
         // 保存所有设置
         prefs.apiUrl = apiUrl.text
@@ -1386,6 +1451,17 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.optimizerModelName = optimizerModelName.text
         prefs.taskSummaryEnabled = taskSummaryEnabled
         prefs.optimizerSystemPrompt = optimizerSystemPrompt.text
+        // Intent Recognizer settings
+        prefs.intentRecognizerEnabled = intentRecognizerEnabled
+        prefs.intentApiUrl = intentApiUrl.text
+        // Save intent API key to provider-specific slot
+        when {
+            intentModelName.text.startsWith("deepseek") -> prefs.intentApiKeyDeepseek = intentApiKey.text
+            intentModelName.text.startsWith("glm-") -> prefs.intentApiKeyBigmodel = intentApiKey.text
+            intentModelName.text.startsWith("doubao") -> prefs.intentApiKeyDoubao = intentApiKey.text
+            else -> prefs.intentApiKey = intentApiKey.text
+        }
+        prefs.intentModelName = intentModelName.text
 
         // 如果关键配置变化，重启服务使其生效
         if (needsRestart) {
@@ -1435,13 +1511,47 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text(strings.modelSettings, style = MaterialTheme.typography.titleMedium)
 
-            OutlinedTextField(
-                value = apiUrl,
-                onValueChange = { apiUrl = it },
-                label = { Text(strings.apiUrlLabel) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+            // Agent API URL 下拉选择 + 自定义输入
+            val presetApiUrls = listOf(
+                "https://api.deepseek.com/v1" to "DeepSeek",
+                "https://open.bigmodel.cn/api/paas/v4" to "智谱 BigModel",
+                "https://ark.cn-beijing.volces.com/api/v3" to "豆包 Doubao",
+                "https://api.openai.com/v1" to "OpenAI",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1" to "通义千问"
             )
+            ExposedDropdownMenuBox(
+                expanded = apiUrlDropdownExpanded,
+                onExpandedChange = { apiUrlDropdownExpanded = it }
+            ) {
+                OutlinedTextField(
+                    value = apiUrl,
+                    onValueChange = { apiUrl = it },
+                    label = { Text(strings.apiUrlLabel) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor(),
+                    singleLine = true,
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = apiUrlDropdownExpanded) }
+                )
+                ExposedDropdownMenu(
+                    expanded = apiUrlDropdownExpanded,
+                    onDismissRequest = { apiUrlDropdownExpanded = false }
+                ) {
+                    presetApiUrls.forEach { (url, label) ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(label, style = MaterialTheme.typography.bodyMedium)
+                                    Text(url, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            },
+                            onClick = {
+                                apiUrl = TextFieldValue(url)
+                                apiUrlDropdownExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
 
             OutlinedTextField(
                 value = apiKey,
@@ -1458,6 +1568,62 @@ fun SettingsScreen(onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
+
+            // Agent 从 /models API 获取模型列表
+            val agentCoroutineScope = rememberCoroutineScope()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        agentFetchingModels = true
+                        agentCoroutineScope.launch {
+                            val models = com.autoglm.assistant.ai.ModelApiHelper.fetchModels(
+                                apiUrl.text, apiKey.text
+                            )
+                            agentFetchedModels = models
+                            agentFetchingModels = false
+                        }
+                    },
+                    enabled = !agentFetchingModels && apiUrl.text.isNotBlank() && apiKey.text.isNotBlank()
+                ) {
+                    if (agentFetchingModels) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(if (agentFetchingModels) strings.fetchingModelsLabel else strings.fetchModelsLabel)
+                }
+                if (agentFetchedModels.isNotEmpty()) {
+                    Text(
+                        "${agentFetchedModels.size} ${if (isChinese) "个模型" else "models"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            // 显示从 API 获取的 Agent 模型列表（可选择）
+            if (agentFetchedModels.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    agentFetchedModels.forEach { model ->
+                        FilterChip(
+                            selected = modelName.text == model,
+                            onClick = { modelName = TextFieldValue(model) },
+                            label = { Text(model, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            }
 
             // 自定义 Agent 系统提示词
             var showAgentPromptEditor by remember { mutableStateOf(false) }
@@ -1729,14 +1895,47 @@ fun SettingsScreen(onBack: () -> Unit) {
                 )
             }
 
-            OutlinedTextField(
-                value = coordinatorApiUrl,
-                onValueChange = { coordinatorApiUrl = it },
-                label = { Text(strings.coordinatorApiUrlLabel) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = { Text("DeepSeek: https://api.deepseek.com/v1   ·   Doubao(豆包): https://ark.cn-beijing.volces.com/api/v3") }
+            // 协调器 API URL 下拉选择 + 自定义输入
+            val coordinatorPresetApiUrls = listOf(
+                "https://api.deepseek.com/v1" to "DeepSeek",
+                "https://open.bigmodel.cn/api/paas/v4" to "智谱 BigModel",
+                "https://ark.cn-beijing.volces.com/api/v3" to "豆包 Doubao",
+                "https://api.openai.com/v1" to "OpenAI",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1" to "通义千问"
             )
+            ExposedDropdownMenuBox(
+                expanded = coordinatorApiUrlDropdownExpanded,
+                onExpandedChange = { coordinatorApiUrlDropdownExpanded = it }
+            ) {
+                OutlinedTextField(
+                    value = coordinatorApiUrl,
+                    onValueChange = { coordinatorApiUrl = it },
+                    label = { Text(strings.coordinatorApiUrlLabel) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor(),
+                    singleLine = true,
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = coordinatorApiUrlDropdownExpanded) }
+                )
+                ExposedDropdownMenu(
+                    expanded = coordinatorApiUrlDropdownExpanded,
+                    onDismissRequest = { coordinatorApiUrlDropdownExpanded = false }
+                ) {
+                    coordinatorPresetApiUrls.forEach { (url, label) ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(label, style = MaterialTheme.typography.bodyMedium)
+                                    Text(url, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            },
+                            onClick = {
+                                coordinatorApiUrl = TextFieldValue(url)
+                                coordinatorApiUrlDropdownExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
 
             OutlinedTextField(
                 value = coordinatorApiKey,
@@ -1803,12 +2002,63 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            // 协调器：从 /models API 获取模型列表
+            val coordinatorCoroutineScope = rememberCoroutineScope()
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        coordinatorFetchingModels = true
+                        coordinatorCoroutineScope.launch {
+                            val models = com.autoglm.assistant.ai.ModelApiHelper.fetchModels(
+                                coordinatorApiUrl.text, coordinatorApiKey.text
+                            )
+                            coordinatorFetchedModels = models
+                            coordinatorFetchingModels = false
+                        }
+                    },
+                    enabled = !coordinatorFetchingModels && coordinatorApiUrl.text.isNotBlank() && coordinatorApiKey.text.isNotBlank()
+                ) {
+                    if (coordinatorFetchingModels) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(if (coordinatorFetchingModels) strings.fetchingModelsLabel else strings.fetchModelsLabel)
+                }
+                if (coordinatorFetchedModels.isNotEmpty()) {
+                    Text(
+                        "${coordinatorFetchedModels.size} ${if (isChinese) "个模型" else "models"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            // 显示从 API 获取的协调器模型列表（可选择）
+            if (coordinatorFetchedModels.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    coordinatorFetchedModels.forEach { model ->
+                        FilterChip(
+                            selected = coordinatorModelName.text == model,
+                            onClick = { coordinatorModelName = TextFieldValue(model) },
+                            label = { Text(model, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            }
+
+            Row(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
@@ -2049,14 +2299,47 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             if (promptOptimizerEnabled) {
-                OutlinedTextField(
-                    value = optimizerApiUrl,
-                    onValueChange = { optimizerApiUrl = it },
-                    label = { Text(strings.optimizerApiUrlLabel) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    supportingText = { Text("DeepSeek: https://api.deepseek.com/v1   ·   Doubao(豆包): https://ark.cn-beijing.volces.com/api/v3") }
+                // 优化器 API URL 下拉选择 + 自定义输入
+                val optimizerPresetApiUrls = listOf(
+                    "https://api.deepseek.com/v1" to "DeepSeek",
+                    "https://open.bigmodel.cn/api/paas/v4" to "智谱 BigModel",
+                    "https://ark.cn-beijing.volces.com/api/v3" to "豆包 Doubao",
+                    "https://api.openai.com/v1" to "OpenAI",
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1" to "通义千问"
                 )
+                ExposedDropdownMenuBox(
+                    expanded = optimizerApiUrlDropdownExpanded,
+                    onExpandedChange = { optimizerApiUrlDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = optimizerApiUrl,
+                        onValueChange = { optimizerApiUrl = it },
+                        label = { Text(strings.optimizerApiUrlLabel) },
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        singleLine = true,
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = optimizerApiUrlDropdownExpanded) }
+                    )
+                    ExposedDropdownMenu(
+                        expanded = optimizerApiUrlDropdownExpanded,
+                        onDismissRequest = { optimizerApiUrlDropdownExpanded = false }
+                    ) {
+                        optimizerPresetApiUrls.forEach { (url, label) ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                                        Text(url, style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                },
+                                onClick = {
+                                    optimizerApiUrl = TextFieldValue(url)
+                                    optimizerApiUrlDropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
 
                 OutlinedTextField(
                     value = optimizerApiKey,
@@ -2120,6 +2403,62 @@ fun SettingsScreen(onBack: () -> Unit) {
                             },
                             label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
                         )
+                    }
+                }
+
+                // 优化器：从 /models API 获取模型列表
+                val optimizerCoroutineScope = rememberCoroutineScope()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            optimizerFetchingModels = true
+                            optimizerCoroutineScope.launch {
+                                val models = com.autoglm.assistant.ai.ModelApiHelper.fetchModels(
+                                    optimizerApiUrl.text, optimizerApiKey.text
+                                )
+                                optimizerFetchedModels = models
+                                optimizerFetchingModels = false
+                            }
+                        },
+                        enabled = !optimizerFetchingModels && optimizerApiUrl.text.isNotBlank() && optimizerApiKey.text.isNotBlank()
+                    ) {
+                        if (optimizerFetchingModels) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text(if (optimizerFetchingModels) strings.fetchingModelsLabel else strings.fetchModelsLabel)
+                    }
+                    if (optimizerFetchedModels.isNotEmpty()) {
+                        Text(
+                            "${optimizerFetchedModels.size} ${if (isChinese) "个模型" else "models"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                // 显示从 API 获取的优化器模型列表（可选择）
+                if (optimizerFetchedModels.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        optimizerFetchedModels.forEach { model ->
+                            FilterChip(
+                                selected = optimizerModelName.text == model,
+                                onClick = { optimizerModelName = TextFieldValue(model) },
+                                label = { Text(model, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
                     }
                 }
 
@@ -2271,6 +2610,197 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 )
                             }
                         )
+                    }
+                }
+            }
+
+            Divider()
+
+            // ===== 意图识别设置 =====
+            Text(
+                strings.intentRecognizerSettings,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(strings.enableIntentRecognizer, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        strings.intentRecognizerDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = intentRecognizerEnabled,
+                    onCheckedChange = { intentRecognizerEnabled = it }
+                )
+            }
+
+            if (intentRecognizerEnabled) {
+                // 意图识别器 API URL 下拉选择 + 自定义输入
+                val intentPresetApiUrls = listOf(
+                    "https://api.deepseek.com/v1" to "DeepSeek",
+                    "https://open.bigmodel.cn/api/paas/v4" to "智谱 BigModel",
+                    "https://ark.cn-beijing.volces.com/api/v3" to "豆包 Doubao",
+                    "https://api.openai.com/v1" to "OpenAI",
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1" to "通义千问"
+                )
+                ExposedDropdownMenuBox(
+                    expanded = intentApiUrlDropdownExpanded,
+                    onExpandedChange = { intentApiUrlDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = intentApiUrl,
+                        onValueChange = { intentApiUrl = it },
+                        label = { Text(strings.intentApiUrlLabel) },
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        singleLine = true,
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = intentApiUrlDropdownExpanded) }
+                    )
+                    ExposedDropdownMenu(
+                        expanded = intentApiUrlDropdownExpanded,
+                        onDismissRequest = { intentApiUrlDropdownExpanded = false }
+                    ) {
+                        intentPresetApiUrls.forEach { (url, label) ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                                        Text(url, style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                },
+                                onClick = {
+                                    intentApiUrl = TextFieldValue(url)
+                                    intentApiUrlDropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = intentApiKey,
+                    onValueChange = { intentApiKey = it },
+                    label = { Text(strings.intentApiKeyLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                // 可编辑的模型名称输入框
+                OutlinedTextField(
+                    value = intentModelName,
+                    onValueChange = { intentModelName = it },
+                    label = { Text(strings.intentModelLabel) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text(if (isChinese) "可输入任意模型名称，或点击下方获取可用列表" else "Enter any model name, or fetch available list below") }
+                )
+
+                // 快捷选择按钮 + 获取模型列表
+                val intentModels = listOf(
+                    "deepseek-chat" to "DeepSeek Chat",
+                    "glm-4-plus" to "智谱 GLM-4 Plus",
+                    "glm-4" to "智谱 GLM-4",
+                    "doubao-seed-1-6-251015" to "豆包 Seed 1.6"
+                )
+
+                Text(
+                    text = if (isChinese) "快捷选择：" else "Quick select:",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    intentModels.forEach { (model, displayName) ->
+                        FilterChip(
+                            selected = intentModelName.text == model,
+                            onClick = {
+                                intentModelName = TextFieldValue(model)
+                                intentApiUrl = when {
+                                    model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
+                                    model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
+                                    model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
+                                    else -> intentApiUrl
+                                }
+                                intentApiKey = when {
+                                    model.startsWith("deepseek") -> TextFieldValue(prefs.intentApiKeyDeepseek)
+                                    model.startsWith("glm-") -> TextFieldValue(prefs.intentApiKeyBigmodel)
+                                    model.startsWith("doubao") -> TextFieldValue(prefs.intentApiKeyDoubao)
+                                    else -> intentApiKey
+                                }
+                            },
+                            label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+
+                // 从 /models API 获取模型列表按钮
+                val coroutineScope = rememberCoroutineScope()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            intentFetchingModels = true
+                            coroutineScope.launch {
+                                val models = com.autoglm.assistant.ai.ModelApiHelper.fetchModels(
+                                    intentApiUrl.text, intentApiKey.text
+                                )
+                                intentFetchedModels = models
+                                intentFetchingModels = false
+                            }
+                        },
+                        enabled = !intentFetchingModels && intentApiUrl.text.isNotBlank() && intentApiKey.text.isNotBlank()
+                    ) {
+                        if (intentFetchingModels) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text(if (intentFetchingModels) strings.fetchingModelsLabel else strings.fetchModelsLabel)
+                    }
+                    if (intentFetchedModels.isNotEmpty()) {
+                        Text(
+                            "${intentFetchedModels.size} ${if (isChinese) "个模型" else "models"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // 显示从 API 获取的模型列表（可选择）
+                if (intentFetchedModels.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        intentFetchedModels.forEach { model ->
+                            FilterChip(
+                                selected = intentModelName.text == model,
+                                onClick = { intentModelName = TextFieldValue(model) },
+                                label = { Text(model, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
                     }
                 }
             }

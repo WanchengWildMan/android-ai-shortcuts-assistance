@@ -22,6 +22,8 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -328,7 +330,18 @@ fun ChatScreen(
 
 @Composable
 fun AnimatedMessageItem(message: ChatMessage) {
-    // Use rememberSaveable to keep state across scrolls, so animation only plays once
+    // 步骤1: 判断是否为近期消息（2秒内），仅对新消息播放动画，滚动到旧消息时直接显示
+    val isRecentMessage = remember(message.timestamp) {
+        System.currentTimeMillis() - message.timestamp < 2000L
+    }
+
+    if (!isRecentMessage) {
+        // 旧消息直接显示，不播放动画，避免滚动时的视觉干扰
+        ChatBubble(message = message)
+        return
+    }
+
+    // 步骤2: 仅使用fadeIn动画，避免expandVertically导致的LazyColumn布局跳动
     var visible by rememberSaveable(message.timestamp) { mutableStateOf(false) }
 
     LaunchedEffect(message.timestamp) {
@@ -337,14 +350,8 @@ fun AnimatedMessageItem(message: ChatMessage) {
 
     AnimatedVisibility(
         visible = visible,
-        enter = expandVertically(
-            expandFrom = Alignment.Bottom,
-            animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing)
-        ) + fadeIn(
-            animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing)
-        ) + slideInVertically(
-            initialOffsetY = { it },
-            animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing)
+        enter = fadeIn(
+            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing)
         )
     ) {
         ChatBubble(message = message)
@@ -384,16 +391,39 @@ fun ChatBubble(message: ChatMessage) {
                 horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
             ) {
                 if (!isUser) {
+                    // 根据消息来源使用不同图标和颜色
+                    val (icon, iconTint, bgColor) = when (message.source) {
+                        MessageSource.COORDINATOR -> Triple(
+                            Icons.Default.AccountTree,
+                            MaterialTheme.colorScheme.tertiary,
+                            MaterialTheme.colorScheme.tertiaryContainer
+                        )
+                        MessageSource.OPTIMIZER -> Triple(
+                            Icons.Default.AutoFixHigh,
+                            MaterialTheme.colorScheme.secondary,
+                            MaterialTheme.colorScheme.secondaryContainer
+                        )
+                        MessageSource.SUMMARY -> Triple(
+                            Icons.Default.AutoFixHigh,
+                            MaterialTheme.colorScheme.secondary,
+                            MaterialTheme.colorScheme.secondaryContainer
+                        )
+                        else -> Triple(
+                            Icons.Default.SmartToy,
+                            MaterialTheme.colorScheme.onPrimaryContainer,
+                            MaterialTheme.colorScheme.primaryContainer
+                        )
+                    }
                     Surface(
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer,
+                        color = bgColor,
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.SmartToy,
-                            contentDescription = "Bot",
+                            imageVector = icon,
+                            contentDescription = message.source.name,
                             modifier = Modifier.padding(6.dp),
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            tint = iconTint
                         )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
@@ -414,17 +444,70 @@ fun ChatBubble(message: ChatMessage) {
                     shadowElevation = 1.dp
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        SelectionContainer {
-                            if (isUser) {
+                        // 解析思考内容：检测 "**思考：**" 前缀，分离思考与正文部分
+                        val thinkingParts = if (!isUser) parseThinkingContent(message.content) else null
+                        val hasThinking = thinkingParts != null && thinkingParts.first.isNotBlank()
+
+                        if (hasThinking) {
+                            // 思考内容折叠区域（默认收起）
+                            var thinkingExpanded by remember { mutableStateOf(false) }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { thinkingExpanded = !thinkingExpanded }
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text(
-                                    text = message.content,
-                                    style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                                    text = "💭 思考过程",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = textColor.copy(alpha = 0.6f)
                                 )
-                            } else {
-                                Text(
-                                    text = parseMarkdown(message.content),
-                                    style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                                Icon(
+                                    imageVector = if (thinkingExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (thinkingExpanded) "收起" else "展开",
+                                    tint = textColor.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(16.dp)
                                 )
+                            }
+
+                            AnimatedVisibility(visible = thinkingExpanded) {
+                                SelectionContainer {
+                                    Text(
+                                        text = parseMarkdown(thinkingParts!!.first),
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = textColor.copy(alpha = 0.7f)
+                                        ),
+                                        modifier = Modifier.padding(bottom = 8.dp)
+                                    )
+                                }
+                            }
+
+                            // 正文部分（操作/结果等）
+                            val remainingContent = thinkingParts!!.second
+                            if (remainingContent.isNotBlank()) {
+                                SelectionContainer {
+                                    Text(
+                                        text = parseMarkdown(remainingContent),
+                                        style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                                    )
+                                }
+                            }
+                        } else {
+                            // 无思考内容，正常渲染
+                            SelectionContainer {
+                                if (isUser) {
+                                    Text(
+                                        text = message.content,
+                                        style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                                    )
+                                } else {
+                                    Text(
+                                        text = parseMarkdown(message.content),
+                                        style = MaterialTheme.typography.bodyLarge.copy(color = textColor)
+                                    )
+                                }
                             }
                         }
 
@@ -448,4 +531,40 @@ fun ChatBubble(message: ChatMessage) {
 private fun formatTime(timestamp: Long): String {
     val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
     return sdf.format(Date(timestamp))
+}
+
+/**
+ * 解析消息中的思考内容，将其与正文部分分离。
+ * 支持格式:
+ *   1) "**思考：**\n内容\n\n**操作：**\n操作内容" → (思考内容, 操作内容)
+ *   2) "**思考：**\n内容" → (思考内容, "")
+ *   3) "<think>内容</think>正文" → (内容, 正文)
+ * @return Pair(思考内容, 剩余正文) 或 null（无思考内容）
+ */
+private fun parseThinkingContent(content: String): Pair<String, String>? {
+    // 格式1: **思考：** 前缀，后续可能有 **操作：** 分隔
+    if (content.startsWith("**思考：**") || content.startsWith("**思考:**")) {
+        val thinkPrefix = if (content.startsWith("**思考：**")) "**思考：**" else "**思考:**"
+        val afterThink = content.removePrefix(thinkPrefix).trimStart('\n')
+
+        // 查找 **操作：** 分隔符
+        val actionSeparator = Regex("""\*\*操作[：:]\*\*""")
+        val match = actionSeparator.find(afterThink)
+        return if (match != null) {
+            val thinking = afterThink.substring(0, match.range.first).trim()
+            val remaining = afterThink.substring(match.range.first).trim()
+            Pair(thinking, remaining)
+        } else {
+            Pair(afterThink.trim(), "")
+        }
+    }
+
+    // 格式2: <think>...</think> 标签
+    val thinkTagPattern = Regex("""<think>(.*?)</think>(.*)""", RegexOption.DOT_MATCHES_ALL)
+    val tagMatch = thinkTagPattern.find(content)
+    if (tagMatch != null) {
+        return Pair(tagMatch.groupValues[1].trim(), tagMatch.groupValues[2].trim())
+    }
+
+    return null
 }

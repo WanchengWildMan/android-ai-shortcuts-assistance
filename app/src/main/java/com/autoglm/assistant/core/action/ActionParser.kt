@@ -21,8 +21,10 @@ enum class ActionType {
     HOME,
     WAIT,
     TAKE_OVER,
+    INTERACT,
     NOTE,
     CALL_API,
+    CLEAR_INPUT,
     FINISH,
     UNKNOWN
 }
@@ -134,8 +136,10 @@ object ActionParser {
             "HOME" -> ActionType.HOME
             "WAIT" -> ActionType.WAIT
             "TAKE_OVER", "TAKEOVER" -> ActionType.TAKE_OVER
+            "INTERACT" -> ActionType.INTERACT
             "NOTE" -> ActionType.NOTE
             "CALL_API", "CALLAPI" -> ActionType.CALL_API
+            "CLEAR_INPUT", "CLEARINPUT", "CLEAR" -> ActionType.CLEAR_INPUT
             "FINISH" -> ActionType.FINISH
             else -> ActionType.UNKNOWN
         }
@@ -225,7 +229,7 @@ object ActionParser {
                 }
             }
 
-            ActionType.TAKE_OVER, ActionType.NOTE, ActionType.CALL_API -> {
+            ActionType.TAKE_OVER, ActionType.INTERACT, ActionType.NOTE, ActionType.CALL_API -> {
                 val msgPattern = Pattern.compile("(message|instruction)=[\"'](.+?)[\"']", Pattern.DOTALL)
                 val matcher = msgPattern.matcher(actionString)
                 if (matcher.find()) {

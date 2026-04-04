@@ -38,7 +38,7 @@ import kotlinx.coroutines.withContext
  * - 在某些定制系统上可能不稳定
  */
 class SystemSttWakeEngine(
-    private val context: Context
+    context: Context
 ) : SttWakeEngine(context) {
 
     companion object {

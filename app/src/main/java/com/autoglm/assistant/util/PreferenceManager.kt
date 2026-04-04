@@ -69,6 +69,15 @@ class PreferenceManager(context: Context) {
         // 自定义优化器系统提示词
         private const val KEY_OPTIMIZER_SYSTEM_PROMPT = "optimizer_system_prompt"
 
+        // 意图识别器设置
+        private const val KEY_INTENT_RECOGNIZER_ENABLED = "intent_recognizer_enabled"
+        private const val KEY_INTENT_API_URL = "intent_api_url"
+        private const val KEY_INTENT_API_KEY = "intent_api_key"
+        private const val KEY_INTENT_API_KEY_DEEPSEEK = "intent_api_key_deepseek"
+        private const val KEY_INTENT_API_KEY_BIGMODEL = "intent_api_key_bigmodel"
+        private const val KEY_INTENT_API_KEY_DOUBAO = "intent_api_key_doubao"
+        private const val KEY_INTENT_MODEL_NAME = "intent_model_name"
+
         // 自定义 Agent 系统提示词
         private const val KEY_AGENT_SYSTEM_PROMPT = "agent_system_prompt"
 
@@ -86,7 +95,7 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_WAKE_SENSITIVITY = 0.7f
         const val DEFAULT_WAKE_GREETING_TEXT = "我在听"
         // STT 唤醒默认值
-        const val DEFAULT_STT_WAKE_PHRASE = "小爱"
+        const val DEFAULT_STT_WAKE_PHRASE = "你好小爱"
         const val DEFAULT_STT_WAKE_LANGUAGE = "zh-CN"
         const val DEFAULT_STT_WAKE_COOLDOWN_MS = 3000L
         // 智能协调器默认值 - DeepSeek
@@ -98,6 +107,8 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_COORDINATOR_ENABLE_THINKING = true
         // 提示词优化器默认值 - 默认使用协调器设置
         const val DEFAULT_OPTIMIZER_MODEL_NAME = "deepseek-chat"
+        // 意图识别器默认值 - 默认使用协调器设置
+        const val DEFAULT_INTENT_MODEL_NAME = "deepseek-chat"
     }
 
     var apiUrl: String
@@ -292,6 +303,36 @@ class PreferenceManager(context: Context) {
     var optimizerSystemPrompt: String
         get() = prefs.getString(KEY_OPTIMIZER_SYSTEM_PROMPT, "") ?: ""
         set(value) = prefs.edit { putString(KEY_OPTIMIZER_SYSTEM_PROMPT, value) }
+
+    // IntentRecognizer settings（意图识别器，用于自然语言匹配快捷指令）
+    var intentRecognizerEnabled: Boolean
+        get() = prefs.getBoolean(KEY_INTENT_RECOGNIZER_ENABLED, false)
+        set(value) = prefs.edit { putBoolean(KEY_INTENT_RECOGNIZER_ENABLED, value) }
+
+    var intentApiUrl: String
+        get() = prefs.getString(KEY_INTENT_API_URL, DEFAULT_COORDINATOR_API_URL) ?: DEFAULT_COORDINATOR_API_URL
+        set(value) = prefs.edit { putString(KEY_INTENT_API_URL, value) }
+
+    var intentApiKey: String
+        get() = prefs.getString(KEY_INTENT_API_KEY, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_INTENT_API_KEY, value) }
+
+    // Provider-specific Intent Recognizer API keys
+    var intentApiKeyDeepseek: String
+        get() = prefs.getString(KEY_INTENT_API_KEY_DEEPSEEK, intentApiKey) ?: intentApiKey
+        set(value) = prefs.edit { putString(KEY_INTENT_API_KEY_DEEPSEEK, value) }
+
+    var intentApiKeyBigmodel: String
+        get() = prefs.getString(KEY_INTENT_API_KEY_BIGMODEL, intentApiKey) ?: intentApiKey
+        set(value) = prefs.edit { putString(KEY_INTENT_API_KEY_BIGMODEL, value) }
+
+    var intentApiKeyDoubao: String
+        get() = prefs.getString(KEY_INTENT_API_KEY_DOUBAO, intentApiKey) ?: intentApiKey
+        set(value) = prefs.edit { putString(KEY_INTENT_API_KEY_DOUBAO, value) }
+
+    var intentModelName: String
+        get() = prefs.getString(KEY_INTENT_MODEL_NAME, DEFAULT_INTENT_MODEL_NAME) ?: DEFAULT_INTENT_MODEL_NAME
+        set(value) = prefs.edit { putString(KEY_INTENT_MODEL_NAME, value) }
 
     // Shell settings - 是否使用 Root 模式执行命令
     var useRootMode: Boolean

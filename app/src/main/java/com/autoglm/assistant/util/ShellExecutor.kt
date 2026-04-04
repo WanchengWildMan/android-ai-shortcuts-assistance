@@ -13,6 +13,7 @@ import java.io.InputStreamReader
  */
 object ShellExecutor {
     private const val TAG = Logger.SHELL
+    private const val ADB_KEYBOARD_IME_ID = "com.android.adbkeyboard/.AdbIME"
 
     // 缓存 Root 可用性检查结果
     @Volatile
@@ -25,6 +26,13 @@ object ShellExecutor {
     // 全局 Root 模式开关（可通过设置控制）
     @Volatile
     var globalUseRoot: Boolean = true
+
+    // 任务级输入法会话状态
+    @Volatile
+    private var imeSessionActive: Boolean = false
+
+    @Volatile
+    private var imeSessionOriginalIme: String? = null
 
     // 静态初始化 libsu Shell 配置
     init {
@@ -439,7 +447,19 @@ object ShellExecutor {
                 }
             }
             
-            val adbKeyboardId = "com.android.adbkeyboard/.AdbIME"
+            // 任务级输入法会话开启时，不再每次输入都切换/恢复输入法
+            if (imeSessionActive) {
+                val currentImeResult = execute("settings get secure default_input_method", useRoot = true)
+                val currentIme = if (currentImeResult.success) currentImeResult.stdout.trim() else ""
+                if (!currentIme.contains("adbkeyboard", ignoreCase = true)) {
+                    val ensureResult = execute("ime enable $ADB_KEYBOARD_IME_ID && ime set $ADB_KEYBOARD_IME_ID", useRoot = true)
+                    if (!ensureResult.success) {
+                        return Result(false, "", "输入法会话中切换ADB Keyboard失败", -1)
+                    }
+                }
+                val escapedText = text.replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+                return execute("am broadcast -a ADB_INPUT_TEXT --es msg \"$escapedText\"", useRoot = true)
+            }
 
             // 1. 获取当前输入法
             val currentImeResult = execute("settings get secure default_input_method", useRoot = true)
@@ -455,7 +475,7 @@ object ShellExecutor {
 
             // 2. 切换到 ADB Keyboard
             Logger.d(TAG, "[TYPE_ADB] 正在切换到 ADB Keyboard")
-            val switchResult = execute("ime enable $adbKeyboardId && ime set $adbKeyboardId", useRoot = true)
+            val switchResult = execute("ime enable $ADB_KEYBOARD_IME_ID && ime set $ADB_KEYBOARD_IME_ID", useRoot = true)
             if (!switchResult.success) {
                 Logger.e(TAG, "[TYPE_ADB] 切换失败: ${switchResult.stderr}")
                 return Result(false, "", "切换到 ADB Keyboard 失败", -1)
@@ -484,6 +504,74 @@ object ShellExecutor {
         }
     }
 
+    /**
+     * 开启任务级 ADB Keyboard 输入法会话。
+     * 行为：保存当前输入法 -> 切换到 ADB Keyboard；后续输入不再重复切换。
+     */
+    suspend fun beginAdbKeyboardSession(context: android.content.Context? = null): Boolean {
+        if (imeSessionActive) {
+            Logger.d(TAG, "[IME_SESSION] 已处于会话中，跳过重复开启")
+            return true
+        }
+
+        if (context != null && !isAdbKeyboardInstalled()) {
+            val installResult = ensureAdbKeyboardInstalled(context)
+            if (!installResult.success) {
+                Logger.w(TAG, "[IME_SESSION] ADB Keyboard 未安装且自动安装失败")
+                return false
+            }
+        }
+
+        val currentImeResult = execute("settings get secure default_input_method", useRoot = true)
+        val currentIme = if (currentImeResult.success) currentImeResult.stdout.trim() else ""
+        imeSessionOriginalIme = currentIme
+
+        if (currentIme.contains("adbkeyboard", ignoreCase = true)) {
+            imeSessionActive = true
+            Logger.i(TAG, "[IME_SESSION] 当前已是 ADB Keyboard，直接复用")
+            return true
+        }
+
+        val switchResult = execute("ime enable $ADB_KEYBOARD_IME_ID && ime set $ADB_KEYBOARD_IME_ID", useRoot = true)
+        if (!switchResult.success) {
+            Logger.w(TAG, "[IME_SESSION] 切换到 ADB Keyboard 失败: ${switchResult.stderr}")
+            imeSessionOriginalIme = null
+            imeSessionActive = false
+            return false
+        }
+
+        imeSessionActive = true
+        Logger.i(TAG, "[IME_SESSION] 已开启，originalIme=$currentIme")
+        return true
+    }
+
+    /**
+     * 结束任务级输入法会话并恢复原输入法。
+     */
+    suspend fun endAdbKeyboardSession(): Boolean {
+        if (!imeSessionActive) {
+            return true
+        }
+
+        val originalIme = imeSessionOriginalIme.orEmpty()
+        imeSessionActive = false
+        imeSessionOriginalIme = null
+
+        if (originalIme.isBlank() || originalIme.contains("adbkeyboard", ignoreCase = true)) {
+            Logger.i(TAG, "[IME_SESSION] 结束会话，无需恢复输入法")
+            return true
+        }
+
+        val restoreResult = execute("ime set $originalIme", useRoot = true)
+        if (!restoreResult.success) {
+            Logger.w(TAG, "[IME_SESSION] 恢复原输入法失败: ${restoreResult.stderr}")
+            return false
+        }
+
+        Logger.i(TAG, "[IME_SESSION] 已恢复原输入法: $originalIme")
+        return true
+    }
+
     suspend fun broadcastText(text: String): Boolean {
         val base64Text = android.util.Base64.encodeToString(
             text.toByteArray(Charsets.UTF_8),
@@ -494,8 +582,19 @@ object ShellExecutor {
     }
 
     suspend fun clearText(): Boolean {
-        val result = execute("am broadcast -a ADB_CLEAR_TEXT")
-        return result.success
+        val imeResult = execute("settings get secure default_input_method", useRoot = true)
+        val currentIme = if (imeResult.success) imeResult.stdout.trim() else ""
+        if (!currentIme.contains("adbkeyboard", ignoreCase = true)) {
+            Logger.w(TAG, "[CLEAR_TEXT] 跳过 ADB_CLEAR_TEXT：当前输入法不是 ADB Keyboard (currentIme=$currentIme)")
+            return false
+        }
+
+        val result = execute("am broadcast -a ADB_CLEAR_TEXT", useRoot = true)
+        if (!result.success) {
+            Logger.w(TAG, "[CLEAR_TEXT] ADB_CLEAR_TEXT 广播失败: ${result.stderr}")
+            return false
+        }
+        return true
     }
 
     /**
