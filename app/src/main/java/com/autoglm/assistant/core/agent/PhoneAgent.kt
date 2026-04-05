@@ -18,8 +18,10 @@ import com.autoglm.assistant.core.screen.ScreenCapture
 import com.autoglm.assistant.util.Logger
 import com.autoglm.assistant.util.ShellExecutor
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -317,8 +319,11 @@ class PhoneAgent(
             onError?.invoke(error)
             return error
         } finally {
-            if (imeSessionStarted) {
-                ShellExecutor.endAdbKeyboardSession()
+            // 步骤: 用 NonCancellable 确保协程取消时仍能恢复输入法
+            withContext(NonCancellable) {
+                if (imeSessionStarted) {
+                    ShellExecutor.endAdbKeyboardSession()
+                }
             }
             _isRunning.value = false
             _currentTask.value = null
@@ -430,7 +435,7 @@ class PhoneAgent(
         }
 
         // 步骤: 任务执行前开启输入法会话，避免每次输入来回切换 IME
-        val imeSessionStarted = ShellExecutor.beginAdbKeyboardSession(context)
+        val imeSessionStarted = ShellExecutor.beginAdbKeyboardSession(this.context)
         Logger.i(Logger.AGENT, "[IME_SESSION] task start result=$imeSessionStarted")
 
         try {
@@ -459,8 +464,11 @@ class PhoneAgent(
             onError?.invoke(error)
             return error
         } finally {
-            if (imeSessionStarted) {
-                ShellExecutor.endAdbKeyboardSession()
+            // 步骤: 用 NonCancellable 确保协程取消时仍能恢复输入法
+            withContext(NonCancellable) {
+                if (imeSessionStarted) {
+                    ShellExecutor.endAdbKeyboardSession()
+                }
             }
             _isRunning.value = false
             _currentTask.value = null
@@ -491,6 +499,8 @@ class PhoneAgent(
         while (coordinatorSteps < maxCoordinatorSteps) {
             if (stopRequested) {
                 Logger.i(Logger.AGENT, "Task stopped by user")
+                // 步骤: 停止时也立即恢复输入法
+                ShellExecutor.endAdbKeyboardSession()
                 return generateTaskSummaryIfEnabled(task, stopped = true) ?: "Task stopped by user"
             }
 
@@ -550,6 +560,8 @@ class PhoneAgent(
                     // 任务完成，恢复默认行为并返回 app
                     actionExecutor.returnToAppOnFinish = true
                     actionExecutor.returnToAutoGLM()
+                    // 步骤: 执行完成后立即恢复输入法
+                    ShellExecutor.endAdbKeyboardSession()
                     val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: decision.assessment
                     if (!stopRequested) {
                         onTaskComplete?.invoke(summaryMessage)
@@ -646,6 +658,9 @@ class PhoneAgent(
         // 协调器任务全部结束，恢复默认行为并执行一次返回 app
         actionExecutor.returnToAppOnFinish = true
         actionExecutor.returnToAutoGLM()
+
+        // 步骤: 执行完成后立即恢复输入法，不等总结生成
+        ShellExecutor.endAdbKeyboardSession()
 
         val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
         onTaskComplete?.invoke(summaryMessage)
@@ -847,6 +862,8 @@ class PhoneAgent(
         while (!result.finished && currentStep < agentConfig.maxSteps) {
             if (stopRequested) {
                 Logger.i(Logger.AGENT, "Task stopped by user (stopRequested=true)")
+                // 步骤: 停止时也立即恢复输入法
+                ShellExecutor.endAdbKeyboardSession()
                 return generateTaskSummaryIfEnabled(task, stopped = true) ?: "Task stopped by user"
             }
 
@@ -876,6 +893,9 @@ class PhoneAgent(
         val finalMessage = result.message ?: "Task completed"
         Logger.i(Logger.AGENT, "========== TASK COMPLETED ==========")
         Logger.i(Logger.AGENT, "Result: $finalMessage (steps: $currentStep)")
+
+        // 步骤: 执行完成后立即恢复输入法，不等总结生成
+        ShellExecutor.endAdbKeyboardSession()
 
         // 生成任务总结（如果启用）
         val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage

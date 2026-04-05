@@ -58,12 +58,17 @@ class PorcupineWakeEngine(
                 config.keywordPath != null -> {
                     // 使用指定路径的自定义唤醒词文件
                     builder.setKeywordPath(config.keywordPath)
+                    // 如果自定义唤醒词带 zh，自动配合中文模型
+                    if (config.keywordPath.contains("zh", ignoreCase = true) || config.keywordPath.contains("xiaoai", ignoreCase = true)) {
+                        builder.setModelPath("porcupine_params_zh.pv")
+                    }
                     Log.d(TAG, "初始化自定义唤醒词: ${config.keywordPath}")
                 }
                 config.keywordName == "XIAOAI" -> {
                     // 使用 assets 中的"小爱"自定义唤醒词
                     builder.setKeywordPath("xiaoai.ppn")
-                    Log.d(TAG, "初始化小爱唤醒词")
+                        .setModelPath("porcupine_params_zh.pv")
+                    Log.d(TAG, "初始化小爱唤醒词, 配套中文模型")
                 }
                 else -> {
                     // 使用基于 keywordName 的内置关键词
@@ -174,13 +179,23 @@ class PorcupineWakeEngine(
         }
 
         Log.i(TAG, "停止监听")
-        _engineState.value = WakeEngine.EngineState.READY
+        _engineState.value = WakeEngine.EngineState.READY // 先改变状态，让 while 循环自然退出
 
-        processingJob?.cancel()
+        val job = processingJob
         processingJob = null
+        if (job != null) {
+            job.cancel()
+            // 绝不能在另一个线程粗暴 stop，小米等系统会发生 AudioRecord native crash
+            // 因为 read() 一次只需 32ms，直接 join 等它跑完即可
+            job.join()
+        }
 
-        audioRecord?.stop()
-        audioRecord?.release()
+        try {
+            audioRecord?.stop()
+        } catch (e: Exception) {}
+        try {
+            audioRecord?.release()
+        } catch (e: Exception) {}
         audioRecord = null
     }
 

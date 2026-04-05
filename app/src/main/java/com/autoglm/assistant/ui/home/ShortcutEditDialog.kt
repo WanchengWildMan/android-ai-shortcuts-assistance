@@ -137,7 +137,14 @@ fun ShortcutEditDialog(
                                                                 model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
                                                                 else -> prefs.optimizerApiKey
                                                             }
-                                                            if (key.isNotBlank()) key else prefs.apiKey
+                                                            val mainKey = when {
+                                                                prefs.modelName.startsWith("deepseek") -> prefs.apiKeyDeepseek
+                                                                prefs.modelName.startsWith("glm-") -> prefs.apiKeyBigmodel
+                                                                prefs.modelName.startsWith("doubao") -> prefs.apiKeyDoubao
+                                                                prefs.modelName.startsWith("qwen") -> prefs.apiKeyQwen
+                                                                else -> prefs.apiKey
+                                                            }
+                                                            if (key.isNotBlank()) key else mainKey
                                                         },
                                                         baseUrl = if (prefs.optimizerApiUrl.isNotBlank()) prefs.optimizerApiUrl else prefs.apiUrl,
                                                         modelName = prefs.optimizerModelName

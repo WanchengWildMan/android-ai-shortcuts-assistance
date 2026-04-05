@@ -3,6 +3,7 @@ package com.autoglm.assistant.util
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import org.json.JSONObject
 
 class PreferenceManager(context: Context) {
 
@@ -20,6 +21,8 @@ class PreferenceManager(context: Context) {
         private const val KEY_WAKE_WORD_ENABLED = "wake_word_enabled"
         private const val KEY_PORCUPINE_ACCESS_KEY = "porcupine_access_key"
         private const val KEY_WAKE_WORD_KEYWORD = "wake_word_keyword"
+        private const val KEY_CUSTOM_PPN_PATH = "custom_ppn_path"  // 用户自定义 .ppn 模型文件路径
+        private const val KEY_CUSTOM_PPN_NAME = "custom_ppn_name"  // 用户自定义 .ppn 模型文件名（显示用）
         private const val KEY_SHOW_AGENT_PROCESS = "show_agent_process"
 
         // 多引擎唤醒配置
@@ -84,6 +87,22 @@ class PreferenceManager(context: Context) {
         // Shell 设置
         private const val KEY_USE_ROOT_MODE = "use_root_mode"
 
+        // 命令 STT 模式：唤醒后用哪种方式识别语音指令
+        private const val KEY_COMMAND_STT_MODE = "command_stt_mode"
+        // STT API 类型：OPENAI / ALI_NLS / IME_VOICE
+        private const val KEY_STT_API_TYPE = "stt_api_type"
+        // OpenAI 兼容 API STT 配置
+        private const val KEY_STT_API_URL = "stt_api_url"
+        private const val KEY_STT_API_KEY = "stt_api_key"
+        private const val KEY_STT_MODEL_NAME = "stt_model_name"
+        // 阿里 NLS 一句话识别配置
+        private const val KEY_ALI_NLS_AK_ID = "ali_nls_ak_id"
+        private const val KEY_ALI_NLS_AK_SECRET = "ali_nls_ak_secret"
+        private const val KEY_ALI_NLS_APP_KEY = "ali_nls_app_key"
+        // IME 语音输入配置（通过模拟长按输入法空格键触发语音输入）
+        private const val KEY_IME_VOICE_SPACE_X = "ime_voice_space_x"
+        private const val KEY_IME_VOICE_SPACE_Y = "ime_voice_space_y"
+
         // 默认值 - BigModel API
         const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱自定义唤醒词
         const val DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4"
@@ -91,7 +110,7 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_LANGUAGE = "cn"
         const val DEFAULT_MAX_STEPS = 100  // Agent执行单个任务的总操作步数上限
         // 多引擎唤醒默认值
-        const val DEFAULT_WAKE_ENGINE_TYPE = "STT_SYSTEM"  // 默认使用免费的系统 STT
+        const val DEFAULT_WAKE_ENGINE_TYPE = "PORCUPINE"  // 默认使用 Porcupine 引擎
         const val DEFAULT_WAKE_SENSITIVITY = 0.7f
         const val DEFAULT_WAKE_GREETING_TEXT = "我在听"
         // STT 唤醒默认值
@@ -109,6 +128,17 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_OPTIMIZER_MODEL_NAME = "deepseek-chat"
         // 意图识别器默认值 - 默认使用协调器设置
         const val DEFAULT_INTENT_MODEL_NAME = "deepseek-chat"
+
+        // 命令 STT 默认值
+        const val DEFAULT_COMMAND_STT_MODE = "API"  // 默认使用 API 模式（系统 STT 在 MIUI 等 ROM 上受限）
+        const val DEFAULT_STT_API_TYPE = "ALI_NLS"  // 默认使用阿里 NLS
+        const val DEFAULT_STT_API_URL = "https://api.openai.com/v1"
+        const val DEFAULT_STT_MODEL_NAME = "whisper-1"
+        // 阿里 NLS 默认值
+        const val DEFAULT_ALI_NLS_GATEWAY = "https://nls-gateway-cn-shanghai.aliyuncs.com"
+        // IME 语音输入默认坐标（需根据设备/键盘实际调整）
+        const val DEFAULT_IME_VOICE_SPACE_X = 704
+        const val DEFAULT_IME_VOICE_SPACE_Y = 2978
     }
 
     var apiUrl: String
@@ -118,6 +148,23 @@ class PreferenceManager(context: Context) {
     var apiKey: String
         get() = prefs.getString(KEY_API_KEY, "") ?: ""
         set(value) = prefs.edit { putString(KEY_API_KEY, value) }
+
+    // Provider-specific Agent API keys
+    var apiKeyDeepseek: String
+        get() = prefs.getString("api_key_deepseek", apiKey) ?: apiKey
+        set(value) = prefs.edit { putString("api_key_deepseek", value) }
+
+    var apiKeyBigmodel: String
+        get() = prefs.getString("api_key_bigmodel", apiKey) ?: apiKey
+        set(value) = prefs.edit { putString("api_key_bigmodel", value) }
+
+    var apiKeyDoubao: String
+        get() = prefs.getString("api_key_doubao", apiKey) ?: apiKey
+        set(value) = prefs.edit { putString("api_key_doubao", value) }
+
+    var apiKeyQwen: String
+        get() = prefs.getString("api_key_qwen", apiKey) ?: apiKey
+        set(value) = prefs.edit { putString("api_key_qwen", value) }
 
     var modelName: String
         get() = prefs.getString(KEY_MODEL_NAME, DEFAULT_MODEL_NAME) ?: DEFAULT_MODEL_NAME
@@ -142,6 +189,16 @@ class PreferenceManager(context: Context) {
     var wakeWordKeyword: String
         get() = prefs.getString(KEY_WAKE_WORD_KEYWORD, DEFAULT_WAKE_WORD) ?: DEFAULT_WAKE_WORD
         set(value) = prefs.edit { putString(KEY_WAKE_WORD_KEYWORD, value) }
+
+    /** 用户自定义 .ppn 模型文件的内部存储路径（绝对路径） */
+    var customPpnPath: String
+        get() = prefs.getString(KEY_CUSTOM_PPN_PATH, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_CUSTOM_PPN_PATH, value) }
+
+    /** 用户自定义 .ppn 模型文件原始文件名（仅供设置页显示） */
+    var customPpnName: String
+        get() = prefs.getString(KEY_CUSTOM_PPN_NAME, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_CUSTOM_PPN_NAME, value) }
 
     // 多引擎唤醒配置
     var wakeEngineType: String
@@ -212,6 +269,10 @@ class PreferenceManager(context: Context) {
     var coordinatorApiKeyDoubao: String
         get() = prefs.getString(KEY_COORDINATOR_API_KEY_DOUBAO, coordinatorApiKey) ?: coordinatorApiKey
         set(value) = prefs.edit { putString(KEY_COORDINATOR_API_KEY_DOUBAO, value) }
+
+    var coordinatorApiKeyQwen: String
+        get() = prefs.getString("coordinator_api_key_qwen", coordinatorApiKey) ?: coordinatorApiKey
+        set(value) = prefs.edit { putString("coordinator_api_key_qwen", value) }
 
     var coordinatorModelName: String
         get() = prefs.getString(KEY_COORDINATOR_MODEL_NAME, DEFAULT_COORDINATOR_MODEL_NAME) ?: DEFAULT_COORDINATOR_MODEL_NAME
@@ -339,6 +400,51 @@ class PreferenceManager(context: Context) {
         get() = prefs.getBoolean(KEY_USE_ROOT_MODE, true)  // 默认开启
         set(value) = prefs.edit { putBoolean(KEY_USE_ROOT_MODE, value) }
 
+    // 唤醒后的语音识别模式：SYSTEM = 系统 SpeechRecognizer, API = AudioRecord + API
+    var commandSttMode: String
+        get() = prefs.getString(KEY_COMMAND_STT_MODE, DEFAULT_COMMAND_STT_MODE) ?: DEFAULT_COMMAND_STT_MODE
+        set(value) = prefs.edit { putString(KEY_COMMAND_STT_MODE, value) }
+
+    // STT API 类型：OPENAI = OpenAI Whisper 兼容, ALI_NLS = 阿里 NLS 一句话识别
+    var sttApiType: String
+        get() = prefs.getString(KEY_STT_API_TYPE, DEFAULT_STT_API_TYPE) ?: DEFAULT_STT_API_TYPE
+        set(value) = prefs.edit { putString(KEY_STT_API_TYPE, value) }
+
+    // OpenAI 兼容 STT 配置
+    var sttApiUrl: String
+        get() = prefs.getString(KEY_STT_API_URL, DEFAULT_STT_API_URL) ?: DEFAULT_STT_API_URL
+        set(value) = prefs.edit { putString(KEY_STT_API_URL, value) }
+
+    var sttApiKey: String
+        get() = prefs.getString(KEY_STT_API_KEY, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_STT_API_KEY, value) }
+
+    var sttModelName: String
+        get() = prefs.getString(KEY_STT_MODEL_NAME, DEFAULT_STT_MODEL_NAME) ?: DEFAULT_STT_MODEL_NAME
+        set(value) = prefs.edit { putString(KEY_STT_MODEL_NAME, value) }
+
+    // 阿里 NLS 一句话识别配置
+    var aliNlsAkId: String
+        get() = prefs.getString(KEY_ALI_NLS_AK_ID, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_ALI_NLS_AK_ID, value) }
+
+    var aliNlsAkSecret: String
+        get() = prefs.getString(KEY_ALI_NLS_AK_SECRET, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_ALI_NLS_AK_SECRET, value) }
+
+    var aliNlsAppKey: String
+        get() = prefs.getString(KEY_ALI_NLS_APP_KEY, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_ALI_NLS_APP_KEY, value) }
+
+    // IME 语音输入：模拟长按空格键的坐标（像素）
+    var imeVoiceSpaceX: Int
+        get() = prefs.getInt(KEY_IME_VOICE_SPACE_X, DEFAULT_IME_VOICE_SPACE_X)
+        set(value) = prefs.edit { putInt(KEY_IME_VOICE_SPACE_X, value) }
+
+    var imeVoiceSpaceY: Int
+        get() = prefs.getInt(KEY_IME_VOICE_SPACE_Y, DEFAULT_IME_VOICE_SPACE_Y)
+        set(value) = prefs.edit { putInt(KEY_IME_VOICE_SPACE_Y, value) }
+
     // 配置监听器注册和注销
     fun registerListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
         prefs.registerOnSharedPreferenceChangeListener(listener)
@@ -346,5 +452,68 @@ class PreferenceManager(context: Context) {
 
     fun unregisterListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
         prefs.unregisterOnSharedPreferenceChangeListener(listener)
+    }
+
+    /**
+     * 导出所有配置为 JSON 字符串
+     * 遍历 SharedPreferences 的全部条目，按类型序列化，避免遗漏任何字段
+     */
+    fun exportToJson(): String {
+        val json = JSONObject()
+        val allEntries = prefs.all
+        for ((key, value) in allEntries) {
+            when (value) {
+                is String -> json.put(key, value)
+                is Int -> json.put(key, value)
+                is Long -> json.put(key, value)
+                is Float -> json.put(key, value.toDouble())
+                is Boolean -> json.put(key, value)
+                // Set<String> 等其他类型暂不处理
+            }
+        }
+        return json.toString(2)
+    }
+
+    /**
+     * 从 JSON 字符串导入配置
+     * 逐条解析并写入 SharedPreferences，根据现有值类型推断目标类型
+     * @return 导入的配置项数量
+     */
+    fun importFromJson(jsonString: String): Int {
+        val json = JSONObject(jsonString)
+        var count = 0
+        prefs.edit {
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val value = json.get(key)
+                // 步骤1: 如果该 key 已有旧值，按旧值类型写入；否则按 JSON 值类型推断
+                val existingValue = prefs.all[key]
+                when {
+                    existingValue is Boolean || (existingValue == null && value is Boolean) ->
+                        putBoolean(key, value as Boolean)
+                    existingValue is Int || (existingValue == null && value is Int) ->
+                        putInt(key, (value as Number).toInt())
+                    existingValue is Long || (existingValue == null && value is Long) ->
+                        putLong(key, (value as Number).toLong())
+                    existingValue is Float ->
+                        putFloat(key, (value as Number).toFloat())
+                    existingValue is String || (existingValue == null && value is String) ->
+                        putString(key, value as String)
+                    // JSON 中 Number 默认为 Int/Long，Float 在 JSON 中表现为 Double
+                    value is Number && existingValue == null -> {
+                        val d = value.toDouble()
+                        if (d == d.toLong().toDouble() && d <= Int.MAX_VALUE && d >= Int.MIN_VALUE) {
+                            putInt(key, d.toInt())
+                        } else {
+                            putFloat(key, d.toFloat())
+                        }
+                    }
+                    else -> putString(key, value.toString())
+                }
+                count++
+            }
+        }
+        return count
     }
 }

@@ -109,6 +109,14 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Assistant Translucent Activity for STT -->
+        <activity
+            android:name=".voice.AssistantActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
+
     </application>
 
 </manifest>

@@ -11,31 +11,20 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 系统 STT 文本匹配唤醒引擎
+ * 系统 STT 文本匹配唤醒引擎（模仿 Operit 方案重构）
  *
- * 使用 Android 系统的 SpeechRecognizer 进行持续语音识别
- * 通过匹配识别文本中的唤醒词来触发唤醒
+ * 使用 Android 系统 SpeechRecognizer 进行持续语音识别，
+ * 同时匹配 partial 和 final 结果中的唤醒词，实现快速唤醒。
  *
- * 优点：
- * - 完全免费，无需 API Key
- * - 使用系统自带语音识别
- * - 可自定义唤醒词文本
- * - 支持正则表达式匹配
- *
- * 缺点：
- * - 需要网络连接（大多数系统 STT 需要联网）
- * - 识别延迟较高
- * - 功耗相对较高
- * - 在某些定制系统上可能不稳定
+ * 关键设计（对齐 Operit）：
+ * 1. 开启 EXTRA_PARTIAL_RESULTS → 边说边匹配，无需等说完
+ * 2. 每段识别结束后自动重建 SpeechRecognizer 并重新开始
+ * 3. 错误分级重试：权限错误→停止；其他错误→延迟重试
+ * 4. 文本归一化：去除全部标点、空格、大小写统一
  */
 class SystemSttWakeEngine(
     context: Context
@@ -43,18 +32,24 @@ class SystemSttWakeEngine(
 
     companion object {
         private const val TAG = "WakeEngine:SystemSTT"
-        private const val RESTART_DELAY_MS = 1000L
+        // 错误重试延迟（毫秒）：分级策略
+        private const val RESTART_DELAY_NORMAL_MS = 300L   // 无匹配/说话结束 → 短延迟
+        private const val RESTART_DELAY_ERROR_MS = 1500L   // 一般错误 → 中延迟
+        private const val RESTART_DELAY_BUSY_MS = 2500L    // 识别器忙 → 长延迟
+        private const val RESTART_DELAY_NETWORK_MS = 5000L // 网络错误 → 更长延迟
     }
 
     override val engineType = WakeEngine.EngineType.STT_SYSTEM
 
     private var speechRecognizer: SpeechRecognizer? = null
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val handler = Handler(Looper.getMainLooper())
+
+    // 连续重试失败计数，用于指数退避
+    private var consecutiveErrors = 0
 
     override suspend fun initialize(config: WakeEngineConfig): Boolean {
         if (config !is WakeEngineConfig.SttWakeConfig) {
-            _lastError.value = "配置类型错误"
+            _lastError.value = "配置类型错误：需要 SttWakeConfig"
             _engineState.value = WakeEngine.EngineState.ERROR
             return false
         }
@@ -64,14 +59,14 @@ class SystemSttWakeEngine(
 
         return try {
             withContext(Dispatchers.Main) {
-                checkRecognitionSupport(context)
+                checkRecognitionSupport()
             }
             currentConfig = config
             _engineState.value = WakeEngine.EngineState.READY
-            Log.i(TAG, "✅ SystemSTT 引擎初始化成功, 唤醒词: '${config.wakePhrase}'")
+            Log.i(TAG, "初始化成功, 唤醒词: '${config.wakePhrase}', 正则: ${config.regexEnabled}")
             true
         } catch (e: IllegalStateException) {
-            val errorMsg = "❌ SystemSTT 初始化失败: ${e.message}"
+            val errorMsg = "初始化失败: ${e.message}"
             _lastError.value = errorMsg
             _engineState.value = WakeEngine.EngineState.ERROR
             Log.e(TAG, errorMsg, e)
@@ -79,158 +74,258 @@ class SystemSttWakeEngine(
         }
     }
 
-    private fun checkRecognitionSupport(context: Context) {
+    /** 检查设备是否支持系统语音识别 */
+    private fun checkRecognitionSupport() {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             throw IllegalStateException(
-                "设备不支持系统语音识别服务。可能原因：1) 未安装 Google 语音服务 2) 语音服务被禁用 3) 设备不支持。"
+                "设备不支持系统语音识别。可能原因：1) 未安装 Google 语音服务 2) 语音服务被禁用"
             )
-        }
-        try {
-            SpeechRecognizer.createSpeechRecognizer(context)?.destroy()
-        } catch (e: Exception) {
-            throw IllegalStateException("无法创建语音识别器实例。", e)
         }
     }
 
     override suspend fun startListening(onWakeDetected: (confidence: Float) -> Unit) {
+        if (_engineState.value == WakeEngine.EngineState.LISTENING) {
+            Log.w(TAG, "已在监听中，忽略重复调用")
+            return
+        }
         if (_engineState.value != WakeEngine.EngineState.READY) {
-            Log.w(TAG, "⚠️ 引擎未就绪, 无法开始监听. 当前状态: ${_engineState.value}")
+            Log.w(TAG, "引擎未就绪（${_engineState.value}），无法启动监听")
             return
         }
         this.onWakeDetected = onWakeDetected
         _engineState.value = WakeEngine.EngineState.LISTENING
-        Log.i(TAG, "🚀 开始持续监听...")
+        consecutiveErrors = 0
+        Log.i(TAG, "开始持续唤醒监听...")
         startRecognitionLoop()
     }
 
+    // ==================== 识别循环核心 ====================
+
+    /**
+     * 启动识别循环。
+     * 每次创建全新 SpeechRecognizer → 启动识别 → 回调中触发下一轮。
+     * 参考 Operit 做法：每次识别段结束后销毁重建，避免系统实现差异导致的状态泄漏。
+     */
     private fun startRecognitionLoop() {
         handler.post {
+            // 步骤1: 检查是否仍在 LISTENING 状态
             if (_engineState.value != WakeEngine.EngineState.LISTENING) {
-                Log.w(TAG, "⚠️ 监听到非 LISTENING 状态，停止识别循环。")
+                Log.d(TAG, "非 LISTENING 状态，停止识别循环")
                 return@post
             }
             try {
                 startSingleRecognition()
             } catch (e: Exception) {
-                Log.e(TAG, "❌ 启动识别时发生异常", e)
-                scheduleRestart()
+                Log.e(TAG, "启动识别异常: ${e.message}", e)
+                scheduleRestart(RESTART_DELAY_ERROR_MS)
             }
         }
     }
 
+    /** 单次识别：销毁旧实例 → 创建新实例 → 启动识别 */
     private fun startSingleRecognition() {
         val config = currentConfig ?: return
 
-        // 1. 权限与可用性检查
-        if (!isServiceAvailable()) {
-            return
+        // 步骤1: 权限校验
+        if (!checkPermissions()) return
+
+        // 步骤2: 销毁旧识别器
+        try {
+            speechRecognizer?.destroy()
+        } catch (e: Exception) {
+            Log.w(TAG, "销毁旧识别器时异常: ${e.message}")
         }
 
-        // 2. 清理并创建新的识别器
-        speechRecognizer?.destroy()
+        // 步骤3: 创建新识别器并设置回调
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context.applicationContext).apply {
             setRecognitionListener(createRecognitionListener())
         }
 
-        // 3. 创建并启动 Intent
+        // 步骤4: 启动识别
         val intent = createRecognizerIntent(config)
         speechRecognizer?.startListening(intent)
-        Log.d(TAG, "🎤 已调用 startListening()")
+        Log.d(TAG, "已启动本轮识别, 唤醒词: '${config.wakePhrase}'")
     }
 
-    private fun isServiceAvailable(): Boolean {
-        if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "❌ 权限不足: RECORD_AUDIO 未被授予。")
+    /** 权限校验 */
+    private fun checkPermissions(): Boolean {
+        if (ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
             _lastError.value = "缺少 RECORD_AUDIO 权限"
             _engineState.value = WakeEngine.EngineState.ERROR
-            return false
-        }
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            Log.e(TAG, "❌ 服务不可用: SpeechRecognizer.isRecognitionAvailable() 返回 false。")
-            _lastError.value = "语音识别服务不可用"
-            _engineState.value = WakeEngine.EngineState.ERROR
+            Log.e(TAG, "权限不足: RECORD_AUDIO 未授予")
             return false
         }
         return true
     }
 
+    /**
+     * 创建识别 Intent — 关键改进点
+     * 1. EXTRA_PARTIAL_RESULTS = true → 边说边匹配
+     * 2. EXTRA_PREFER_OFFLINE = true → 降低延迟和网络依赖
+     */
     private fun createRecognizerIntent(config: WakeEngineConfig.SttWakeConfig): Intent {
         return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, config.language)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3) // 多候选提高命中率
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true) // 关键：开启 partial results
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
-            // 在某些设备上，这有助于减少网络使用和延迟
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true) // 优先离线，降低延迟
         }
     }
 
+    /**
+     * 创建识别回调（核心逻辑，对齐 Operit 流程）
+     *
+     * partial → 立即匹配唤醒词（快速触发）
+     * final   → 最终匹配 + 触发下一轮
+     * error   → 分级延迟重试
+     */
     private fun createRecognitionListener(): RecognitionListener {
         return object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
-                Log.d(TAG, "✅ 准备接收语音")
+                Log.d(TAG, "准备接收语音")
+                consecutiveErrors = 0 // 成功启动，重置错误计数
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                // 关键改进：partial 阶段即匹配唤醒词，不等说完
+                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (matches.isNullOrEmpty()) return
+                for (text in matches) {
+                    if (text.isBlank()) continue
+                    Log.d(TAG, "partial: '$text'")
+                    if (matchWakePhrase(text)) {
+                        Log.i(TAG, "唤醒词在 partial 阶段命中: '$text'")
+                        triggerWake()
+                        return
+                    }
+                }
             }
 
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
-                    val text = matches[0]
-                    Log.i(TAG, "👂 STT 识别结果: '$text'")
-                    if (matchWakePhrase(text)) {
-                        Log.i(TAG, "🎯 唤醒词匹配成功!")
-                        _engineState.value = WakeEngine.EngineState.READY // 停止循环
-                        onWakeDetected?.invoke(1.0f)
-                    } else {
-                        scheduleRestart(500) // 未匹配，短暂延迟后继续
+                    for (text in matches) {
+                        if (text.isBlank()) continue
+                        Log.d(TAG, "final: '$text'")
+                        if (matchWakePhrase(text)) {
+                            Log.i(TAG, "唤醒词在 final 阶段命中: '$text'")
+                            triggerWake()
+                            return
+                        }
                     }
-                } else {
-                    scheduleRestart() // 无结果，正常延迟后继续
                 }
+                // 未匹配，短延迟后继续下一轮
+                scheduleRestart(RESTART_DELAY_NORMAL_MS)
             }
 
             override fun onError(error: Int) {
                 val errorMsg = getErrorText(error)
-                Log.e(TAG, "识别错误: $errorMsg (code: $error)")
-                if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                    _lastError.value = "权限不足。请检查应用的 RECORD_AUDIO 权限。"
-                    _engineState.value = WakeEngine.EngineState.ERROR
-                } else {
-                    scheduleRestart()
+                Log.w(TAG, "识别错误: $errorMsg (code=$error)")
+
+                when (error) {
+                    // 致命错误：权限 → 停止
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                        _lastError.value = "RECORD_AUDIO 权限被拒绝"
+                        _engineState.value = WakeEngine.EngineState.ERROR
+                    }
+                    // 无匹配/语音超时 → 正常，短延迟继续
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                        scheduleRestart(RESTART_DELAY_NORMAL_MS)
+                    }
+                    // 识别器忙 → 较长延迟
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                        scheduleRestart(RESTART_DELAY_BUSY_MS)
+                    }
+                    // 网络错误 → 长延迟（离线模式下也可能触发）
+                    SpeechRecognizer.ERROR_NETWORK,
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+                    SpeechRecognizer.ERROR_SERVER -> {
+                        consecutiveErrors++
+                        // 指数退避，最大30秒
+                        val delay = (RESTART_DELAY_NETWORK_MS * consecutiveErrors).coerceAtMost(30_000L)
+                        Log.w(TAG, "网络相关错误，${delay}ms 后重试 (连续错误: $consecutiveErrors)")
+                        scheduleRestart(delay)
+                    }
+                    // 其他错误 → 中等延迟
+                    else -> {
+                        consecutiveErrors++
+                        val delay = (RESTART_DELAY_ERROR_MS * consecutiveErrors).coerceAtMost(10_000L)
+                        scheduleRestart(delay)
+                    }
                 }
             }
 
-            override fun onEndOfSpeech() { Log.d(TAG, "🗣️ 说话结束") }
-            override fun onBeginningOfSpeech() { Log.d(TAG, "🗣️ 开始说话") }
-            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onEndOfSpeech() { Log.d(TAG, "说话结束") }
+            override fun onBeginningOfSpeech() { Log.d(TAG, "开始说话") }
+            override fun onRmsChanged(rmsdB: Float) { /* 静默，避免日志洪水 */ }
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         }
     }
-    
-    private fun scheduleRestart(delay: Long = RESTART_DELAY_MS) {
+
+    // ==================== 唤醒触发 ====================
+
+    /** 唤醒词命中 → 停止当前识别循环 → 回调上层 */
+    private fun triggerWake() {
+        // 步骤1: 停止识别循环
+        handler.removeCallbacksAndMessages(null)
+        try {
+            speechRecognizer?.stopListening()
+            speechRecognizer?.cancel()
+        } catch (e: Exception) {
+            Log.w(TAG, "停止识别异常: ${e.message}")
+        }
+
+        // 步骤2: 状态切回 READY（上层会重新调用 startListening）
+        _engineState.value = WakeEngine.EngineState.READY
+        consecutiveErrors = 0
+
+        // 步骤3: 回调上层
+        onWakeDetected?.invoke(1.0f)
+    }
+
+    // ==================== 生命周期 ====================
+
+    private fun scheduleRestart(delay: Long) {
         handler.postDelayed({
-            startRecognitionLoop()
+            if (_engineState.value == WakeEngine.EngineState.LISTENING) {
+                startRecognitionLoop()
+            }
         }, delay)
     }
 
     override suspend fun stopListening() {
         withContext(Dispatchers.Main) {
-            handler.removeCallbacksAndMessages(null) // 取消所有待处理的重启任务
+            handler.removeCallbacksAndMessages(null)
             _engineState.value = WakeEngine.EngineState.READY
-            speechRecognizer?.stopListening()
-            speechRecognizer?.cancel()
-            Log.i(TAG, "🛑 停止监听")
+            try {
+                speechRecognizer?.stopListening()
+                speechRecognizer?.cancel()
+            } catch (e: Exception) {
+                Log.w(TAG, "停止监听异常: ${e.message}")
+            }
+            consecutiveErrors = 0
+            Log.i(TAG, "停止监听")
         }
     }
 
     override fun release() {
         handler.removeCallbacksAndMessages(null)
-        speechRecognizer?.destroy()
+        try {
+            speechRecognizer?.destroy()
+        } catch (e: Exception) {
+            Log.w(TAG, "释放识别器异常: ${e.message}")
+        }
         speechRecognizer = null
+        consecutiveErrors = 0
         super.release()
-        Log.i(TAG, "🧹 释放所有资源")
+        Log.i(TAG, "释放所有资源")
     }
 
     private fun getErrorText(errorCode: Int): String {
@@ -244,7 +339,7 @@ class SystemSttWakeEngine(
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别器忙"
             SpeechRecognizer.ERROR_SERVER -> "服务器错误"
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "语音超时"
-            else -> "未知错误"
+            else -> "未知错误($errorCode)"
         }
     }
 }

@@ -129,14 +129,25 @@ class PersonalTemplateWakeEngine(private val context: Context) : WakeEngine {
     override suspend fun stopListening() {
         Log.i(TAG, "停止监听")
         _engineState.value = WakeEngine.EngineState.READY
-        job?.cancel()
+        val j = job
         job = null
+        if (j != null) {
+            j.cancel()
+            j.join()
+        }
+        try { audioRecord?.stop() } catch (e: Exception) {}
+        try { audioRecord?.release() } catch (e: Exception) {}
+        audioRecord = null
     }
 
     override fun release() {
         Log.i(TAG, "释放引擎资源")
         _engineState.value = WakeEngine.EngineState.UNINITIALIZED
-        job?.cancel()
+        val j = job
+        if (j != null) {
+            j.cancel()
+            runBlocking { j.join() }
+        }
         job = null
         stopAudio()
     }
