@@ -146,6 +146,9 @@ class PreferenceManager(context: Context) {
         set(value) = prefs.edit { putString(KEY_API_URL, value) }
 
     var apiKey: String
+        get() = prefs.getString(KEY_API_KEY, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_API_KEY, value) }
+
     // Provider-specific Agent API keys
     var apiKeyDeepseek: String
         get() = prefs.getString("api_key_deepseek", apiKey) ?: apiKey
@@ -162,9 +165,6 @@ class PreferenceManager(context: Context) {
     var apiKeyQwen: String
         get() = prefs.getString("api_key_qwen", apiKey) ?: apiKey
         set(value) = prefs.edit { putString("api_key_qwen", value) }
-
-        get() = prefs.getString(KEY_API_KEY, "") ?: ""
-        set(value) = prefs.edit { putString(KEY_API_KEY, value) }
 
     var modelName: String
         get() = prefs.getString(KEY_MODEL_NAME, DEFAULT_MODEL_NAME) ?: DEFAULT_MODEL_NAME
