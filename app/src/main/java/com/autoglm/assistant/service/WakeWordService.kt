@@ -262,9 +262,16 @@ class WakeWordService : Service() {
     private fun initializePhoneAgent() {
         val prefs = App.instance.preferenceManager
 
+        val mainKey = when {
+            prefs.modelName.startsWith("deepseek") -> prefs.apiKeyDeepseek
+            prefs.modelName.startsWith("glm-") -> prefs.apiKeyBigmodel
+            prefs.modelName.startsWith("doubao") -> prefs.apiKeyDoubao
+            prefs.modelName.startsWith("qwen") -> prefs.apiKeyQwen
+            else -> prefs.apiKey
+        }
         val modelConfig = ModelConfig(
             baseUrl = prefs.apiUrl,
-            apiKey = prefs.apiKey,
+            apiKey = mainKey,
             modelName = prefs.modelName
         )
 

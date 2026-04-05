@@ -52,7 +52,7 @@ abstract class SttWakeEngine(
         val matched = if (config.regexEnabled) {
             // 正则匹配
             try {
-                val regex = Regex(wakePhrase, setOf(RegexOption.IGNORE_CASE))
+                val regex = Regex(wakePhrase, RegexOption.IGNORE_CASE)
                 regex.containsMatchIn(normalized)
             } catch (e: Exception) {
                 Log.w(TAG, "正则表达式错误: ${e.message}")
@@ -72,15 +72,15 @@ abstract class SttWakeEngine(
     }
 
     /**
-     * 文本归一化
-     * 移除标点符号、多余空格，统一大小写
+     * 文本归一化（对齐 Operit normalizeWakeText 方案）
+     * 去除全部标点、空格、特殊字符，统一小写
+     * 目的：最大化匹配容忍度，避免标点差异导致漏匹配
      */
     private fun normalizeText(text: String): String {
+        // 去除所有非字母数字和CJK字符，对齐 Operit 的 normalizeWakeText
         return text
-            .replace(Regex("""[，。！？、；：""''（）《》【】\s]+"""), " ")
-            .replace(Regex("""[,\.!?;:"'()[]\s]+"""), " ")
-            .trim()
             .lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}]"), "")
     }
 
     override fun release() {

@@ -16,6 +16,7 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.slideInHorizontally
@@ -39,7 +40,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import com.autoglm.assistant.util.PreferenceManager
 import androidx.core.content.ContextCompat
 import com.autoglm.assistant.App
 import com.autoglm.assistant.service.WakeWordService
@@ -72,17 +80,23 @@ class MainActivity : ComponentActivity() {
 
     private var wakeWordService: WakeWordService? = null
     private var serviceBound = false
+    // 步骤: 用 Compose State 追踪服务绑定状态，确保绑定完成后触发重组
+    private val _serviceConnected = mutableStateOf(false)
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            android.util.Log.d("AutoGLM", "=== MainActivity.onServiceConnected ===")
             val binder = service as WakeWordService.LocalBinder
             wakeWordService = binder.getService()
             serviceBound = true
+            _serviceConnected.value = true
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            android.util.Log.d("AutoGLM", "=== MainActivity.onServiceDisconnected ===")
             wakeWordService = null
             serviceBound = false
+            _serviceConnected.value = false
         }
     }
 
@@ -110,6 +124,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContent {
+            // 读取 _serviceConnected 以便服务绑定后触发 recomposition
+            val isConnected = _serviceConnected.value
+            android.util.Log.d("AutoGLM", "=== MainActivity.setContent recomposing, isConnected=$isConnected ===")
+            val currentService = if (isConnected) wakeWordService else null
             AutoGLMAssistantTheme {
                 MainScreen(
                     onStartService = { startServiceWithPermissions() },
@@ -118,13 +136,80 @@ class MainActivity : ComponentActivity() {
                     onRequestScreenCapture = { requestScreenCapturePermission() },
                     onExecuteTask = { task, enablePlanning, enableOptimizer, messages -> executeTask(task, enablePlanning, enableOptimizer, messages) },
                     onStopTask = { stopCurrentTask() },
-                    getServiceState = { wakeWordService?.serviceState },
-                    getLastRecognizedText = { wakeWordService?.lastRecognizedText },
-                    getAgentMessage = { wakeWordService?.agentMessage },
-                    getCoordinatorMessage = { wakeWordService?.coordinatorMessage },
-                    getLastWakeWordError = { wakeWordService?.lastWakeWordError }
+                    getServiceState = { currentService?.serviceState },
+                    getLastRecognizedText = { currentService?.lastRecognizedText },
+                    getAgentMessage = { currentService?.agentMessage },
+                    getCoordinatorMessage = { currentService?.coordinatorMessage },
+                    getLastWakeWordError = { currentService?.lastWakeWordError },
+                    getActiveEngineType = { currentService?.activeEngineType }
                 )
             }
+        }
+
+        // 步骤A: 应用启动时主动请求核心权限（麦克风 + 通知）
+        requestCorePermissionsOnLaunch()
+
+        // 步骤B: 如果语音唤醒已启用且权限已授予，自动启动服务
+        autoStartServiceIfEnabled()
+    }
+
+    /**
+     * 应用启动时主动检查并请求核心权限
+     * 业务目的：确保用户在进入功能之前就授予了麦克风等关键权限，避免后续流程中静默失败
+     */
+    private fun requestCorePermissionsOnLaunch() {
+        val needed = mutableListOf<String>()
+
+        // 1. 麦克风权限 — 唤醒词引擎和语音识别都依赖
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.RECORD_AUDIO)
+        }
+
+        // 2. 通知权限 — Android 13+ 前台服务通知必需
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        if (needed.isNotEmpty()) {
+            android.util.Log.i("AutoGLM_START", "应用启动，主动申请权限: $needed")
+            requestPermissionLauncher.launch(needed.toTypedArray())
+        }
+    }
+
+    /**
+     * 自动启动语音唤醒服务
+     * 条件：设置中已开启语音唤醒 + 已拥有麦克风权限 + 有悬浮窗权限
+     */
+    private fun autoStartServiceIfEnabled() {
+        val prefs = App.instance.preferenceManager
+        if (!prefs.wakeWordEnabled) return
+
+        // 检查必要权限是否已授予（不弹窗，静默检查）
+        val hasMicPermission = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        val hasOverlayPermission = Settings.canDrawOverlays(this)
+
+        if (hasMicPermission && hasOverlayPermission) {
+            android.util.Log.i("AutoGLM", "=== 语音唤醒已开启，自动启动服务 ===")
+            val serviceIntent = Intent(this, WakeWordService::class.java).apply {
+                putExtra("START_WAKE_WORD", true)
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "自动启动服务失败: ${e.message}", e)
+            }
+        } else {
+            android.util.Log.w("AutoGLM", "=== 语音唤醒已开启但权限不足（mic=$hasMicPermission, overlay=$hasOverlayPermission），跳过自动启动 ===")
         }
     }
 
@@ -133,11 +218,14 @@ class MainActivity : ComponentActivity() {
         // 步骤: 仅在尚未绑定时绑定服务
         // 任务执行期间 onStop 会跳过解绑，此时 serviceBound 仍为 true，无需重复绑定
         if (!serviceBound) {
+            android.util.Log.d("AutoGLM", "=== MainActivity.onStart: Binding service... ===")
             bindService(
                 Intent(this, WakeWordService::class.java),
                 serviceConnection,
                 Context.BIND_AUTO_CREATE
             )
+        } else {
+            android.util.Log.d("AutoGLM", "=== MainActivity.onStart: Service already bound. ===")
         }
     }
 
@@ -160,6 +248,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startServiceWithPermissions() {
+        android.util.Log.d("AutoGLM_START", "startServiceWithPermissions called")
         val permissions = mutableListOf(
             Manifest.permission.RECORD_AUDIO
         )
@@ -180,11 +269,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startWakeWordService() {
-        // 步骤1: 检查悬浮窗权限
+        android.util.Log.d("AutoGLM_START", "startWakeWordService called")
+        // 步骤1: 如果有悬浮窗权限则允许展示原有外层窗体，这里不再强制 return 阻塞
         if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "请授予悬浮窗权限", Toast.LENGTH_LONG).show()
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-            return
+            android.util.Log.w("AutoGLM_START", "No overlay permission. The app can still listen inside, but floating UI will fallback or not show outside.")
         }
 
         // 步骤2: 检查并请求电池优化豁免
@@ -206,8 +294,10 @@ class MainActivity : ComponentActivity() {
         }
 
         // 步骤3: 启动语音唤醒服务（需要麦克风权限）
+        val wakeWordEnabled = App.instance.preferenceManager.wakeWordEnabled
+        android.util.Log.d("AutoGLM_START", "startWakeWordService preparing intent, wakeWordEnabled=$wakeWordEnabled")
         val serviceIntent = Intent(this, WakeWordService::class.java).apply {
-            putExtra("START_WAKE_WORD", App.instance.preferenceManager.wakeWordEnabled)
+            putExtra("START_WAKE_WORD", wakeWordEnabled)
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -227,7 +317,15 @@ class MainActivity : ComponentActivity() {
 
     // 步骤3: 执行任务方法 - 默认参数仅作为兜底，实际调用都会传入明确的值
     private fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, messages: List<ChatMessage> = emptyList()) {
-        // 步骤3.0: 检查电池优化设置
+        // 步骤3.0: 检查并请求通知权限（Android 13+）
+        // 业务目的：确保后台执行任务时通知栏可见，让用户知道服务在运行
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            }
+        }
+
+        // 步骤3.1: 检查电池优化设置
         // 业务目的：在执行任务前提醒用户关闭电池优化，避免任务被系统中断
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
@@ -237,7 +335,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         
-        // 步骤3.1: 确保服务以前台服务方式运行
+        // 步骤3.2: 确保服务以前台服务方式运行
         // 业务目的：防止 Activity 切后台（onStop→unbindService）时服务因仅通过 BIND_AUTO_CREATE 创建而被销毁
         // 仅通过 bindService 创建的服务，在所有客户端解绑后会被系统销毁；
         // 通过 startForegroundService 启动的服务，即使解绑也会继续运行
@@ -365,7 +463,8 @@ fun MainScreen(
     getLastRecognizedText: () -> kotlinx.coroutines.flow.StateFlow<String>?,
     getAgentMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.AgentMessage?>?,
     getCoordinatorMessage: () -> kotlinx.coroutines.flow.StateFlow<WakeWordService.CoordinatorMessage?>?,
-    getLastWakeWordError: () -> kotlinx.coroutines.flow.StateFlow<String?>? = { null }
+    getLastWakeWordError: () -> kotlinx.coroutines.flow.StateFlow<String?>? = { null },
+    getActiveEngineType: () -> kotlinx.coroutines.flow.StateFlow<com.autoglm.assistant.voice.wake.WakeEngine.EngineType?>? = { null }
 ) {
     val conversations = remember { mutableStateListOf<Conversation>() }
     var currentConversation by remember { mutableStateOf<Conversation?>(null) }
@@ -379,7 +478,11 @@ fun MainScreen(
     // 从实际服务状态派生运行状态，避免UI与服务不同步
     val isServiceRunning = serviceState?.value != null &&
         serviceState?.value != WakeWordService.ServiceState.IDLE
+        
+    android.util.Log.d("AutoGLM_START", "MainScreen recompose: serviceState=${serviceState?.value}, isServiceRunning=$isServiceRunning")
+    
     val wakeWordError = getLastWakeWordError()?.collectAsState()
+    val activeEngine = getActiveEngineType()?.collectAsState()
 
     // Coordinator消息状态
     var lastCoordinatorContent by remember { mutableStateOf<String?>(null) }
@@ -893,64 +996,99 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // Status & Controls Bar
+            // 唤醒状态卡片 — 醒目展示当前唤醒引擎状态
+            val errorText = wakeWordError?.value
+            val engineLabel = when (activeEngine?.value) {
+                com.autoglm.assistant.voice.wake.WakeEngine.EngineType.PORCUPINE -> "Porcupine"
+                com.autoglm.assistant.voice.wake.WakeEngine.EngineType.STT_SYSTEM -> "系统 STT"
+                else -> null
+            }
+
             Surface(
                 tonalElevation = 2.dp,
-                color = MaterialTheme.colorScheme.surface
+                color = when {
+                    errorText != null -> MaterialTheme.colorScheme.errorContainer
+                    serviceState?.value == WakeWordService.ServiceState.LISTENING_WAKE_WORD -> MaterialTheme.colorScheme.primaryContainer
+                    serviceState?.value == WakeWordService.ServiceState.EXECUTING_TASK -> MaterialTheme.colorScheme.secondaryContainer
+                    else -> MaterialTheme.colorScheme.surface
+                }
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {
-                    // 状态指示器（唤醒词错误优先展示）
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        val errorText = wakeWordError?.value
-                        val (icon, color, text) = if (errorText != null) {
-                            Triple(Icons.Default.Warning, MaterialTheme.colorScheme.error, errorText.take(25))
-                        } else when (serviceState?.value) {
-                            WakeWordService.ServiceState.LISTENING_WAKE_WORD -> Triple(Icons.Default.Mic, MaterialTheme.colorScheme.primary, "正在监听唤醒词")
-                            WakeWordService.ServiceState.LISTENING_COMMAND -> Triple(Icons.Default.RecordVoiceOver, MaterialTheme.colorScheme.tertiary, "正在监听指令")
-                            WakeWordService.ServiceState.EXECUTING_TASK -> Triple(Icons.Default.PlayArrow, MaterialTheme.colorScheme.secondary, "正在执行")
-                            WakeWordService.ServiceState.PROCESSING -> Triple(Icons.Default.Pending, MaterialTheme.colorScheme.primary, "正在处理")
-                            else -> Triple(Icons.Default.PowerSettingsNew, MaterialTheme.colorScheme.outline, "空闲")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        // 左侧：状态图标 + 主状态文字
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            val (icon, color, statusText) = when {
+                                errorText != null -> Triple(Icons.Default.Warning, MaterialTheme.colorScheme.error, "唤醒异常")
+                                serviceState?.value == WakeWordService.ServiceState.LISTENING_WAKE_WORD ->
+                                    Triple(Icons.Default.Mic, MaterialTheme.colorScheme.primary, "正在监听")
+                                serviceState?.value == WakeWordService.ServiceState.LISTENING_COMMAND ->
+                                    Triple(Icons.Default.RecordVoiceOver, MaterialTheme.colorScheme.tertiary, "监听指令")
+                                serviceState?.value == WakeWordService.ServiceState.EXECUTING_TASK ->
+                                    Triple(Icons.Default.PlayArrow, MaterialTheme.colorScheme.secondary, "执行中")
+                                serviceState?.value == WakeWordService.ServiceState.PROCESSING ->
+                                    Triple(Icons.Default.Pending, MaterialTheme.colorScheme.primary, "处理中")
+                                else -> Triple(Icons.Default.PowerSettingsNew, MaterialTheme.colorScheme.outline, "语音唤醒未启动")
+                            }
+
+                            Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    statusText,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = color
+                                )
+                                if (engineLabel != null && errorText == null) {
+                                    Text(
+                                        "引擎: $engineLabel",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
-                        
-                        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(text, style = MaterialTheme.typography.labelLarge, color = color)
+
+                        // 右侧：控制按钮
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            FilledTonalIconButton(
+                                onClick = {
+                                    android.util.Log.d("AutoGLM_START", "Button clicked! isServiceRunning=$isServiceRunning")
+                                    if (isServiceRunning) onStopService() else onStartService()
+                                },
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = if (isServiceRunning) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = if (isServiceRunning) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = if (isServiceRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                    contentDescription = if (isServiceRunning) "停止" else "启动"
+                                )
+                            }
+                        }
                     }
 
-                    // 控制按钮
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        IconButton(onClick = onRequestScreenCapture) {
-                            Icon(
-                                Icons.Default.ScreenShare,
-                                contentDescription = "屏幕权限",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-
-                        FilledTonalIconButton(
-                            onClick = {
-                        if (isServiceRunning) {
-                            onStopService()
-                        } else {
-                            onStartService()
-                        }
-                            },
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = if (isServiceRunning) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
-                                contentColor = if (isServiceRunning) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        ) {
-                            Icon(
-                                imageVector = if (isServiceRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                                contentDescription = if (isServiceRunning) "停止" else "启动"
-                            )
-                        }
+                    // 错误信息详情（有错误时展示完整内容）
+                    if (errorText != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            errorText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 3,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
@@ -1099,6 +1237,21 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalWakeWordKeyword = remember { prefs.wakeWordKeyword }
     val originalWakeEngineType = remember { prefs.wakeEngineType }
     val originalSttWakePhrase = remember { prefs.sttWakePhrase }
+    val originalCommandSttMode = remember { prefs.commandSttMode }
+    val originalSttApiType = remember { prefs.sttApiType }
+    val originalSttApiUrl = remember { prefs.sttApiUrl }
+    val originalSttApiKey = remember { prefs.sttApiKey }
+    val originalSttModelName = remember { prefs.sttModelName }
+    val originalAliNlsAkId = remember { prefs.aliNlsAkId }
+    val originalAliNlsAkSecret = remember { prefs.aliNlsAkSecret }
+    val originalAliNlsAppKey = remember { prefs.aliNlsAppKey }
+    val originalImeVoiceSpaceX = remember { prefs.imeVoiceSpaceX.toString() }
+    val originalImeVoiceSpaceY = remember { prefs.imeVoiceSpaceY.toString() }
+    val originalLockScreenPassword = remember {
+        com.autoglm.assistant.util.SecureStorage.getDecrypted(
+            context, com.autoglm.assistant.util.ScreenUnlocker.SECURE_KEY_LOCK_PASSWORD
+        )
+    }
     val originalMaxSteps = remember { prefs.maxSteps.toString() }
     val originalLanguage = remember { prefs.language }
     val originalShowAgentProcess = remember { prefs.showAgentProcess }
@@ -1111,6 +1264,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
             model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
             model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+            model.startsWith("qwen") -> prefs.coordinatorApiKeyQwen
             else -> prefs.coordinatorApiKey
         }
     }
@@ -1152,7 +1306,20 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalIntentModelName = remember { prefs.intentModelName }
 
     var apiUrl by remember { mutableStateOf(TextFieldValue(prefs.apiUrl)) }
-    var apiKey by remember { mutableStateOf(TextFieldValue(prefs.apiKey)) }
+    var apiKey by remember {
+        val model = prefs.modelName
+        mutableStateOf(
+            TextFieldValue(
+                when {
+                    model.startsWith("deepseek") -> prefs.apiKeyDeepseek
+                    model.startsWith("glm-") -> prefs.apiKeyBigmodel
+                    model.startsWith("doubao") -> prefs.apiKeyDoubao
+                    model.startsWith("qwen") -> prefs.apiKeyQwen
+                    else -> prefs.apiKey
+                }
+            )
+        )
+    }
     var modelName by remember { mutableStateOf(TextFieldValue(prefs.modelName)) }
     // Agent API URL 下拉选择状态
     var apiUrlDropdownExpanded by remember { mutableStateOf(false) }
@@ -1165,7 +1332,117 @@ fun SettingsScreen(onBack: () -> Unit) {
     var wakeWordDropdownExpanded by remember { mutableStateOf(false) }
     var wakeEngineType by remember { mutableStateOf(prefs.wakeEngineType) }
     var wakeEngineDropdownExpanded by remember { mutableStateOf(false) }
+    // 自定义 ppn 模型文件状态
+    var customPpnName by remember { mutableStateOf(prefs.customPpnName) }
+    var customPpnPath by remember { mutableStateOf(prefs.customPpnPath) }
+    // ppn 文件选择器
+    val ppnFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: android.net.Uri? ->
+        if (uri != null) {
+            try {
+                // 步骤1: 读取用户选择的 ppn 文件
+                val inputStream = context.contentResolver.openInputStream(uri)
+                val fileName = run {
+                    val cursor = context.contentResolver.query(uri, null, null, null, null)
+                    cursor?.use { c ->
+                        if (c.moveToFirst()) {
+                            val nameIndex = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                            if (nameIndex >= 0) c.getString(nameIndex) else null
+                        } else null
+                    }
+                } ?: "custom_wake_word.ppn"
+
+                // 步骤2: 复制到应用内部存储
+                val destFile = java.io.File(context.filesDir, "custom_ppn/$fileName")
+                destFile.parentFile?.mkdirs()
+                inputStream?.use { input ->
+                    destFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                // 步骤3: 保存路径到 preferences
+                customPpnName = fileName
+                customPpnPath = destFile.absolutePath
+                wakeWordKeyword = "CUSTOM"  // 自动切换到自定义模型
+
+                android.util.Log.i("AutoGLM", "自定义 ppn 模型已导入: $fileName -> ${destFile.absolutePath}")
+                android.widget.Toast.makeText(context, "模型文件已导入: $fileName", android.widget.Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "导入 ppn 文件失败: ${e.message}", e)
+                android.widget.Toast.makeText(context, "导入失败: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // ===== 配置导入/导出文件选择器 =====
+    // 导出：将所有 SharedPreferences 序列化为 JSON 写入用户选择的文件
+    val exportFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: android.net.Uri? ->
+        if (uri != null) {
+            try {
+                val jsonString = prefs.exportToJson()
+                context.contentResolver.openOutputStream(uri)?.use { output ->
+                    output.write(jsonString.toByteArray(Charsets.UTF_8))
+                }
+                Toast.makeText(context, if (prefs.language == "cn") "配置已导出" else "Config exported", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "导出配置失败: ${e.message}", e)
+                Toast.makeText(context, if (prefs.language == "cn") "导出失败: ${e.message}" else "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+    // 导入：从用户选择的 JSON 文件读取配置并写入 SharedPreferences，然后重建页面
+    val importFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: android.net.Uri? ->
+        if (uri != null) {
+            try {
+                val jsonString = context.contentResolver.openInputStream(uri)?.use { input ->
+                    input.bufferedReader(Charsets.UTF_8).readText()
+                } ?: throw IllegalStateException("无法读取文件")
+                val count = prefs.importFromJson(jsonString)
+                Toast.makeText(
+                    context,
+                    if (prefs.language == "cn") "已导入 $count 项配置，页面即将刷新" else "Imported $count items, refreshing...",
+                    Toast.LENGTH_SHORT
+                ).show()
+                // 重建 Activity 以刷新所有 remember 状态
+                (context as? Activity)?.recreate()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "导入配置失败: ${e.message}", e)
+                Toast.makeText(context, if (prefs.language == "cn") "导入失败: ${e.message}" else "Import failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     var sttWakePhrase by remember { mutableStateOf(TextFieldValue(prefs.sttWakePhrase)) }
+    // 唤醒后语音识别模式配置
+    var commandSttMode by remember { mutableStateOf(prefs.commandSttMode) }
+    var commandSttModeDropdownExpanded by remember { mutableStateOf(false) }
+    var sttApiType by remember { mutableStateOf(prefs.sttApiType) }
+    var sttApiTypeDropdownExpanded by remember { mutableStateOf(false) }
+    var sttApiUrl by remember { mutableStateOf(TextFieldValue(prefs.sttApiUrl)) }
+    var sttApiKey by remember { mutableStateOf(TextFieldValue(prefs.sttApiKey)) }
+    var sttModelName by remember { mutableStateOf(TextFieldValue(prefs.sttModelName)) }
+    // 阿里 NLS 配置
+    var aliNlsAkId by remember { mutableStateOf(TextFieldValue(prefs.aliNlsAkId)) }
+    var aliNlsAkSecret by remember { mutableStateOf(TextFieldValue(prefs.aliNlsAkSecret)) }
+    var aliNlsAppKey by remember { mutableStateOf(TextFieldValue(prefs.aliNlsAppKey)) }
+    // IME 语音输入坐标配置
+    var imeVoiceSpaceX by remember { mutableStateOf(TextFieldValue(prefs.imeVoiceSpaceX.toString())) }
+    var imeVoiceSpaceY by remember { mutableStateOf(TextFieldValue(prefs.imeVoiceSpaceY.toString())) }
+    // 息屏唤醒 — 锁屏密码（加密存储，初始化时解密读取）
+    var lockScreenPassword by remember {
+        mutableStateOf(TextFieldValue(
+            com.autoglm.assistant.util.SecureStorage.getDecrypted(
+                context, com.autoglm.assistant.util.ScreenUnlocker.SECURE_KEY_LOCK_PASSWORD
+            )
+        ))
+    }
+    var lockPasswordVisible by remember { mutableStateOf(false) }
     var maxSteps by remember { mutableStateOf(TextFieldValue(prefs.maxSteps.toString())) }
     var language by remember { mutableStateOf(prefs.language) }
     var showAgentProcess by remember { mutableStateOf(prefs.showAgentProcess) }
@@ -1180,6 +1457,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
                     model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
                     model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
+                    model.startsWith("qwen") -> prefs.coordinatorApiKeyQwen
                     else -> prefs.coordinatorApiKey
                 }
             )
@@ -1255,6 +1533,17 @@ fun SettingsScreen(onBack: () -> Unit) {
             wakeWordKeyword != originalWakeWordKeyword ||
             wakeEngineType != originalWakeEngineType ||
             sttWakePhrase.text != originalSttWakePhrase ||
+            commandSttMode != originalCommandSttMode ||
+            sttApiType != originalSttApiType ||
+            sttApiUrl.text != originalSttApiUrl ||
+            sttApiKey.text != originalSttApiKey ||
+            sttModelName.text != originalSttModelName ||
+            aliNlsAkId.text != originalAliNlsAkId ||
+            aliNlsAkSecret.text != originalAliNlsAkSecret ||
+            aliNlsAppKey.text != originalAliNlsAppKey ||
+            imeVoiceSpaceX.text != originalImeVoiceSpaceX ||
+            imeVoiceSpaceY.text != originalImeVoiceSpaceY ||
+            lockScreenPassword.text != originalLockScreenPassword ||
             maxSteps.text != originalMaxSteps ||
             language != originalLanguage ||
             showAgentProcess != originalShowAgentProcess ||
@@ -1281,9 +1570,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             intentApiKey.text != originalIntentApiKey ||
             intentModelName.text != originalIntentModelName
 
-    // Available wake words
+    // Available wake words（含自定义模型选项）
     val availableWakeWords = listOf(
         "XIAOAI" to "小爱",
+        "CUSTOM" to "自定义模型",
         "PORCUPINE" to "Porcupine",
         "ALEXA" to "Alexa",
         "AMERICANO" to "Americano",
@@ -1367,15 +1657,6 @@ fun SettingsScreen(onBack: () -> Unit) {
         val cancelBtn = if (isChinese) "取消" else "Cancel"
     }
 
-    // Handle system back button
-    androidx.activity.compose.BackHandler(enabled = true) {
-        if (hasChanges) {
-            showExitDialog = true
-        } else {
-            onBack()
-        }
-    }
-
     // Save function
     val saveSettings = {
         // 检测关键配置是否变化（影响 Agent/Coordinator/Optimizer）
@@ -1409,13 +1690,40 @@ fun SettingsScreen(onBack: () -> Unit) {
 
         // 保存所有设置
         prefs.apiUrl = apiUrl.text
-        prefs.apiKey = apiKey.text
+        // Save Agent API key to provider-specific slot
+        when {
+            modelName.text.startsWith("deepseek") -> prefs.apiKeyDeepseek = apiKey.text
+            modelName.text.startsWith("glm-") -> prefs.apiKeyBigmodel = apiKey.text
+            modelName.text.startsWith("doubao") -> prefs.apiKeyDoubao = apiKey.text
+            modelName.text.startsWith("qwen") -> prefs.apiKeyQwen = apiKey.text
+            else -> prefs.apiKey = apiKey.text
+        }
         prefs.modelName = modelName.text
         prefs.agentSystemPrompt = agentSystemPrompt.text
         prefs.wakeEngineType = wakeEngineType
         prefs.porcupineAccessKey = porcupineKey.text
         prefs.wakeWordKeyword = wakeWordKeyword
+        prefs.customPpnPath = customPpnPath
+        prefs.customPpnName = customPpnName
         prefs.sttWakePhrase = sttWakePhrase.text
+        // 唤醒后语音识别模式配置
+        prefs.commandSttMode = commandSttMode
+        prefs.sttApiType = sttApiType
+        prefs.sttApiUrl = sttApiUrl.text
+        prefs.sttApiKey = sttApiKey.text
+        prefs.sttModelName = sttModelName.text
+        // 阿里 NLS 配置
+        prefs.aliNlsAkId = aliNlsAkId.text
+        prefs.aliNlsAkSecret = aliNlsAkSecret.text
+        prefs.aliNlsAppKey = aliNlsAppKey.text
+        // IME 语音坐标
+        prefs.imeVoiceSpaceX = imeVoiceSpaceX.text.toIntOrNull() ?: PreferenceManager.DEFAULT_IME_VOICE_SPACE_X
+        prefs.imeVoiceSpaceY = imeVoiceSpaceY.text.toIntOrNull() ?: PreferenceManager.DEFAULT_IME_VOICE_SPACE_Y
+        // 锁屏密码 → 加密存储（不经过普通 SharedPreferences）
+        com.autoglm.assistant.util.SecureStorage.putEncrypted(
+            context, com.autoglm.assistant.util.ScreenUnlocker.SECURE_KEY_LOCK_PASSWORD,
+            lockScreenPassword.text
+        )
         prefs.maxSteps = maxSteps.text.toIntOrNull() ?: 100
         prefs.language = language
         prefs.showAgentProcess = showAgentProcess
@@ -1427,6 +1735,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             coordinatorModelName.text.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey.text
             coordinatorModelName.text.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey.text
             coordinatorModelName.text.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey.text
+            coordinatorModelName.text.startsWith("qwen") -> prefs.coordinatorApiKeyQwen = coordinatorApiKey.text
             else -> prefs.coordinatorApiKey = coordinatorApiKey.text
         }
         prefs.coordinatorSystemPrompt = coordinatorSystemPrompt.text
@@ -1482,19 +1791,44 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
 
+    // Handle system back button — 始终弹出确认+变更列表
+    androidx.activity.compose.BackHandler(enabled = true) {
+        showExitDialog = true
+
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(strings.title) },
                 navigationIcon = {
                     IconButton(onClick = {
-                        if (hasChanges) {
-                            showExitDialog = true
-                        } else {
-                            onBack()
-                        }
+                        // 步骤1: 始终弹出确认对话框，无论是否有变更
+                        showExitDialog = true
                     }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    // 导入配置：从 JSON 文件加载配置
+                    TextButton(onClick = {
+                        importFileLauncher.launch("application/json")
+                    }) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (isChinese) "导入" else "Import", fontSize = 12.sp)
+                    }
+                    // 导出配置：保存当前配置为 JSON 文件
+                    TextButton(onClick = {
+                        // 先将当前界面编辑保存到 SharedPreferences，再触发文件选择
+                        saveSettings()
+                        val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                            .format(java.util.Date())
+                        exportFileLauncher.launch("autoglm_config_$timestamp.json")
+                    }) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (isChinese) "导出" else "Export", fontSize = 12.sp)
                     }
                 }
             )
@@ -1561,13 +1895,62 @@ fun SettingsScreen(onBack: () -> Unit) {
                 singleLine = true
             )
 
+            val agentModels = listOf(
+                "deepseek-chat" to "DeepSeek",
+                "glm-4-plus" to "智谱 GLM-4",
+                "doubao-pro-32k" to "豆包 Doubao",
+                "qwen-max" to "通义千问"
+            )
+
             OutlinedTextField(
                 value = modelName,
                 onValueChange = { modelName = it },
                 label = { Text(strings.modelNameLabel) },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                supportingText = { Text(if (isChinese) "可输入任意模型名称" else "Enter any model name") }
             )
+
+            // 快捷选择按钮
+            Text(
+                text = if (isChinese) "快捷选择：" else "Quick select:",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                agentModels.forEach { (model, displayName) ->
+                    FilterChip(
+                        selected = modelName.text == model,
+                        onClick = {
+                            modelName = TextFieldValue(model)
+                            // Auto-switch Agent API URL based on selected model
+                            apiUrl = when {
+                                model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
+                                model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
+                                model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
+                                model.startsWith("qwen") -> TextFieldValue("https://dashscope.aliyuncs.com/compatible-mode/v1")
+                                else -> apiUrl
+                            }
+                            // Auto-switch Agent API Key based on selected model
+                            apiKey = when {
+                                model.startsWith("deepseek") -> TextFieldValue(prefs.apiKeyDeepseek)
+                                model.startsWith("glm-") -> TextFieldValue(prefs.apiKeyBigmodel)
+                                model.startsWith("doubao") -> TextFieldValue(prefs.apiKeyDoubao)
+                                model.startsWith("qwen") -> TextFieldValue(prefs.apiKeyQwen)
+                                else -> apiKey
+                            }
+                        },
+                        label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+            }
 
             // Agent 从 /models API 获取模型列表
             val agentCoroutineScope = rememberCoroutineScope()
@@ -1792,6 +2175,43 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
             }
 
+            // 自定义模型上传区域（当选择"自定义模型"时显示）
+            if (wakeEngineType == "PORCUPINE" && wakeWordKeyword == "CUSTOM") {
+                // 显示当前自定义模型文件信息
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            if (isChinese) "自定义唤醒词模型" else "Custom Wake Word Model",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        if (customPpnName.isNotBlank()) {
+                            Text(
+                                "${if (isChinese) "当前模型" else "Current"}: $customPpnName",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Button(
+                            onClick = { ppnFileLauncher.launch("*/*") },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Upload, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(if (isChinese) "选择 .ppn 模型文件" else "Select .ppn Model File")
+                        }
+                        Text(
+                            if (isChinese) "从 Picovoice Console 训练并下载的 .ppn 文件" else "Upload .ppn file trained from Picovoice Console",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
             // STT 配置（仅在选择 STT_SYSTEM 时显示）
             if (wakeEngineType == "STT_SYSTEM") {
                 OutlinedTextField(
@@ -1803,6 +2223,282 @@ fun SettingsScreen(onBack: () -> Unit) {
                     supportingText = { Text(if (isChinese) "使用系统 STT 时的唤醒词（免费，无需 API Key）" else "Wake phrase for System STT (free, no API key required)") }
                 )
             }
+
+            Divider()
+
+            // ─── 唤醒后语音识别配置 ───
+            Text(
+                if (isChinese) "语音识别设置" else "Speech Recognition Settings",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            // STT 模式下拉选择
+            ExposedDropdownMenuBox(
+                expanded = commandSttModeDropdownExpanded,
+                onExpandedChange = { commandSttModeDropdownExpanded = it }
+            ) {
+                OutlinedTextField(
+                    value = when (commandSttMode) {
+                        "API" -> if (isChinese) "API 模式 (AudioRecord + Whisper)" else "API Mode (AudioRecord + Whisper)"
+                        "SYSTEM" -> if (isChinese) "系统模式 (SpeechRecognizer)" else "System Mode (SpeechRecognizer)"
+                        else -> commandSttMode
+                    },
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text(if (isChinese) "语音识别模式" else "STT Mode") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = commandSttModeDropdownExpanded) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor(),
+                    supportingText = { Text(if (isChinese) "唤醒后用哪种方式进行语音识别" else "How to recognize speech after wake word") }
+                )
+                ExposedDropdownMenu(
+                    expanded = commandSttModeDropdownExpanded,
+                    onDismissRequest = { commandSttModeDropdownExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(if (isChinese) "API 模式" else "API Mode")
+                                Text(
+                                    if (isChinese) "直接录音 + OpenAI Whisper 兼容 API，MIUI 等定制 ROM 推荐" else "Direct recording + OpenAI Whisper API, recommended for MIUI",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        onClick = {
+                            commandSttMode = "API"
+                            commandSttModeDropdownExpanded = false
+                        },
+                        leadingIcon = if (commandSttMode == "API") {
+                            { Icon(Icons.Default.Check, contentDescription = null) }
+                        } else null
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(if (isChinese) "系统模式" else "System Mode")
+                                Text(
+                                    if (isChinese) "使用系统 SpeechRecognizer，免费但部分 ROM 受限" else "Uses system SpeechRecognizer, free but limited on some ROMs",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        onClick = {
+                            commandSttMode = "SYSTEM"
+                            commandSttModeDropdownExpanded = false
+                        },
+                        leadingIcon = if (commandSttMode == "SYSTEM") {
+                            { Icon(Icons.Default.Check, contentDescription = null) }
+                        } else null
+                    )
+                }
+            }
+
+            // API 模式配置（仅在选择 API 时显示）
+            if (commandSttMode == "API") {
+
+                // STT API 类型选择
+                ExposedDropdownMenuBox(
+                    expanded = sttApiTypeDropdownExpanded,
+                    onExpandedChange = { sttApiTypeDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = when (sttApiType) {
+                            "ALI_NLS" -> if (isChinese) "阿里云 NLS 一句话识别" else "Alibaba Cloud NLS"
+                            "OPENAI" -> if (isChinese) "OpenAI Whisper 兼容" else "OpenAI Whisper Compatible"
+                            "IME_VOICE" -> if (isChinese) "输入法语音（豆包等）" else "IME Voice (Doubao etc.)"
+                            else -> sttApiType
+                        },
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text(if (isChinese) "STT 服务商" else "STT Provider") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = sttApiTypeDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(),
+                        supportingText = { Text(if (isChinese) "选择语音识别 API 服务商" else "Select STT API provider") }
+                    )
+                    ExposedDropdownMenu(
+                        expanded = sttApiTypeDropdownExpanded,
+                        onDismissRequest = { sttApiTypeDropdownExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(if (isChinese) "阿里云 NLS" else "Alibaba Cloud NLS")
+                                    Text(
+                                        if (isChinese) "一句话识别，国内网络推荐" else "One-sentence recognition, recommended in China",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            onClick = {
+                                sttApiType = "ALI_NLS"
+                                sttApiTypeDropdownExpanded = false
+                            },
+                            leadingIcon = if (sttApiType == "ALI_NLS") {
+                                { Icon(Icons.Default.Check, contentDescription = null) }
+                            } else null
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(if (isChinese) "OpenAI Whisper 兼容" else "OpenAI Whisper Compatible")
+                                    Text(
+                                        if (isChinese) "支持 Whisper、SenseVoice 等兼容端点" else "Supports Whisper, SenseVoice compatible endpoints",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            onClick = {
+                                sttApiType = "OPENAI"
+                                sttApiTypeDropdownExpanded = false
+                            },
+                            leadingIcon = if (sttApiType == "OPENAI") {
+                                { Icon(Icons.Default.Check, contentDescription = null) }
+                            } else null
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(if (isChinese) "输入法语音（豆包等）" else "IME Voice (Doubao etc.)")
+                                    Text(
+                                        if (isChinese) "通过点击说话/点击终止按钮触发输入法语音（豆包键盘），免费" else "Triggers IME voice via click-to-speak / click-to-stop (e.g. Doubao keyboard), free",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            onClick = {
+                                sttApiType = "IME_VOICE"
+                                sttApiTypeDropdownExpanded = false
+                            },
+                            leadingIcon = if (sttApiType == "IME_VOICE") {
+                                { Icon(Icons.Default.Check, contentDescription = null) }
+                            } else null
+                        )
+                    }
+                }
+
+                // IME 语音配置（仅在选择 IME_VOICE 时显示）
+                if (sttApiType == "IME_VOICE") {
+                    OutlinedTextField(
+                        value = imeVoiceSpaceX,
+                        onValueChange = { imeVoiceSpaceX = it },
+                        label = { Text(if (isChinese) "空格键 X 坐标" else "Space Bar X") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        supportingText = { Text(if (isChinese) "输入法空格键中心的屏幕 X 坐标（像素）" else "Screen X coordinate of space bar center (px)") }
+                    )
+                    OutlinedTextField(
+                        value = imeVoiceSpaceY,
+                        onValueChange = { imeVoiceSpaceY = it },
+                        label = { Text(if (isChinese) "空格键 Y 坐标" else "Space Bar Y") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        supportingText = { Text(if (isChinese) "输入法空格键中心的屏幕 Y 坐标（像素）" else "Screen Y coordinate of space bar center (px)") }
+                    )
+                }
+
+                // 阿里 NLS 配置（仅在选择 ALI_NLS 时显示）
+                if (sttApiType == "ALI_NLS") {
+                    OutlinedTextField(
+                        value = aliNlsAkId,
+                        onValueChange = { aliNlsAkId = it },
+                        label = { Text("AccessKey ID") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        supportingText = { Text(if (isChinese) "阿里云 AccessKey ID" else "Alibaba Cloud AccessKey ID") }
+                    )
+                    OutlinedTextField(
+                        value = aliNlsAkSecret,
+                        onValueChange = { aliNlsAkSecret = it },
+                        label = { Text("AccessKey Secret") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        visualTransformation = if (aliNlsAkSecret.text.length > 8)
+                            PasswordVisualTransformation() else VisualTransformation.None,
+                        supportingText = { Text(if (isChinese) "阿里云 AccessKey Secret" else "Alibaba Cloud AccessKey Secret") }
+                    )
+                    OutlinedTextField(
+                        value = aliNlsAppKey,
+                        onValueChange = { aliNlsAppKey = it },
+                        label = { Text("AppKey") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        supportingText = { Text(if (isChinese) "NLS 应用 AppKey（从控制台获取）" else "NLS Application AppKey (from console)") }
+                    )
+                }
+
+                // OpenAI 兼容 API 配置（仅在选择 OPENAI 时显示）
+                if (sttApiType == "OPENAI") {
+                    OutlinedTextField(
+                        value = sttApiUrl,
+                        onValueChange = { sttApiUrl = it },
+                        label = { Text(if (isChinese) "STT API 地址" else "STT API URL") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        supportingText = { Text(if (isChinese) "OpenAI 兼容的语音识别 API 基础地址" else "OpenAI-compatible STT API base URL") }
+                    )
+                    OutlinedTextField(
+                        value = sttApiKey,
+                        onValueChange = { sttApiKey = it },
+                        label = { Text("API Key") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        visualTransformation = if (sttApiKey.text.length > 8)
+                            PasswordVisualTransformation() else VisualTransformation.None,
+                        supportingText = { Text(if (isChinese) "语音识别服务的 API Key" else "API Key for STT service") }
+                    )
+                    OutlinedTextField(
+                        value = sttModelName,
+                        onValueChange = { sttModelName = it },
+                        label = { Text(if (isChinese) "STT 模型名称" else "STT Model Name") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        supportingText = { Text(if (isChinese) "如 whisper-1、FunAudioLLM/SenseVoiceSmall 等" else "e.g. whisper-1, FunAudioLLM/SenseVoiceSmall") }
+                    )
+                }
+            }
+
+            Divider()
+
+            // ─── 息屏唤醒设置 ───
+            Text(
+                if (isChinese) "息屏唤醒设置" else "Screen-off Wake Settings",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            OutlinedTextField(
+                value = lockScreenPassword,
+                onValueChange = { lockScreenPassword = it },
+                label = { Text(if (isChinese) "锁屏密码/PIN" else "Lock Screen Password/PIN") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = if (lockPasswordVisible)
+                    VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { lockPasswordVisible = !lockPasswordVisible }) {
+                        Icon(
+                            if (lockPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = null
+                        )
+                    }
+                },
+                supportingText = {
+                    Text(
+                        if (isChinese)
+                            "息屏唤醒时自动解锁用，使用 Android Keystore 硬件加密存储，其他应用无法读取"
+                        else
+                            "Used for auto-unlock on screen-off wake, encrypted with Android Keystore"
+                    )
+                }
+            )
 
             Divider()
 
@@ -1950,6 +2646,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 "deepseek-chat" to "DeepSeek Chat",
                 "glm-4-plus" to "智谱 GLM-4 Plus",
                 "glm-4" to "智谱 GLM-4",
+                "qwen-max" to "通义千问",
                 "doubao-seed-1-6-251015" to "豆包 Seed 1.6"
             )
 
@@ -1987,6 +2684,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
                                 model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
                                 model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
+                                model.startsWith("qwen") -> TextFieldValue("https://dashscope.aliyuncs.com/compatible-mode/v1")
                                 else -> coordinatorApiUrl
                             }
                             // Auto-switch Coordinator API Key based on selected model
@@ -1994,6 +2692,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 model.startsWith("deepseek") -> TextFieldValue(prefs.coordinatorApiKeyDeepseek)
                                 model.startsWith("glm-") -> TextFieldValue(prefs.coordinatorApiKeyBigmodel)
                                 model.startsWith("doubao") -> TextFieldValue(prefs.coordinatorApiKeyDoubao)
+                                model.startsWith("qwen") -> TextFieldValue(prefs.coordinatorApiKeyQwen)
                                 else -> coordinatorApiKey
                             }
                         },
@@ -2959,12 +3658,69 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
 
-    // Exit confirmation dialog
+    // Exit confirmation dialog — 显示具体变更项
     if (showExitDialog) {
+        // 构建变更列表
+        val changedItems = buildList {
+            if (apiUrl.text != originalApiUrl) add("API URL")
+            if (apiKey.text != originalApiKey) add("API Key")
+            if (modelName.text != originalModelName) add(if (isChinese) "模型名称" else "Model Name")
+            if (agentSystemPrompt.text != originalAgentSystemPrompt) add(if (isChinese) "Agent 系统提示词" else "Agent System Prompt")
+            if (wakeEngineType != originalWakeEngineType) add(if (isChinese) "唤醒引擎" else "Wake Engine")
+            if (porcupineKey.text != originalPorcupineKey) add("Porcupine Key")
+            if (wakeWordKeyword != originalWakeWordKeyword) add(if (isChinese) "唤醒词" else "Wake Word")
+            if (sttWakePhrase.text != originalSttWakePhrase) add(if (isChinese) "STT 唤醒词" else "STT Wake Phrase")
+            if (commandSttMode != originalCommandSttMode) add(if (isChinese) "语音识别模式" else "STT Mode")
+            if (sttApiType != originalSttApiType) add(if (isChinese) "STT 服务商" else "STT Provider")
+            if (sttApiUrl.text != originalSttApiUrl) add("STT API URL")
+            if (sttApiKey.text != originalSttApiKey) add("STT API Key")
+            if (sttModelName.text != originalSttModelName) add(if (isChinese) "STT 模型" else "STT Model")
+            if (aliNlsAkId.text != originalAliNlsAkId) add("NLS AccessKey ID")
+            if (aliNlsAkSecret.text != originalAliNlsAkSecret) add("NLS AccessKey Secret")
+            if (aliNlsAppKey.text != originalAliNlsAppKey) add("NLS AppKey")
+            if (imeVoiceSpaceX.text != originalImeVoiceSpaceX) add(if (isChinese) "IME 语音坐标X" else "IME Voice X")
+            if (imeVoiceSpaceY.text != originalImeVoiceSpaceY) add(if (isChinese) "IME 语音坐标Y" else "IME Voice Y")
+            if (lockScreenPassword.text != originalLockScreenPassword) add(if (isChinese) "锁屏密码" else "Lock Password")
+            if (maxSteps.text != originalMaxSteps) add(if (isChinese) "最大步数" else "Max Steps")
+            if (language != originalLanguage) add(if (isChinese) "语言" else "Language")
+            if (showAgentProcess != originalShowAgentProcess) add(if (isChinese) "显示执行过程" else "Show Process")
+            if (smartCoordinatorEnabled != originalSmartCoordinatorEnabled) add(if (isChinese) "智能协调器" else "Smart Coordinator")
+            if (coordinatorApiUrl.text != originalCoordinatorApiUrl) add(if (isChinese) "协调器 API URL" else "Coordinator API URL")
+            if (coordinatorApiKey.text != originalCoordinatorApiKey) add(if (isChinese) "协调器 API Key" else "Coordinator API Key")
+            if (coordinatorModelName.text != originalCoordinatorModelName) add(if (isChinese) "协调器模型" else "Coordinator Model")
+            if (coordinatorEnableVision != originalCoordinatorEnableVision) add("Vision")
+            if (coordinatorEnableThinking != originalCoordinatorEnableThinking) add(if (isChinese) "模型思考" else "Thinking")
+            if (coordinatorSystemPrompt.text != originalCoordinatorSystemPrompt) add(if (isChinese) "协调器提示词" else "Coordinator Prompt")
+            if (supervisionEnabled != originalSupervisionEnabled) add(if (isChinese) "执行监督" else "Supervision")
+            if (promptOptimizerEnabled != originalPromptOptimizerEnabled) add(if (isChinese) "提示词优化器" else "Prompt Optimizer")
+            if (optimizerApiUrl.text != originalOptimizerApiUrl) add(if (isChinese) "优化器 API URL" else "Optimizer API URL")
+            if (optimizerApiKey.text != originalOptimizerApiKey) add(if (isChinese) "优化器 API Key" else "Optimizer API Key")
+            if (optimizerModelName.text != originalOptimizerModelName) add(if (isChinese) "优化器模型" else "Optimizer Model")
+            if (intentRecognizerEnabled != originalIntentRecognizerEnabled) add(if (isChinese) "意图识别" else "Intent Recognition")
+            if (intentApiUrl.text != originalIntentApiUrl) add(if (isChinese) "识别器 API URL" else "Recognizer API URL")
+            if (intentApiKey.text != originalIntentApiKey) add(if (isChinese) "识别器 API Key" else "Recognizer API Key")
+            if (intentModelName.text != originalIntentModelName) add(if (isChinese) "识别器模型" else "Recognizer Model")
+        }
+        val changesSummary = if (changedItems.isNotEmpty()) {
+            changedItems.joinToString("\n") { "• $it" }
+        } else {
+            if (isChinese) "（未检测到具体变更）" else "(No specific changes detected)"
+        }
+
         AlertDialog(
             onDismissRequest = { showExitDialog = false },
-            title = { Text(strings.unsavedChanges) },
-            text = { Text(strings.unsavedChangesMsg) },
+            title = { Text(if (isChinese) "以下设置已修改" else "Settings Changed") },
+            text = {
+                Column {
+                    Text(changesSummary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        if (isChinese) "是否保存？" else "Save changes?",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
                     saveSettings()
