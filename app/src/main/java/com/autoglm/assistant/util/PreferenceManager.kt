@@ -146,9 +146,6 @@ class PreferenceManager(context: Context) {
         set(value) = prefs.edit { putString(KEY_API_URL, value) }
 
     var apiKey: String
-        get() = prefs.getString(KEY_API_KEY, "") ?: ""
-        set(value) = prefs.edit { putString(KEY_API_KEY, value) }
-
     // Provider-specific Agent API keys
     var apiKeyDeepseek: String
         get() = prefs.getString("api_key_deepseek", apiKey) ?: apiKey
@@ -165,6 +162,9 @@ class PreferenceManager(context: Context) {
     var apiKeyQwen: String
         get() = prefs.getString("api_key_qwen", apiKey) ?: apiKey
         set(value) = prefs.edit { putString("api_key_qwen", value) }
+
+        get() = prefs.getString(KEY_API_KEY, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_API_KEY, value) }
 
     var modelName: String
         get() = prefs.getString(KEY_MODEL_NAME, DEFAULT_MODEL_NAME) ?: DEFAULT_MODEL_NAME
@@ -269,10 +269,6 @@ class PreferenceManager(context: Context) {
     var coordinatorApiKeyDoubao: String
         get() = prefs.getString(KEY_COORDINATOR_API_KEY_DOUBAO, coordinatorApiKey) ?: coordinatorApiKey
         set(value) = prefs.edit { putString(KEY_COORDINATOR_API_KEY_DOUBAO, value) }
-
-    var coordinatorApiKeyQwen: String
-        get() = prefs.getString("coordinator_api_key_qwen", coordinatorApiKey) ?: coordinatorApiKey
-        set(value) = prefs.edit { putString("coordinator_api_key_qwen", value) }
 
     var coordinatorModelName: String
         get() = prefs.getString(KEY_COORDINATOR_MODEL_NAME, DEFAULT_COORDINATOR_MODEL_NAME) ?: DEFAULT_COORDINATOR_MODEL_NAME

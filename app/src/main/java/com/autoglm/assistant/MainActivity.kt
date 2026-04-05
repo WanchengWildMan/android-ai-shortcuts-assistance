@@ -1264,7 +1264,6 @@ fun SettingsScreen(onBack: () -> Unit) {
             model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
             model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
             model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
-            model.startsWith("qwen") -> prefs.coordinatorApiKeyQwen
             else -> prefs.coordinatorApiKey
         }
     }
@@ -1306,20 +1305,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalIntentModelName = remember { prefs.intentModelName }
 
     var apiUrl by remember { mutableStateOf(TextFieldValue(prefs.apiUrl)) }
-    var apiKey by remember {
-        val model = prefs.modelName
-        mutableStateOf(
-            TextFieldValue(
-                when {
-                    model.startsWith("deepseek") -> prefs.apiKeyDeepseek
-                    model.startsWith("glm-") -> prefs.apiKeyBigmodel
-                    model.startsWith("doubao") -> prefs.apiKeyDoubao
-                    model.startsWith("qwen") -> prefs.apiKeyQwen
-                    else -> prefs.apiKey
-                }
-            )
-        )
-    }
+    var apiKey by remember { mutableStateOf(TextFieldValue(prefs.apiKey)) }
     var modelName by remember { mutableStateOf(TextFieldValue(prefs.modelName)) }
     // Agent API URL 下拉选择状态
     var apiUrlDropdownExpanded by remember { mutableStateOf(false) }
@@ -1457,7 +1443,6 @@ fun SettingsScreen(onBack: () -> Unit) {
                     model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
                     model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
                     model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
-                    model.startsWith("qwen") -> prefs.coordinatorApiKeyQwen
                     else -> prefs.coordinatorApiKey
                 }
             )
@@ -1690,14 +1675,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
         // 保存所有设置
         prefs.apiUrl = apiUrl.text
-        // Save Agent API key to provider-specific slot
-        when {
-            modelName.text.startsWith("deepseek") -> prefs.apiKeyDeepseek = apiKey.text
-            modelName.text.startsWith("glm-") -> prefs.apiKeyBigmodel = apiKey.text
-            modelName.text.startsWith("doubao") -> prefs.apiKeyDoubao = apiKey.text
-            modelName.text.startsWith("qwen") -> prefs.apiKeyQwen = apiKey.text
-            else -> prefs.apiKey = apiKey.text
-        }
+        prefs.apiKey = apiKey.text
         prefs.modelName = modelName.text
         prefs.agentSystemPrompt = agentSystemPrompt.text
         prefs.wakeEngineType = wakeEngineType
@@ -1735,7 +1713,6 @@ fun SettingsScreen(onBack: () -> Unit) {
             coordinatorModelName.text.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey.text
             coordinatorModelName.text.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey.text
             coordinatorModelName.text.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey.text
-            coordinatorModelName.text.startsWith("qwen") -> prefs.coordinatorApiKeyQwen = coordinatorApiKey.text
             else -> prefs.coordinatorApiKey = coordinatorApiKey.text
         }
         prefs.coordinatorSystemPrompt = coordinatorSystemPrompt.text
@@ -1791,10 +1768,13 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
 
-    // Handle system back button — 始终弹出确认+变更列表
+    // Handle system back button — 有变更时弹出确认+变更列表
     androidx.activity.compose.BackHandler(enabled = true) {
-        showExitDialog = true
-
+        if (hasChanges) {
+            showExitDialog = true
+        } else {
+            onBack()
+        }
     }
 
     Scaffold(
@@ -1803,8 +1783,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                 title = { Text(strings.title) },
                 navigationIcon = {
                     IconButton(onClick = {
-                        // 步骤1: 始终弹出确认对话框，无论是否有变更
-                        showExitDialog = true
+                        if (hasChanges) {
+                            showExitDialog = true
+                        } else {
+                            onBack()
+                        }
                     }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
@@ -1895,62 +1878,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                 singleLine = true
             )
 
-            val agentModels = listOf(
-                "deepseek-chat" to "DeepSeek",
-                "glm-4-plus" to "智谱 GLM-4",
-                "doubao-pro-32k" to "豆包 Doubao",
-                "qwen-max" to "通义千问"
-            )
-
             OutlinedTextField(
                 value = modelName,
                 onValueChange = { modelName = it },
                 label = { Text(strings.modelNameLabel) },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = { Text(if (isChinese) "可输入任意模型名称" else "Enter any model name") }
+                singleLine = true
             )
-
-            // 快捷选择按钮
-            Text(
-                text = if (isChinese) "快捷选择：" else "Quick select:",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(bottom = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                agentModels.forEach { (model, displayName) ->
-                    FilterChip(
-                        selected = modelName.text == model,
-                        onClick = {
-                            modelName = TextFieldValue(model)
-                            // Auto-switch Agent API URL based on selected model
-                            apiUrl = when {
-                                model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
-                                model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
-                                model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
-                                model.startsWith("qwen") -> TextFieldValue("https://dashscope.aliyuncs.com/compatible-mode/v1")
-                                else -> apiUrl
-                            }
-                            // Auto-switch Agent API Key based on selected model
-                            apiKey = when {
-                                model.startsWith("deepseek") -> TextFieldValue(prefs.apiKeyDeepseek)
-                                model.startsWith("glm-") -> TextFieldValue(prefs.apiKeyBigmodel)
-                                model.startsWith("doubao") -> TextFieldValue(prefs.apiKeyDoubao)
-                                model.startsWith("qwen") -> TextFieldValue(prefs.apiKeyQwen)
-                                else -> apiKey
-                            }
-                        },
-                        label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
-                    )
-                }
-            }
 
             // Agent 从 /models API 获取模型列表
             val agentCoroutineScope = rememberCoroutineScope()
@@ -2368,7 +2302,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 Column {
                                     Text(if (isChinese) "输入法语音（豆包等）" else "IME Voice (Doubao etc.)")
                                     Text(
-                                        if (isChinese) "通过点击说话/点击终止按钮触发输入法语音（豆包键盘），免费" else "Triggers IME voice via click-to-speak / click-to-stop (e.g. Doubao keyboard), free",
+                                        if (isChinese) "通过模拟长按空格键触发输入法语音，免费" else "Triggers IME voice via simulated long-press on space bar, free",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -2646,7 +2580,6 @@ fun SettingsScreen(onBack: () -> Unit) {
                 "deepseek-chat" to "DeepSeek Chat",
                 "glm-4-plus" to "智谱 GLM-4 Plus",
                 "glm-4" to "智谱 GLM-4",
-                "qwen-max" to "通义千问",
                 "doubao-seed-1-6-251015" to "豆包 Seed 1.6"
             )
 
@@ -2684,7 +2617,6 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
                                 model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
                                 model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
-                                model.startsWith("qwen") -> TextFieldValue("https://dashscope.aliyuncs.com/compatible-mode/v1")
                                 else -> coordinatorApiUrl
                             }
                             // Auto-switch Coordinator API Key based on selected model
@@ -2692,7 +2624,6 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 model.startsWith("deepseek") -> TextFieldValue(prefs.coordinatorApiKeyDeepseek)
                                 model.startsWith("glm-") -> TextFieldValue(prefs.coordinatorApiKeyBigmodel)
                                 model.startsWith("doubao") -> TextFieldValue(prefs.coordinatorApiKeyDoubao)
-                                model.startsWith("qwen") -> TextFieldValue(prefs.coordinatorApiKeyQwen)
                                 else -> coordinatorApiKey
                             }
                         },
