@@ -16,7 +16,8 @@ data class ShortcutData(
     val prompt: String,  // Use {paramName} for parameters, e.g. "帮我点一份{食物}"
     val iconName: String = "Star",
     val colorHex: Long = 0xFF64B5F6,
-    val enablePlanning: Boolean = true  // Whether to use planner for this shortcut
+    val enablePlanning: Boolean = true,  // Whether to use planner for this shortcut
+    val description: String = ""  // 可选备注，用于描述指令用途，供意图识别参考
 ) {
     // Check if this shortcut has parameters
     fun hasParameters(): Boolean = PARAM_PATTERN.containsMatchIn(prompt)

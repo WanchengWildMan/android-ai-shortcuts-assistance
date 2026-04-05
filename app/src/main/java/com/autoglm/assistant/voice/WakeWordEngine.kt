@@ -10,6 +10,17 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
+/**
+ * @deprecated 已废弃，请使用 com.autoglm.assistant.voice.wake.WakeEngineManager
+ * 和 com.autoglm.assistant.voice.wake.PorcupineWakeEngine
+ */
+@Deprecated(
+    message = "使用新的多引擎架构: WakeEngineManager + PorcupineWakeEngine",
+    replaceWith = ReplaceWith(
+        "WakeEngineManager",
+        "com.autoglm.assistant.voice.wake.WakeEngineManager"
+    )
+)
 class WakeWordEngine(
     private val context: Context,
     private val accessKey: String
@@ -84,7 +95,13 @@ class WakeWordEngine(
     }
 
     fun startListening() {
-        if (_isListening.value || porcupine == null) {
+        if (_isListening.value) return
+        if (porcupine == null) {
+            // 步骤1: 引擎未初始化时通知错误，而非静默返回
+            val errorMsg = "唤醒词引擎未初始化，无法开始监听"
+            _lastError.value = errorMsg
+            onError?.invoke(errorMsg)
+            android.util.Log.e("WakeWordEngine", errorMsg)
             return
         }
 

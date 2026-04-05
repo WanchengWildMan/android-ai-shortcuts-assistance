@@ -12,7 +12,8 @@ import kotlinx.coroutines.withTimeout
  * 帮助UI Agent更好地理解和执行任务
  */
 class PromptOptimizer(
-    private val modelConfig: ModelConfig
+    private val modelConfig: ModelConfig,
+    private val customSystemPrompt: String = ""
 ) {
     private val client = ModelClient(modelConfig)
 
@@ -39,7 +40,14 @@ class PromptOptimizer(
         onOptimizing?.invoke()
 
         try {
-            val systemPrompt = if (language == "en") SYSTEM_PROMPT_EN else SYSTEM_PROMPT_CN
+            // 步骤1: 选择系统提示词 — 优先使用自定义提示词，否则按语言选择内置默认
+            val systemPrompt = if (customSystemPrompt.isNotBlank()) {
+                customSystemPrompt
+            } else if (language == "en") {
+                SYSTEM_PROMPT_EN
+            } else {
+                SYSTEM_PROMPT_CN
+            }
             val userMessage = buildUserPrompt(userPrompt, language, conversationContext)
 
             val messages = listOf(
@@ -111,28 +119,129 @@ class PromptOptimizer(
             }
         } else ""
 
-        return if (language == "en") {
-            """
-Please optimize this user instruction for a phone automation agent:
-$contextSection
-User instruction: "$userPrompt"
+        val key = if (language == "en") com.autoglm.assistant.ai.PromptKey.OPTIMIZER_USER_EN
+                  else com.autoglm.assistant.ai.PromptKey.OPTIMIZER_USER_CN
+        return com.autoglm.assistant.ai.PromptRegistry.get(key, mapOf(
+            "context_section" to contextSection,
+            "user_prompt" to userPrompt
+        ))
+    }
 
-If the instruction references previous context (like "continue", "same thing", etc.), interpret it based on the conversation history.
-Provide a clear, specific, and actionable task description.
+    /**
+     * 优化用户干预指令
+     * 结合原始任务和已执行步骤上下文，将用户的干预纠正指令优化为清晰的任务调整描述
+     * @param interventionInstruction 用户输入的干预指令
+     * @param originalTask 原始任务描述
+     * @param executionHistory 已执行步骤的对话历史（role, content）
+     * @param language 语言 cn/en
+     * @return 优化后的干预指令，失败则返回原始指令
+     */
+    suspend fun optimizeIntervention(
+        interventionInstruction: String,
+        originalTask: String,
+        executionHistory: List<Pair<String, String>>,
+        language: String = "cn"
+    ): String {
+        Logger.i(Logger.AGENT, "========== INTERVENTION OPTIMIZER: START ==========")
+        Logger.i(Logger.AGENT, "Original task: $originalTask")
+        Logger.i(Logger.AGENT, "Intervention: $interventionInstruction")
+        Logger.i(Logger.AGENT, "Execution history size: ${executionHistory.size}")
+        Logger.startTimer("intervention_optimization")
 
-IMPORTANT: Output ONLY the final optimized instruction. Do NOT include any thinking process, analysis, or explanations.
-            """.trimIndent()
+        onOptimizing?.invoke()
+
+        try {
+            // 步骤1: 选择系统提示词（复用任务优化器的系统提示词）
+            val systemPrompt = if (customSystemPrompt.isNotBlank()) {
+                customSystemPrompt
+            } else if (language == "en") {
+                SYSTEM_PROMPT_EN
+            } else {
+                SYSTEM_PROMPT_CN
+            }
+
+            // 步骤2: 从执行历史中提取摘要（取最近的assistant回复，提取action部分）
+            val executionSummary = buildExecutionSummary(executionHistory, language)
+
+            // 步骤3: 构建干预优化用户提示词
+            val key = if (language == "en") com.autoglm.assistant.ai.PromptKey.INTERVENTION_USER_EN
+                      else com.autoglm.assistant.ai.PromptKey.INTERVENTION_USER_CN
+            val userMessage = com.autoglm.assistant.ai.PromptRegistry.get(key, mapOf(
+                "original_task" to originalTask,
+                "execution_summary" to executionSummary,
+                "intervention_instruction" to interventionInstruction
+            ))
+
+            val messages = listOf(
+                Message.System(systemPrompt),
+                Message.User(userMessage)
+            )
+
+            Logger.i(Logger.AGENT, "Calling optimizer for intervention: ${modelConfig.modelName}")
+
+            val response = withTimeout(30000L) {
+                client.chat(messages, object : ModelClient.StreamCallback {
+                    override fun onToken(token: String) {
+                        onStreamToken?.invoke(token)
+                    }
+                    override fun onThinkingComplete(thinking: String) {
+                        Logger.d(Logger.AGENT, "[INTERVENTION_OPT] Thinking: ${thinking.take(100)}...")
+                    }
+                    override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
+                        Logger.i(Logger.AGENT, "[INTERVENTION_OPT] Complete in ${response.totalTime}ms")
+                    }
+                    override fun onError(error: String) {
+                        Logger.e(Logger.AGENT, "[INTERVENTION_OPT] Error: $error")
+                    }
+                })
+            }
+
+            val rawContent = response.rawContent.trim()
+            val optimized = stripThinkingTags(rawContent)
+            val time = Logger.endTimer("intervention_optimization", Logger.AGENT)
+            Logger.i(Logger.AGENT, "Optimized intervention (${time}ms): $optimized")
+            Logger.i(Logger.AGENT, "========== INTERVENTION OPTIMIZER: END ==========")
+
+            if (optimized.isBlank() || optimized.length < interventionInstruction.length / 2) {
+                Logger.w(Logger.AGENT, "Optimized intervention too short, using original")
+                onOptimized?.invoke(interventionInstruction)
+                return interventionInstruction
+            }
+
+            onOptimized?.invoke(optimized)
+            return optimized
+
+        } catch (e: Exception) {
+            Logger.e(Logger.AGENT, "Intervention optimization failed, using original", e)
+            Logger.endTimer("intervention_optimization", Logger.AGENT)
+            return interventionInstruction
+        }
+    }
+
+    /**
+     * 从执行历史中提取简要步骤摘要（供干预优化使用）
+     * 提取最近的 assistant 回复中的 action 信息，避免摘要过长
+     */
+    private fun buildExecutionSummary(executionHistory: List<Pair<String, String>>, language: String): String {
+        if (executionHistory.isEmpty()) {
+            return if (language == "en") "No steps executed yet." else "尚未执行任何步骤。"
+        }
+
+        // 取最近8条 assistant 的回复，提取 <answer> 标签中的 action
+        val recentActions = executionHistory
+            .filter { it.first == "assistant" }
+            .takeLast(8)
+            .mapIndexedNotNull { index, (_, content) ->
+                val answerMatch = Regex("<answer>(.*?)</answer>", RegexOption.DOT_MATCHES_ALL)
+                    .find(content)
+                val action = answerMatch?.groupValues?.get(1)?.trim() ?: content.take(100)
+                "步骤${index + 1}: $action"
+            }
+
+        return if (recentActions.isEmpty()) {
+            if (language == "en") "No steps executed yet." else "尚未执行任何步骤。"
         } else {
-            """
-请优化以下用户指令，使其更适合手机自动化Agent执行：
-$contextSection
-用户指令："$userPrompt"
-
-如果指令引用了之前的上下文（如"继续"、"再来一次"等），请根据对话历史来理解其含义。
-请提供清晰、具体、可执行的任务描述。
-
-重要：只输出最终的优化指令，不要包含任何思考过程、分析或解释。
-            """.trimIndent()
+            recentActions.joinToString("\n")
         }
     }
 
@@ -212,7 +321,6 @@ $contextSection
     }
 
     private fun buildSummaryPrompt(originalTask: String, language: String, conversationContext: List<Pair<String, String>>): String {
-        // 只取最近的对话上下文（避免太长）
         val recentContext = conversationContext.takeLast(10).joinToString("\n\n") { (role, content) ->
             val roleLabel = if (language == "en") {
                 if (role == "user") "User" else "Assistant"
@@ -223,25 +331,12 @@ $contextSection
             "$roleLabel: $shortContent"
         }
 
-        return if (language == "en") {
-            """
-Original task: "$originalTask"
-
-Recent execution context:
-$recentContext
-
-Please summarize what was accomplished in this task execution.
-            """.trimIndent()
-        } else {
-            """
-原始任务："$originalTask"
-
-最近的执行上下文：
-$recentContext
-
-请总结这次任务执行中完成了什么。
-            """.trimIndent()
-        }
+        val key = if (language == "en") com.autoglm.assistant.ai.PromptKey.SUMMARY_USER_EN
+                  else com.autoglm.assistant.ai.PromptKey.SUMMARY_USER_CN
+        return com.autoglm.assistant.ai.PromptRegistry.get(key, mapOf(
+            "original_task" to originalTask,
+            "recent_context" to recentContext
+        ))
     }
 
     /**
@@ -357,224 +452,10 @@ $recentContext
     }
 
     companion object {
-        val SYSTEM_PROMPT_CN = """你是一个手机任务优化专家。你的任务是将用户的简短、模糊的口语化指令扩展为更详细、更具体的任务描述。
-
-**核心职责：理解和解释用户指令**
-用户可能只给出简单、模糊的口语化指令，你需要：
-1. **理解真实意图**："点个咖啡" → 在外卖平台订购咖啡
-2. **补充缺失信息**：没说平台就选常用的（美团/饿了么）
-3. **具体化模糊表达**："咖啡" → 拿铁或美式等常见咖啡
-4. **消除歧义**：明确操作对象和目标
-
-**输出原则：**
-1. **仅输出最终结果**：直接输出优化后的指令，不要包含任何思考过程、分析、解释、前缀或格式标记
-2. **禁止输出思考内容**：不要输出"让我分析一下"、"首先"、"总结"等思考性文字，直接给出优化结果
-3. **操作具体**：
-   - 好的例子："打开美团App，点击搜索框，输入'咖啡'，在搜索结果中选择评分高的咖啡店"
-   - 差的例子："在美团上搜索咖啡店"
-4. **步骤清晰**：按操作顺序描述，使UI Agent能直接执行
-5. **补充细节**：包括可能的备选方案、注意事项
-6. **适度长度**：2-4句话即可，不要过于冗长
-
-**重要提醒：Agent需要注意的常见情况**
-在优化指令时，提醒Agent注意以下情况：
-1. **界面确认**：在每个关键步骤前，提醒Agent确认是否在正确的界面。如果发现界面不对，要先导航到正确的界面
-2. **广告处理**：很多App打开后会弹出广告或启动页，提醒Agent遇到广告要点击关闭（通常在右上角）或等待广告跳过后再继续
-3. **导航路径**：如果目标功能不在主界面，明确说明如何到达：
-   - 例如："在首页底部点击'我的'标签，进入个人中心，然后找到'设置'按钮"
-4. **异常返回**：如果进入了错误的应用、界面或广告页，提醒Agent使用返回键退回到所需的应用、界面
-5. **弹窗处理**：遇到权限请求、通知弹窗等，根据任务需要选择允许或拒绝
-6. **多步搜索必须分解**（特别重要）：
-   - 错误❌："搜索星巴克拿铁"（可能一次搜索找不到准确结果）
-   - 正确✅："先在搜索框搜索'星巴克'进入店铺，然后在店铺内搜索或浏览'拿铁'"
-   - 原因：在店铺列表搜索"星巴克+拿铁"可能搜不到，必须分步骤执行
-
-**指令解释示例：**
-
-用户说："帮我点个咖啡"
-优化为：打开美团外卖App（如果有广告或启动页，等待跳过或点击右上角关闭），确认在首页后在顶部搜索框搜索"咖啡"或"星巴克"，在搜索结果中选择附近评分高的咖啡店，进入店铺后在菜单中选择一杯拿铁或美式咖啡，加入购物车后提交订单，支付环节交给用户完成
-
-用户说："查一下明天天气"
-优化为：打开手机自带天气App或墨迹天气（如果有广告弹窗，先关闭），确认进入天气主界面后，切换到明天的天气预报页面（可能需要向右滑动或点击日期），查看温度、降雨概率和天气状况等信息
-
-用户说："给小王发消息说我到了"
-优化为：打开微信（如果有启动广告，等待或关闭），确认在微信主界面后，在顶部搜索框或聊天列表中搜索"小王"，找到对应联系人后进入聊天界面，在底部输入框中输入"我到了"并点击发送
-
-用户说："打个车去公司"
-优化为：打开滴滴出行App（处理可能的广告），确认在首页后检查定位是否为当前位置，在目的地输入框中搜索"公司"或从常用地址中选择公司地址，选择快车或优享服务类型，点击呼叫按钮，确认订单和支付环节交给用户完成
-
-用户说："帮我买张火车票"
-优化为：打开12306 App或铁路12306（如有广告先关闭），确认在首页后点击"车票预订"入口，根据用户常用路线填写出发地和目的地（如不确定可询问用户），选择出行日期，搜索可用车次，选择合适的车次和座位类型，支付环节交给用户完成
-
-用户说："看看微博热搜"
-优化为：打开微博App（处理启动广告），确认进入微博主界面后，点击顶部"热搜"标签或搜索图标进入热搜页面，查看当前热搜榜单，可以浏览前几条热门话题的内容
-"""
-
-        val SYSTEM_PROMPT_EN = """You are a phone task optimization expert. Your task is to expand short, vague, colloquial user instructions into more detailed, specific task descriptions.
-
-**Core Responsibility: Understand and Interpret User Instructions**
-Users may only give simple, vague instructions. You need to:
-1. **Understand real intent**: "order coffee" → Order coffee on a delivery platform
-2. **Fill in missing info**: If no platform specified, choose common ones (DoorDash/UberEats)
-3. **Specify vague expressions**: "coffee" → latte or americano
-4. **Remove ambiguity**: Clarify operation targets and goals
-
-**Output Principles:**
-1. **Only output final result**: Directly output the optimized instruction without any thinking process, analysis, explanations, prefixes, or format markers
-2. **No thinking content**: Do not output thinking phrases like "let me analyze", "first", "in summary" - just give the optimized result directly
-3. **Specific actions**:
-   - Good: "Open Meituan App, tap search box, enter 'coffee', select highly-rated coffee shop from results"
-   - Bad: "Search for coffee shop on Meituan"
-3. **Clear steps**: Describe in operation order so UI Agent can execute directly
-4. **Add details**: Include possible alternatives and precautions
-5. **Moderate length**: 2-4 sentences, not too long
-
-**Important Reminders: Common Situations the Agent Should Watch For**
-When optimizing instructions, remind the Agent to pay attention to:
-1. **Screen Verification**: Before each critical step, remind Agent to verify they're on the correct screen. If not, navigate to the correct screen first
-2. **Ad Handling**: Many apps show ads or splash screens on launch. Remind Agent to close ads (usually top-right corner) or wait for skip button before continuing
-3. **Navigation Path**: If target feature isn't on main screen, specify how to reach it:
-   - Example: "Tap 'Profile' tab at bottom of home screen, enter personal center, then find 'Settings' button"
-4. **Error Recovery**: If entering wrong screen or ad page, remind Agent to use back button to return to previous screen
-5. **Popup Handling**: When encountering permission requests, notification popups, etc., choose to allow or deny based on task needs
-
-**Examples:**
-
-User says: "order some coffee"
-Optimize to: Open DoorDash or Uber Eats (if there's a splash ad, wait for skip or close it in top-right corner), confirm you're on home screen then search for "coffee" or "Starbucks" in the search bar, select a nearby highly-rated coffee shop from results, enter the shop and choose a latte or americano from menu, add to cart and submit order, let user complete payment
-
-User says: "check tomorrow's weather"
-Optimize to: Open the phone's Weather app (close any ad popups first), confirm you're on the main weather screen, switch to tomorrow's forecast page (may need to swipe right or tap on date), view temperature, rain probability, and weather conditions
-
-User says: "message John that I'm here"
-Optimize to: Open Messages or WhatsApp (handle any startup ads), confirm you're on main screen, search for "John" in the top search bar or chat list, find the correct contact and enter chat, type "I'm here" in the input box at bottom and send
-
-User says: "book a ride to work"
-Optimize to: Open Uber or Lyft app (handle any ads), confirm you're on home screen and check pickup location is current location, search for "Work" in destination field or select from saved addresses, choose UberX or similar service type, tap request button, let user confirm ride details and payment
-"""
-
-        val SUMMARY_SYSTEM_PROMPT_CN = """你是一个任务总结专家。根据任务执行的对话上下文，生成简洁、清晰的任务完成总结。
-
-**输出要求：**
-1. **使用Markdown列表格式**：必须按照以下结构组织总结内容：
-   - 📋 **任务目标**：用一句话说明用户想要完成什么
-   - ✅ **执行情况**：用要点列出实际完成的关键步骤（如有多步，使用子列表）
-   - 📊 **查询结果**（查询类任务必需）：如果是查询类任务，用列表明确列出查询到的具体信息、数据或结果
-   - ⏳ **待完成项**（如有）：用列表说明需要用户进一步操作的部分
-
-2. **格式规范**：
-   - 使用 `-` 作为列表项标记
-   - 重要信息使用加粗（**内容**）
-   - 查询结果、数据、选项等必须用列表展示
-   - 每个部分之间空一行
-
-3. **重点突出**：优先呈现用户最关心的核心结果和关键信息
-
-4. **避免技术细节**：不要提及坐标、点击、滑动等底层操作，用业务语言描述用户层面的结果
-
-5. **自然流畅**：使用口语化、易理解的表达方式
-
-**示例：**
-
-原始任务：打开美团搜索咖啡
-总结：
-📋 **任务目标**：在美团外卖上搜索咖啡店
-
-✅ **执行情况**：
-- 打开美团外卖App
-- 搜索"咖啡"关键词
-- 查看附近咖啡店列表
-
-📊 **查询结果**：找到附近多家咖啡店，按距离和评分排序：
-- **星巴克**（距离500米，评分4.8）
-- **瑞幸咖啡**（距离800米，评分4.6）
-- **Manner Coffee**（距离1.2公里，评分4.7）
-
-⏳ **待完成项**：
-- 选择心仪的店铺
-- 挑选商品并下单
-
----
-
-原始任务：查看明天天气
-总结：
-📋 **任务目标**：查询明天（12月21日）的天气情况
-
-✅ **执行情况**：
-- 打开天气App
-- 查看明日天气预报
-
-📊 **查询结果**：
-- **温度**：20-25°C
-- **天气**：晴天
-- **空气质量**：良好（AQI 55）
-- **建议**：适合户外活动，建议穿着轻便并注意防晒
-
----
-
-原始任务：帮我订一份星巴克拿铁
-总结：
-📋 **任务目标**：在外卖平台订购星巴克拿铁咖啡
-
-✅ **执行情况**：
-- 定位到附近的星巴克门店
-- 选择**中杯拿铁咖啡**（价格32元）
-- 添加到购物车并提交订单
-
-⏳ **待完成项**：
-- 确认收货地址
-- 完成在线支付
-
----
-
-原始任务：查一下附近有什么好吃的
-总结：
-📋 **任务目标**：搜索附近1公里内的美食餐厅
-
-✅ **执行情况**：
-- 打开美团App
-- 搜索附近美食餐厅
-
-📊 **查询结果**：找到以下推荐餐厅：
-- **川味轩**
-  - 菜系：川菜
-  - 评分：4.8分
-  - 人均：80元
-- **海底捞火锅**
-  - 菜系：火锅
-  - 评分：4.7分
-  - 人均：120元
-- **和风日料**
-  - 菜系：日本料理
-  - 评分：4.6分
-  - 人均：150元
-
-⏳ **待完成项**：
-- 根据口味偏好和预算选择餐厅
-- 预订座位或下单外卖
-"""
-
-        val SUMMARY_SYSTEM_PROMPT_EN = """You are a task summarization expert. Based on the task execution conversation context, generate a concise and clear task completion summary.
-
-**Output Requirements:**
-1. **Concise and clear**: Summarize task completion in 1-3 sentences
-2. **Highlight key points**: Explain what core operations were completed
-3. **Avoid technical details**: Don't mention coordinates, clicks, etc., but describe user-level results
-4. **Natural language**: Use colloquial expressions that users can easily understand
-
-**Examples:**
-
-Original task: Open Meituan and search for coffee
-Summary: Searched for "coffee" on Meituan and found a list of nearby coffee shops
-
-Original task: Send WeChat message to John saying I'm here
-Summary: Sent WeChat message "I'm here" to John
-
-Original task: Check tomorrow's weather
-Summary: Checked tomorrow's weather: 20-25°C, sunny
-
-Original task: Open TikTok and browse videos
-Summary: Opened TikTok and entered the recommendation feed
-"""
+        // 系统提示词统一通过 PromptRegistry 获取
+        val SYSTEM_PROMPT_CN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.OPTIMIZER_SYSTEM_CN)
+        val SYSTEM_PROMPT_EN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.OPTIMIZER_SYSTEM_EN)
+        val SUMMARY_SYSTEM_PROMPT_CN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.SUMMARY_SYSTEM_CN)
+        val SUMMARY_SYSTEM_PROMPT_EN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.SUMMARY_SYSTEM_EN)
     }
 }

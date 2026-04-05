@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 
+        FileProvider 路径配置
+        用于安全地共享应用私有目录中的文件
+    -->
+    
+    <!-- cache 目录：用于存放临时的 APK 安装文件 -->
+    <cache-path name="cache" path="." />
+    
+    <!-- files 目录：应用内部存储 -->
+    <files-path name="files" path="." />
+    
+    <!-- external-files 目录：外部存储的应用专属目录 -->
+    <external-files-path name="external_files" path="." />
+    
+    <!-- external-cache 目录：外部存储的缓存目录 -->
+    <external-cache-path name="external_cache" path="." />
+</paths>

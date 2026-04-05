@@ -1,9 +1,11 @@
 package com.autoglm.assistant.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.IBinder
@@ -11,7 +13,9 @@ import android.os.Vibrator
 import android.os.VibrationEffect
 import android.os.Build
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.autoglm.assistant.App
 import com.autoglm.assistant.MainActivity
 import com.autoglm.assistant.R
@@ -21,9 +25,15 @@ import com.autoglm.assistant.core.agent.PhoneAgent
 import com.autoglm.assistant.core.agent.PromptOptimizerConfig
 import com.autoglm.assistant.core.agent.SerializableMessage
 import com.autoglm.assistant.core.planner.TaskPlannerConfig
+import com.autoglm.assistant.util.ScreenUnlocker
+import com.autoglm.assistant.util.ShellExecutor
+import com.autoglm.assistant.voice.ApiSpeechRecognizer
+import com.autoglm.assistant.voice.ImeVoiceSttHelper
 import com.autoglm.assistant.voice.SpeechRecognizer
 import com.autoglm.assistant.voice.TextToSpeech
-import com.autoglm.assistant.voice.WakeWordEngine
+import com.autoglm.assistant.voice.wake.WakeEngine
+import com.autoglm.assistant.voice.wake.WakeEngineConfig
+import com.autoglm.assistant.voice.wake.WakeEngineManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,7 +41,9 @@ import kotlinx.coroutines.flow.StateFlow
 class WakeWordService : Service() {
 
     companion object {
+        private const val TAG = "WakeWordService"
         private const val COORDINATOR_STREAM_DEBOUNCE_MS = 300L
+        const val ACTION_SHOW_INTERVENTION = "com.autoglm.assistant.ACTION_SHOW_INTERVENTION"
         var instance: WakeWordService? = null
             private set
     }
@@ -40,20 +52,40 @@ class WakeWordService : Service() {
     // 使用 Default 而不是 Main，避免切后台时协程被取消
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private lateinit var wakeWordEngine: WakeWordEngine
-    private lateinit var speechRecognizer: SpeechRecognizer
+    lateinit var wakeEngineManager: WakeEngineManager
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var apiSpeechRecognizer: ApiSpeechRecognizer? = null
+    private var imeVoiceSttHelper: ImeVoiceSttHelper? = null
     private lateinit var textToSpeech: TextToSpeech
     private var phoneAgent: PhoneAgent? = null
+    private var agentStatusOverlay: AgentStatusOverlayController? = null
+    private var interventionOverlay: InterventionInputOverlay? = null
+    private var wakeListeningOverlay: WakeListeningOverlay? = null
+    private var taskSummaryOverlay: TaskSummaryOverlay? = null
 
     // WakeLock 防止 CPU 休眠
     private var wakeLock: PowerManager.WakeLock? = null
     private var currentTaskJob: Job? = null
+    // 步骤: 防止 startWakeWordListening 并发重入（invoke + onStartCommand 同时触发时只保留一次初始化）
+    private var wakeListeningJob: Job? = null
 
     private val _serviceState = MutableStateFlow(ServiceState.IDLE)
     val serviceState: StateFlow<ServiceState> = _serviceState
 
     private val _lastRecognizedText = MutableStateFlow("")
     val lastRecognizedText: StateFlow<String> = _lastRecognizedText
+
+    // STT 实时识别结果（用于调试）
+    private val _lastSttResult = MutableStateFlow("")
+    val lastSttResult: StateFlow<String> = _lastSttResult
+
+    // 唤醒词引擎错误信息，供 UI 层观察展示
+    private val _lastWakeWordError = MutableStateFlow<String?>(null)
+    val lastWakeWordError: StateFlow<String?> = _lastWakeWordError
+
+    // 当前活跃的唤醒引擎类型，供 UI 层展示
+    val activeEngineType: StateFlow<WakeEngine.EngineType?>
+        get() = wakeEngineManager.activeEngineType
 
     // Agent 消息类型
     enum class AgentMessageType {
@@ -78,6 +110,7 @@ class WakeWordService : Service() {
         SUBTASK_START,          // 子任务开始执行
         SUPERVISION_RESULT,     // 监督结果
         COORDINATOR_THINKING,   // 协调器思考
+        COORDINATOR_STEP,       // 协调器当前执行步数
         SUMMARY_STREAMING,      // 任务总结流式输出中
         SUMMARY_COMPLETE,       // 任务总结完成
         CLEAR                   // 清除消息
@@ -125,42 +158,96 @@ class WakeWordService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            startForeground(
-                App.NOTIFICATION_ID,
-                createNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
-        } else {
-            startForeground(App.NOTIFICATION_ID, createNotification())
+        android.util.Log.d("AutoGLM_START", "WakeWordService onStartCommand called. intent action=${intent?.action}, extra START_WAKE_WORD=${intent?.getBooleanExtra("START_WAKE_WORD", false)}")
+        // 处理干预操作请求（通知栏按钮触发）
+        if (intent?.action == ACTION_SHOW_INTERVENTION) {
+            showInterventionInput()
+            return START_STICKY
         }
-        startWakeWordListening()
+
+        // 步骤1: 只在明确请求启动语音唤醒时才启动 microphone 前台服务
+        val startWakeWord = intent?.getBooleanExtra("START_WAKE_WORD", false) ?: false
+        
+        if (startWakeWord) {
+            // 需要语音唤醒功能
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.RECORD_AUDIO
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                Log.e(TAG, "❌ 缺少 RECORD_AUDIO 权限，无法启动语音唤醒")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // 包含所有可能需要的服务类型：语音+任务执行 (在自动启动阶段不要携带 MEDIA_PROJECTION 避免崩溃)
+                    startForeground(
+                        App.NOTIFICATION_ID,
+                        createNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or 
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    )
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        App.NOTIFICATION_ID,
+                        createNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                } else {
+                    startForeground(App.NOTIFICATION_ID, createNotification())
+                }
+                startWakeWordListening()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM_START", "❌ 启动前台服务失败: ${e.message}", e)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+        } else {
+            android.util.Log.d("AutoGLM_START", "startWakeWord is false. Service started without wake word listening.")
+            // 只需要任务执行服务，不需要语音功能
+            // 不使用 MEDIA_PROJECTION（Android 14 要求 MediaProjection Token，但截图通过无障碍服务实现）
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    startForeground(
+                        App.NOTIFICATION_ID,
+                        createNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    )
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        App.NOTIFICATION_ID,
+                        createNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                } else {
+                    startForeground(App.NOTIFICATION_ID, createNotification())
+                }
+            } catch (e: Exception) {
+                // 业务目的：启动前台服务失败时必须停止服务
+                // 原因：若不成为前台服务，系统会在应用切后台时杀死服务导致任务中断
+                Log.e(TAG, "❌ 启动前台服务失败，停止服务: ${e.message}", e)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+        }
+        
         return START_STICKY
     }
 
     private fun initializeComponents() {
         val prefs = App.instance.preferenceManager
 
-        // 初始化唤醒词引擎
-        wakeWordEngine = WakeWordEngine(this, prefs.porcupineAccessKey)
-        wakeWordEngine.onWakeWordDetected = {
-            handleWakeWordDetected()
-        }
-        wakeWordEngine.onError = { error ->
-            onError?.invoke(error)
-        }
+        // 初始化唤醒引擎管理器
+        wakeEngineManager = WakeEngineManager(this)
 
-        // 初始化语音识别
-        speechRecognizer = SpeechRecognizer(this)
-        speechRecognizer.onResult = { result ->
-            handleSpeechResult(result)
+        // 步骤: 仅在使用系统 STT 模式时初始化系统语音识别器
+        // 无 GMS 的设备上 isRecognitionAvailable() 返回 false，会触发误导性的错误 toast
+        if (prefs.commandSttMode == "SYSTEM") {
+            initOrRefreshSpeechRecognizer(this)
         }
-        speechRecognizer.onError = { error ->
-            onError?.invoke(error)
-            // 出错时恢复唤醒词监听
-            startWakeWordListening()
-        }
-        speechRecognizer.initialize()
 
         // 初始化 TTS
         textToSpeech = TextToSpeech(this)
@@ -168,6 +255,32 @@ class WakeWordService : Service() {
 
         // 初始化 PhoneAgent
         initializePhoneAgent()
+        // 唤醒监听悬浮窗 — 唤醒后显示"正在听"状态
+        wakeListeningOverlay = WakeListeningOverlay(this).apply {
+            onCancel = {
+                // 用户点击悬浮窗取消录音
+                apiSpeechRecognizer?.cancel()
+                imeVoiceSttHelper?.cancel()
+                dismiss()
+                startWakeWordListening()
+            }
+            onTextSubmit = { text ->
+                // 用户通过输入框提交文本指令，等同于语音识别结果
+                android.util.Log.i(TAG, "用户文本输入: $text")
+                handleSpeechResult(text)
+            }
+        }
+        // 执行期状态悬浮条
+        agentStatusOverlay = AgentStatusOverlayController(this).apply {
+            onStopRequested = { stopCurrentTask() }
+            onInterventionRequested = {
+                // 立即中断当前执行（cancel 协程 + stop agent），但保留对话历史和服务状态
+                currentTaskJob?.cancel()
+                phoneAgent?.stop()
+                // 保持 ServiceState.EXECUTING_TASK 以允许输入框弹出
+                showInterventionInput()
+            }
+        }
     }
 
     private fun initializePhoneAgent() {
@@ -194,15 +307,23 @@ class WakeWordService : Service() {
                     baseUrl = prefs.coordinatorApiUrl,
                     apiKey = coordinatorApiKey,
                     modelName = prefs.coordinatorModelName,
+                    enableThinking = prefs.coordinatorEnableThinking
                 )
             TaskPlannerConfig(
                 enabled = prefs.smartCoordinatorEnabled,  // 这个字段现在表示"默认启用规划"
                 plannerModelConfig = coordinatorModelConfig,
                 enableSupervision = prefs.supervisionEnabled,
                 supervisorModelConfig = coordinatorModelConfig,
-                maxCorrections = prefs.maxCorrections
+                maxCorrections = prefs.maxCorrections,
+                maxCoordinatorSteps = prefs.maxCoordinatorSteps,
+                maxAgentStepsPerCoordinatorStep = prefs.maxAgentStepsPerCoordinatorStep,
+                customSystemPrompt = prefs.coordinatorSystemPrompt,
+                enableVision = prefs.coordinatorEnableVision
             ).also {
-                android.util.Log.i("AutoGLM", "SmartCoordinator available: model=${prefs.coordinatorModelName}, defaultEnabled=${prefs.smartCoordinatorEnabled}, supervision=${prefs.supervisionEnabled}")
+                android.util.Log.i(
+                    "AutoGLM",
+                    "SmartCoordinator available: model=${prefs.coordinatorModelName}, defaultEnabled=${prefs.smartCoordinatorEnabled}, vision=${prefs.coordinatorEnableVision}, thinking=${prefs.coordinatorEnableThinking}"
+                )
             }
         } else {
             android.util.Log.i("AutoGLM", "SmartCoordinator not configured (missing API info)")
@@ -225,7 +346,8 @@ class WakeWordService : Service() {
             PromptOptimizerConfig(
                 enabled = true,
                 modelConfig = optimizerModelConfig,
-                enableTaskSummary = prefs.taskSummaryEnabled
+                enableTaskSummary = prefs.taskSummaryEnabled,
+                customSystemPrompt = prefs.optimizerSystemPrompt
             ).also {
                 android.util.Log.i("AutoGLM", "PromptOptimizer enabled: model=${prefs.optimizerModelName}, taskSummary=${prefs.taskSummaryEnabled}")
             }
@@ -234,17 +356,44 @@ class WakeWordService : Service() {
             null
         }
 
+        // 创建意图识别器配置（如果启用）
+        val intentConfig = if (prefs.intentRecognizerEnabled) {
+            val intentApiKey = when {
+                prefs.intentModelName.startsWith("deepseek") -> prefs.intentApiKeyDeepseek
+                prefs.intentModelName.startsWith("glm-") -> prefs.intentApiKeyBigmodel
+                prefs.intentModelName.startsWith("doubao") -> prefs.intentApiKeyDoubao
+                else -> prefs.intentApiKey
+            }
+            val intentModelConfig = ModelConfig(
+                baseUrl = prefs.intentApiUrl,
+                apiKey = intentApiKey,
+                modelName = prefs.intentModelName
+            )
+            com.autoglm.assistant.core.agent.IntentRecognizerConfig(
+                enabled = true,
+                modelConfig = intentModelConfig
+            ).also {
+                android.util.Log.i("AutoGLM", "IntentRecognizer enabled: model=${prefs.intentModelName}")
+            }
+        } else {
+            android.util.Log.i("AutoGLM", "IntentRecognizer disabled")
+            null
+        }
+
         val agentConfig = AgentConfig(
             maxSteps = prefs.maxSteps,
             language = prefs.language,
+            systemPrompt = prefs.agentSystemPrompt.ifBlank { null },
             plannerConfig = plannerConfig,
-            optimizerConfig = optimizerConfig
+            optimizerConfig = optimizerConfig,
+            intentConfig = intentConfig
         )
 
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
             initialize()
 
             var lastCoordinatorStreamEmitAtMs = 0L
+            var agentStreamingContent = StringBuilder()  // Agent执行阶段的流式内容
 
             fun emitCoordinatorStream(type: CoordinatorMessageType, content: String, force: Boolean = false) {
                 val now = System.currentTimeMillis()
@@ -258,14 +407,49 @@ class WakeWordService : Service() {
                 )
             }
 
+            onStepStart = { step ->
+                agentStatusOverlay?.updateStep(step)
+                agentStreamingContent.clear()  // 新步骤开始，清空流式缓冲
+                // 步骤：同步通知栏显示当前执行步数
+                updateNotification("执行中 第${step}步...")
+            }
+
             onThinking = { thinking ->
                 // 发送思考过程消息
                 _agentMessage.value = AgentMessage(thinking, AgentMessageType.THINKING)
+                agentStatusOverlay?.updateThinking(thinking)
             }
 
             onAction = { action ->
                 // 发送动作消息
                 _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
+                // 悬浮窗同步显示当前操作
+                agentStatusOverlay?.updateActionStatus(action)
+            }
+
+            onBeforeScreenshot = {
+                agentStatusOverlay?.hideForScreenshot()
+                interventionOverlay?.hideForScreenshot()
+                taskSummaryOverlay?.hideForScreenshot()
+            }
+
+            onAfterScreenshot = {
+                agentStatusOverlay?.restoreAfterScreenshot()
+                interventionOverlay?.restoreAfterScreenshot()
+                taskSummaryOverlay?.restoreAfterScreenshot()
+            }
+
+            // 操作执行时隐藏悬浮窗 — 避免遮挡点击/滑动目标
+            onBeforeAction = {
+                agentStatusOverlay?.hideForScreenshot()
+                interventionOverlay?.hideForScreenshot()
+                taskSummaryOverlay?.hideForScreenshot()
+            }
+
+            onAfterAction = {
+                agentStatusOverlay?.restoreAfterScreenshot()
+                interventionOverlay?.restoreAfterScreenshot()
+                taskSummaryOverlay?.restoreAfterScreenshot()
             }
 
             // Prompt 优化器回调 - 支持流式输出
@@ -278,6 +462,7 @@ class WakeWordService : Service() {
             onPromptOptimizing = {
                 isOptimizing = true
                 optimizerStreamingContent.clear()
+                agentStatusOverlay?.updatePlannerStatus("✨ 正在优化指令...")
                 emitCoordinatorStream(
                     type = CoordinatorMessageType.OPTIMIZER_STREAMING,
                     content = "",
@@ -287,10 +472,31 @@ class WakeWordService : Service() {
 
             onPromptOptimized = { optimizedPrompt ->
                 isOptimizing = false
+                agentStatusOverlay?.updatePlannerStatus("")  // 清除优化状态
                 _coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.OPTIMIZER_COMPLETE,
                     content = optimizedPrompt
                 )
+            }
+
+            // 意图识别器回调
+            onIntentRecognizing = {
+                android.util.Log.d("AutoGLM", "IntentRecognizer: recognizing...")
+                agentStatusOverlay?.updatePlannerStatus("🔍 正在识别意图...")
+            }
+
+            onIntentRecognized = { result ->
+                agentStatusOverlay?.updatePlannerStatus("")  // 清除识别状态
+                if (result.matched) {
+                    android.util.Log.d("AutoGLM", "IntentRecognizer: matched shortcut '${result.matchedShortcutTitle}', prompt: ${result.filledPrompt}")
+                } else {
+                    android.util.Log.d("AutoGLM", "IntentRecognizer: no match")
+                }
+            }
+
+            // 干预处理完成回调
+            onInterventionProcessed = { instruction ->
+                android.util.Log.i("AutoGLM", "Intervention processed by Agent: $instruction")
             }
 
             onTaskSummarizing = {
@@ -311,15 +517,18 @@ class WakeWordService : Service() {
                     type = CoordinatorMessageType.SUMMARY_COMPLETE,
                     content = summary
                 )
+                // 步骤: 任务总结完成后显示悬浮窗（半透明 Markdown 渲染）
+                showTaskSummaryOverlay(summary)
             }
 
             // SmartCoordinator 结构化回调 - 显示格式化内容
             var plannerStreamingContent = StringBuilder()
             var isPlanning = false
 
-            onPlanningStart = {
+            phoneAgent?.onPlanningStart = {
                 isPlanning = true
                 plannerStreamingContent.clear()
+                agentStatusOverlay?.updatePlannerStatus("🤔 正在规划任务...")
                 emitCoordinatorStream(
                     type = CoordinatorMessageType.PLANNING_STREAMING,
                     content = "",
@@ -347,21 +556,61 @@ class WakeWordService : Service() {
                         type = CoordinatorMessageType.SUMMARY_STREAMING,
                         content = summaryStreamingContent.toString()
                     )
+                } else {
+                    // Agent执行阶段：流式更新悬浮窗显示实时思考内容
+                    agentStreamingContent.append(token)
+                    agentStatusOverlay?.updateStreamingTail(agentStreamingContent.toString())
                 }
             }
 
             onCoordinatorThinking = { thinking ->
+                // 在聊天中展示协调器的思考分析过程（已格式化为自然语言）
+                android.util.Log.d("AutoGLM", "[COORDINATOR] Thinking: ${thinking.take(100)}...")
                 _coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.COORDINATOR_THINKING,
                     content = thinking
                 )
+                // 悬浮窗同步显示协调器思考尾部
+                agentStatusOverlay?.updatePlannerStatus("🤔 ${thinking.takeLast(30)}")
             }
 
             onStreamEnd = {
                 isPlanning = false
+                agentStatusOverlay?.updatePlannerStatus("")  // 清除规划状态
             }
 
-            onPlanningComplete = { taskPlan ->
+            // 协调器步数回调 — 在消息中显示当前执行步数
+            phoneAgent?.onCoordinatorStep = { currentStep, maxSteps ->
+                _coordinatorMessage.value = CoordinatorMessage(
+                    type = CoordinatorMessageType.COORDINATOR_STEP,
+                    content = "$currentStep|$maxSteps"
+                )
+            }
+
+            onDecisionComplete = { decision ->
+                val taskText = when {
+                    !decision.nextInstruction.isNullOrBlank() -> decision.nextInstruction
+                    decision.assessment.isNotBlank() -> decision.assessment
+                    else -> null
+                }
+                // 在悬浮窗显示当前任务
+                taskText?.let { agentStatusOverlay?.updateCoordinatorTask(it) }
+                // 决策完成后显示决策结果（目标型指令）
+                if (!decision.nextInstruction.isNullOrBlank()) {
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.SUBTASK_START,
+                        content = "**下一步目标：** ${decision.nextInstruction}"
+                    )
+                } else if (decision.assessment.isNotBlank()) {
+                    // 任务完成或失败 — 显示评估结果，不发送无意义的 0|0 步数
+                    _coordinatorMessage.value = CoordinatorMessage(
+                        type = CoordinatorMessageType.SUBTASK_START,
+                        content = "**结果：** ${decision.assessment}"
+                    )
+                }
+            }
+
+            phoneAgent?.onPlanningComplete = { taskPlan ->
                 if (taskPlan != null) {
                     // 使用TaskPlan的toReadableText方法，但去掉emoji前缀
                     val planText = taskPlan.toReadableText()
@@ -378,7 +627,7 @@ class WakeWordService : Service() {
                 }
             }
 
-            onSubTaskGenerated = { subTask ->
+            phoneAgent?.onSubTaskGenerated = { subTask ->
                 // 子任务生成时立即显示卡片
                 val cardText = buildString {
                     appendLine("### 步骤 ${subTask.index}")
@@ -400,7 +649,8 @@ class WakeWordService : Service() {
                 android.util.Log.i("AutoGLM", "[COORDINATOR] SubTask ${subTask.index} card displayed: ${subTask.goal}")
             }
 
-            onSubTaskStart = { subTask ->
+            phoneAgent?.onSubTaskStart = { subTask ->
+                agentStatusOverlay?.updateCoordinatorTask(subTask.goal)
                 val subTaskText = buildString {
                     appendLine("### ▶️ 开始执行子任务 ${subTask.index}")
                     appendLine()
@@ -421,7 +671,7 @@ class WakeWordService : Service() {
                 )
             }
 
-            onSupervisionResult = { result ->
+            phoneAgent?.onSupervisionResult = { result ->
                 val resultText = buildString {
                     appendLine("**评估：**${result.assessment}")
                     if (result.correctionInstruction != null) {
@@ -442,6 +692,9 @@ class WakeWordService : Service() {
 
             onTaskComplete = { message ->
                 _serviceState.value = ServiceState.IDLE
+                agentStatusOverlay?.onTaskFinished()
+                // 步骤：任务完成时更新通知栏状态
+                updateNotification("任务已完成")
                 onTaskCompleted?.invoke(message)
                 // 清理coordinator消息
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -461,7 +714,17 @@ class WakeWordService : Service() {
             }
 
             onError = { error ->
-                _serviceState.value = ServiceState.IDLE
+                // 安全检查：仅当任务协程确实已停止时才重置状态
+                // 避免中间错误（如模型调用失败）过早将状态设为 IDLE，
+                // 导致后续竞争条件（如协程被意外取消）
+                val jobStillActive = currentTaskJob?.isActive == true
+                if (!jobStillActive) {
+                    _serviceState.value = ServiceState.IDLE
+                    agentStatusOverlay?.onTaskFinished()
+                    startWakeWordListening()
+                } else {
+                    android.util.Log.w("AutoGLM", "onError called while task job still active, skipping state reset. error=$error")
+                }
                 this@WakeWordService.onError?.invoke(error)
                 // 清理coordinator消息
                 _coordinatorMessage.value = CoordinatorMessage(
@@ -470,7 +733,6 @@ class WakeWordService : Service() {
                 )
                 // Emit error as result
                 _agentMessage.value = AgentMessage(error, AgentMessageType.RESULT)
-                startWakeWordListening()
             }
 
             onHumanInterventionNeeded = { message ->
@@ -478,26 +740,277 @@ class WakeWordService : Service() {
                 // Emit as action message
                 _agentMessage.value = AgentMessage(message, AgentMessageType.ACTION)
             }
+
+            // Agent中途提问回调 — 显示悬浮窗等待用户输入，返回用户回答
+            onUserQuestionAsked = { question ->
+                android.util.Log.i(TAG, "Agent asks question: $question")
+                speak(question)
+                _agentMessage.value = AgentMessage("💬 $question", AgentMessageType.ACTION)
+
+                // 使用CompletableDeferred挂起等待用户回答
+                val answerDeferred = kotlinx.coroutines.CompletableDeferred<String>()
+
+                // 在主线程创建并显示提问浮窗
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    val questionOverlay = InterventionInputOverlay(this@WakeWordService).apply {
+                        customTitle = "助手提问"
+                        customHint = question
+                        customInputHint = "请输入你的回答..."
+                        onInterventionSubmit = { answer ->
+                            answerDeferred.complete(answer)
+                            dismiss()
+                        }
+                    }
+                    questionOverlay.show()
+                }
+
+                // 挂起等待用户回答
+                val answer = answerDeferred.await()
+                android.util.Log.i(TAG, "User answered question: $answer")
+                _agentMessage.value = AgentMessage("用户回答：$answer", AgentMessageType.ACTION)
+                answer
+            }
         }
+    }
+
+    private var sttActivity: android.app.Activity? = null
+
+    // 关键改变：用 Activity context 每次重建 STT，绕过 Android 后台麦克风限制
+    private fun initOrRefreshSpeechRecognizer(context: android.content.Context) {
+        speechRecognizer?.release()
+        speechRecognizer = SpeechRecognizer(context)
+        // 防止 onError 重复回调导致多次恢复
+        var sttErrorHandled = false
+        speechRecognizer?.onResult = { result ->
+            // 识别完成 → 关闭监听悬浮窗 → 处理指令
+            wakeListeningOverlay?.dismiss()
+            finishSttActivity()
+            handleSpeechResult(result)
+        }
+        speechRecognizer?.onPartialResult = { partial ->
+            // 实时显示用户正在说的内容
+            wakeListeningOverlay?.updatePartialResult(partial)
+        }
+        speechRecognizer?.onError = { error ->
+            if (sttErrorHandled) {
+                android.util.Log.w("AutoGLM_START", "STT Error 重复回调已忽略: $error")
+            } else {
+                sttErrorHandled = true
+                android.util.Log.e("AutoGLM_START", "STT Error during command listening: $error")
+                android.util.Log.e(TAG, "STT Error during command listening: $error")
+                // 出错时关闭监听悬浮窗
+                wakeListeningOverlay?.dismiss()
+                finishSttActivity()
+                // 向用户显示错误提示，避免静默失败
+                scope.launch(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        this@WakeWordService, "语音识别失败: $error", android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                onError?.invoke(error)
+                // 出错时恢复唤醒词监听
+                startWakeWordListening()
+            }
+        }
+        speechRecognizer?.initialize()
+    }
+
+    fun onSttActivityCreated(activity: android.app.Activity) {
+        android.util.Log.i("AutoGLM_START", "onSttActivityCreated called. Recreating STT with Activity Context.")
+        sttActivity = activity
+        // 步骤1: 用 Activity Context 重新初始化 SpeechRecognizer
+        initOrRefreshSpeechRecognizer(activity)
+        // 步骤2: 延迟启动 STT 监听
+        // SpeechRecognizer.createSpeechRecognizer() 内部异步绑定系统语音服务
+        // 如果绑定未完成就调用 startListening，MIUI 会直接返回 ERROR_INSUFFICIENT_PERMISSIONS
+        // 延迟 600ms 确保语音服务绑定完成
+        scope.launch(Dispatchers.Main) {
+            delay(600)
+            if (sttActivity != null && _serviceState.value == ServiceState.LISTENING_COMMAND) {
+                android.util.Log.i("AutoGLM_START", "延迟后启动 STT 监听")
+                speechRecognizer?.startListening(
+                    if (App.instance.preferenceManager.language == "cn") "zh-CN" else "en-US"
+                )
+            } else {
+                android.util.Log.w("AutoGLM_START", "延迟后状态已变化，跳过 STT 启动 (activity=${sttActivity != null}, state=${_serviceState.value})")
+            }
+        }
+    }
+
+    fun onSttActivityDestroyed() {
+        android.util.Log.i("AutoGLM_START", "onSttActivityDestroyed called.")
+        sttActivity = null
+    }
+
+    private fun finishSttActivity() {
+        sttActivity?.let {
+            if (!it.isFinishing) {
+                it.finish()
+            }
+        }
+        sttActivity = null
     }
 
     private fun handleWakeWordDetected() {
         _serviceState.value = ServiceState.LISTENING_COMMAND
         onWakeWordDetected?.invoke()
 
-        // Stop wake word listening
-        wakeWordEngine.stopListening()
+        // 使用 Main 线程执行，确保顺序
+        scope.launch(Dispatchers.Main) {
+            // 步骤0: 息屏唤醒 — 先亮屏解锁再进行后续操作
+            if (ScreenUnlocker.isScreenOff(this@WakeWordService) || ScreenUnlocker.isKeyguardLocked(this@WakeWordService)) {
+                Log.i(TAG, "息屏/锁屏状态，尝试自动解锁...")
+                val unlocked = withContext(Dispatchers.IO) {
+                    ScreenUnlocker.ensureScreenUnlocked(this@WakeWordService)
+                }
+                if (!unlocked) {
+                    Log.w(TAG, "自动解锁失败，仍继续尝试 STT（可能需要用户手动解锁）")
+                }
+                delay(300) // 等待解锁后界面稳定
+            }
 
-        // Vibrate to provide feedback
-        vibrate()
+            // 步骤1: 停止唤醒词监听并释放引擎占用的资源
+            wakeEngineManager.stopListening()
 
-        // Play acknowledgment sound or speak
-        speak("我在听")
+            // 步骤2: 弹出悬浮窗 — 让用户知道唤醒成功
+            wakeListeningOverlay?.showWakeDetected()
 
-        // Start speech recognition
-        speechRecognizer.startListening(
-            if (App.instance.preferenceManager.language == "cn") "zh-CN" else "en-US"
-        )
+            // 步骤3: TTS 问候语（使用配置的问候语）
+            val prefs = App.instance.preferenceManager
+            if (prefs.wakeGreetingEnabled) {
+                speak(prefs.wakeGreetingText)
+            }
+
+            // 步骤4: 更新通知栏
+            updateNotification("正在听您说话...")
+
+            // 步骤5: 根据 STT 模式选择识别方式
+            val sttMode = prefs.commandSttMode
+            Log.i(TAG, "唤醒词检测完成，STT 模式: $sttMode, API 类型: ${prefs.sttApiType}")
+
+            if (sttMode == "API") {
+                delay(300) // 延迟确保麦克风资源释放（唤醒引擎刚停止）
+                if (prefs.sttApiType == "IME_VOICE") {
+                    // IME 语音模式：震动延迟到语音就绪后（onStatusChange "请说话..."时触发）
+                    startImeVoiceStt()
+                } else {
+                    // API 模式：直接用 AudioRecord + API，立即可录音
+                    vibrate()
+                    startApiStt()
+                }
+            } else {
+                // SYSTEM 模式：启动透明 Activity 绕过 Android 11+ 后台麦克风限制
+                vibrate()
+                delay(300)
+                val intent = Intent(this@WakeWordService, com.autoglm.assistant.voice.AssistantActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }
+                startActivity(intent)
+            }
+        }
+    }
+
+    /**
+     * API 模式的语音识别
+     * 直接使用 AudioRecord + OpenAI 兼容 API，无需启动 Activity
+     * AudioRecord 在前台服务中可正常工作（已被 Porcupine 唤醒引擎验证）
+     */
+    private fun startApiStt() {
+        val prefs = App.instance.preferenceManager
+
+        // 步骤1: 创建并配置 ApiSpeechRecognizer
+        apiSpeechRecognizer?.release()
+        apiSpeechRecognizer = ApiSpeechRecognizer(this).apply {
+            apiType = prefs.sttApiType
+            // OpenAI 兼容 API 配置
+            apiBaseUrl = prefs.sttApiUrl
+            apiKey = prefs.sttApiKey
+            model = prefs.sttModelName
+            // 阿里 NLS 配置
+            aliNlsAkId = prefs.aliNlsAkId
+            aliNlsAkSecret = prefs.aliNlsAkSecret
+            aliNlsAppKey = prefs.aliNlsAppKey
+
+            // 步骤2: 绑定回调
+            onResult = { result ->
+                Log.i(TAG, "API STT 识别结果: $result")
+                // 显示识别结果后延时自动消失
+                wakeListeningOverlay?.showResult(result)
+                handleSpeechResult(result)
+            }
+            onPartialResult = { partial ->
+                // "正在录音..." / "正在识别..." 等状态由 ApiSpeechRecognizer 发出
+                if (partial == "正在识别...") {
+                    wakeListeningOverlay?.showRecognizing()
+                } else {
+                    wakeListeningOverlay?.updatePartialResult(partial)
+                }
+            }
+            onReadyForSpeech = {
+                Log.i(TAG, "API STT 就绪，正在录音")
+            }
+            onEndOfSpeech = {
+                Log.i(TAG, "API STT 录音结束，等待识别结果")
+            }
+            onError = { error ->
+                Log.e(TAG, "API STT 错误: $error")
+                wakeListeningOverlay?.dismiss()
+                scope.launch(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        this@WakeWordService, "语音识别失败: $error", android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                this@WakeWordService.onError?.invoke(error)
+                startWakeWordListening()
+            }
+        }
+
+        // 步骤3: 开始录音
+        val language = if (prefs.language == "cn") "zh" else "en"
+        apiSpeechRecognizer?.startListening(language)
+    }
+
+    /**
+     * 通过 IME 语音输入法实现 STT
+     * 弹出输入框 → 触发输入法 → 优先无障碍服务单击语音按钮，降级为 su 模拟长按空格 → 监听输入框文字变化
+     */
+    private fun startImeVoiceStt() {
+        val prefs = App.instance.preferenceManager
+        imeVoiceSttHelper?.cancel()
+        imeVoiceSttHelper = ImeVoiceSttHelper(this).apply {
+            spaceX = prefs.imeVoiceSpaceX
+            spaceY = prefs.imeVoiceSpaceY
+            onResult = { result ->
+                Log.i(TAG, "IME 语音识别结果: $result")
+                wakeListeningOverlay?.showResult(result)
+                handleSpeechResult(result)
+            }
+            onError = { error ->
+                Log.e(TAG, "IME 语音识别错误: $error")
+                wakeListeningOverlay?.dismiss()
+                scope.launch(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        this@WakeWordService, "语音输入失败: $error", android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                startWakeWordListening()
+            }
+            onStatusChange = { status ->
+                if (status.startsWith("识别中: ")) {
+                    // 步骤: 纯识别文字只写入输入框，不再同时写 partialText 避免重复
+                    val rawText = status.removePrefix("识别中: ")
+                    wakeListeningOverlay?.setInputFieldText(rawText)
+                } else {
+                    // 步骤: 非识别状态（"等待键盘就绪..."/"请说话..."）显示在蓝色状态文字区
+                    wakeListeningOverlay?.updatePartialResult(status)
+                    // 步骤: "请说话..." 表示 IME 语音就绪，此时震动提示用户开始说话
+                    if (status == "请说话...") {
+                        vibrate()
+                    }
+                }
+            }
+        }
+        imeVoiceSttHelper?.start()
     }
 
     private fun handleSpeechResult(text: String) {
@@ -506,61 +1019,204 @@ class WakeWordService : Service() {
             return
         }
 
+        // 步骤2: 语音唤醒执行任务时使用全局配置的默认设置
+        val prefs = App.instance.preferenceManager
+
         _lastRecognizedText.value = text
         _serviceState.value = ServiceState.EXECUTING_TASK
         onSpeechRecognized?.invoke(text)
         onTaskStarted?.invoke(text)
+        agentStatusOverlay?.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
 
         // Execute task with phone agent
-        scope.launch {
+        // 与 executeTask() 保持一致：记录 Job 引用以便 stopCurrentTask() 能正确取消
+        currentTaskJob = scope.launch {
+            acquireWakeLock()
             try {
-                phoneAgent?.run(text)
+                phoneAgent?.run(text, true, emptyList(), prefs.smartCoordinatorEnabled, true)
+            } catch (e: CancellationException) {
+                android.util.Log.i("AutoGLM", "Voice task cancelled")
+                onError?.invoke("Task stopped by user")
             } catch (e: Exception) {
                 onError?.invoke("Task error: ${e.message}")
+            } finally {
+                releaseWakeLock()
+                _serviceState.value = ServiceState.IDLE
+                agentStatusOverlay?.onTaskFinished()
                 startWakeWordListening()
             }
         }
     }
 
     fun startWakeWordListening() {
-        // Log who called this and current state
         val stackTrace = Thread.currentThread().stackTrace
         val caller = if (stackTrace.size > 3) stackTrace[3].methodName else "unknown"
-        android.util.Log.e("AutoGLM", "=== startWakeWordListening called by: $caller, current state: ${_serviceState.value}")
+        android.util.Log.d("AutoGLM_START", "=== startWakeWordListening called by: $caller, current state: ${_serviceState.value} ===")
+        android.util.Log.i("AutoGLM", "=== startWakeWordListening called by: $caller, current state: ${_serviceState.value}")
 
-        // Don't interrupt task execution!
+        // 步骤1: 任务执行中不打断
         if (_serviceState.value == ServiceState.EXECUTING_TASK) {
-            android.util.Log.e("AutoGLM", "=== SKIPPING startWakeWordListening - task is executing!")
+            android.util.Log.i("AutoGLM", "=== SKIPPING startWakeWordListening - task is executing!")
             return
         }
 
-        if (!wakeWordEngine.isInitialized()) {
-            val prefs = App.instance.preferenceManager
-            if (prefs.porcupineAccessKey.isNotBlank()) {
-                val wakeWordKeyword = prefs.wakeWordKeyword
-                wakeWordEngine.initialize(keywordName = wakeWordKeyword)
-            } else {
-                onError?.invoke("Please configure Porcupine access key in settings")
-                return
-            }
+        // 步骤2: 防止并发重入 — invoke 和 onStartCommand 可能在 12ms 内连续触发
+        // wakeListeningJob 处于 active 说明上一次初始化协程尚未完成，跳过本次
+        if (wakeListeningJob?.isActive == true) {
+            android.util.Log.w("AutoGLM", "=== SKIPPING startWakeWordListening - 初始化协程已在运行中 (caller=$caller)")
+            return
         }
 
-        _serviceState.value = ServiceState.LISTENING_WAKE_WORD
-        android.util.Log.e("AutoGLM", "=== State changed to LISTENING_WAKE_WORD")
-        wakeWordEngine.startListening()
-        updateNotification(getString(R.string.notification_listening))
+        // 步骤3: 清除上次错误
+        _lastWakeWordError.value = null
+
+        val prefs = App.instance.preferenceManager
+
+        // 步骤4: 根据配置的引擎类型初始化
+        wakeListeningJob = scope.launch {
+            try {
+                val engineType = try {
+                    WakeEngine.EngineType.valueOf(prefs.wakeEngineType)
+                } catch (e: IllegalArgumentException) {
+                    android.util.Log.w("AutoGLM", "未知引擎类型: ${prefs.wakeEngineType}，降级为 PORCUPINE")
+                    WakeEngine.EngineType.PORCUPINE
+                }
+
+                // 如果引擎未初始化或类型变更，需要切换引擎
+                if (!wakeEngineManager.isInitialized || wakeEngineManager.activeEngineType.value != engineType) {
+                    val config = createEngineConfig(engineType, prefs)
+                    val success = wakeEngineManager.switchEngine(engineType, config)
+
+                    if (!success) {
+                        // Porcupine 失败时自动降级到系统 STT（模仿 Operit 降级策略）
+                        if (engineType == WakeEngine.EngineType.PORCUPINE) {
+                            val porcupineError = wakeEngineManager.lastError.value ?: "未知错误"
+                            android.util.Log.w("AutoGLM", "Porcupine 初始化失败: $porcupineError，自动降级到系统 STT")
+                            val sttConfig = createEngineConfig(WakeEngine.EngineType.STT_SYSTEM, prefs)
+                            val fallbackSuccess = wakeEngineManager.switchEngine(WakeEngine.EngineType.STT_SYSTEM, sttConfig)
+                            if (!fallbackSuccess) {
+                                // 步骤: Porcupine 和系统 STT 均失败 — 主动 Toast 提示用户，避免静默失败
+                                val sttError = wakeEngineManager.lastError.value ?: "未知错误"
+                                val errorMsg = "语音唤醒不可用\n" +
+                                    "• Porcupine: $porcupineError\n" +
+                                    "• 系统 STT: $sttError\n" +
+                                    "建议改用「设置 > 唤醒引擎 > API 模式」"
+                                android.util.Log.e("AutoGLM", "Porcupine 和系统 STT 均初始化失败. Porcupine: $porcupineError, STT: $sttError")
+                                // 步骤: 将完整的多行错误消息写入 StateFlow，供 UI 卡片显示（之前错误地赋了单行字符串而不是 errorMsg）
+                                _lastWakeWordError.value = errorMsg
+                                // 在主线程弹出 Toast，告知用户原因和解决建议
+                                withContext(Dispatchers.Main) {
+                                    android.widget.Toast.makeText(
+                                        this@WakeWordService,
+                                        errorMsg,
+                                        android.widget.Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                                _serviceState.value = ServiceState.IDLE
+                                return@launch
+                            }
+                            // 降级成功，提示用户
+                            _lastWakeWordError.value = "Porcupine 不可用($porcupineError)，已降级到系统 STT"
+                        } else {
+                            val errorMsg = "引擎初始化失败: $engineType"
+                            android.util.Log.e("AutoGLM", errorMsg)
+                            _lastWakeWordError.value = wakeEngineManager.lastError.value ?: errorMsg
+                            _serviceState.value = ServiceState.IDLE
+                            return@launch
+                        }
+                    }
+                }
+
+                // 步骤5: 开始监听
+                _serviceState.value = ServiceState.LISTENING_WAKE_WORD
+                // 记录当前活跃引擎类型，供 UI 显示
+                val activeEngine = wakeEngineManager.activeEngineType.value
+                android.util.Log.i("AutoGLM", "=== State changed to LISTENING_WAKE_WORD, engine=$activeEngine")
+
+                wakeEngineManager.startListening { confidence ->
+                    android.util.Log.i("AutoGLM", "唤醒检测，置信度: $confidence")
+                    handleWakeWordDetected()
+                }
+
+                // 通知栏显示当前引擎类型
+                val engineLabel = when (activeEngine) {
+                    WakeEngine.EngineType.PORCUPINE -> "Porcupine"
+                    WakeEngine.EngineType.STT_SYSTEM -> "系统STT"
+                    else -> activeEngine?.name ?: "未知"
+                }
+                updateNotification("${getString(R.string.notification_listening)} [$engineLabel]")
+            } catch (e: Exception) {
+                val errorMsg = "启动唤醒监听失败: ${e.message}"
+                android.util.Log.e("AutoGLM", errorMsg, e)
+                _lastWakeWordError.value = errorMsg
+                _serviceState.value = ServiceState.IDLE
+            }
+        }
+    }
+
+    /**
+     * 根据引擎类型和配置创建对应的 WakeEngineConfig
+     */
+    private fun createEngineConfig(
+        engineType: WakeEngine.EngineType,
+        prefs: com.autoglm.assistant.util.PreferenceManager
+    ): WakeEngineConfig {
+        return when (engineType) {
+            WakeEngine.EngineType.PORCUPINE -> {
+                // 当用户选择"自定义模型"时，使用 customPpnPath 指定模型文件
+                val keywordPath = if (prefs.wakeWordKeyword == "CUSTOM" && prefs.customPpnPath.isNotBlank()) {
+                    prefs.customPpnPath
+                } else {
+                    null  // 由 PorcupineWakeEngine 根据 keywordName 决定
+                }
+                WakeEngineConfig.PorcupineConfig(
+                    accessKey = prefs.porcupineAccessKey,
+                    keywordPath = keywordPath,
+                    keywordName = prefs.wakeWordKeyword,
+                    sensitivity = prefs.wakeSensitivity
+                )
+            }
+            WakeEngine.EngineType.PERSONAL_TEMPLATE -> {
+                // TODO: Phase 2 实现，从 prefs 读取模板
+                WakeEngineConfig.PersonalTemplateConfig()
+            }
+            WakeEngine.EngineType.STT_SYSTEM,
+            WakeEngine.EngineType.STT_SHERPA -> {
+                WakeEngineConfig.SttWakeConfig(
+                    wakePhrase = prefs.sttWakePhrase,
+                    regexEnabled = prefs.sttWakeRegexEnabled,
+                    language = prefs.sttWakeLanguage,
+                    cooldownMs = prefs.sttWakeCooldownMs
+                )
+            }
+        }
     }
 
     fun stopWakeWordListening() {
-        wakeWordEngine.stopListening()
+        scope.launch {
+            wakeEngineManager.stopListening()
+        }
         _serviceState.value = ServiceState.IDLE
     }
 
     fun reinitializeWakeWord() {
-        val wasListening = wakeWordEngine.isListening.value
-        wakeWordEngine.release()
-        if (wasListening) {
-            startWakeWordListening()
+        scope.launch {
+            val wasListening = wakeEngineManager.isListening
+            wakeEngineManager.stopListening()
+
+            val prefs = App.instance.preferenceManager
+            val engineType = try {
+                WakeEngine.EngineType.valueOf(prefs.wakeEngineType)
+            } catch (e: IllegalArgumentException) {
+                WakeEngine.EngineType.PORCUPINE
+            }
+
+            val config = createEngineConfig(engineType, prefs)
+            wakeEngineManager.reinitialize(config)
+
+            if (wasListening) {
+                startWakeWordListening()
+            }
         }
     }
 
@@ -577,25 +1233,36 @@ class WakeWordService : Service() {
     }
 
     fun setScreenCapturePermission(resultCode: Int, data: Intent) {
+        // 步骤1: 在设置权限前，确保服务以MediaProjection类型运行
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // 升级服务类型为包含MediaProjection
+                startForeground(
+                    App.NOTIFICATION_ID,
+                    createNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or 
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    App.NOTIFICATION_ID,
+                    createNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            }
+            Log.d(TAG, "✅ 服务已升级为MediaProjection类型")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 升级服务类型失败: ${e.message}", e)
+        }
+        
+        // 步骤2: 设置截图权限
         phoneAgent?.setScreenCaptureData(resultCode, data)
     }
 
+    // 步骤4: WakeWordService执行任务方法 - 默认参数仅作为兜底，实际调用都会传入明确的值
     fun executeTask(task: String, enablePlanning: Boolean = true, enableOptimizer: Boolean = true, context: List<SerializableMessage> = emptyList()) {
         android.util.Log.d("AutoGLM", "WakeWordService.executeTask called: task=$task, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer, currentState=${_serviceState.value}")
-
-        // Upgrade foreground service type to include MediaProjection
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val types = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                }
-                startForeground(App.NOTIFICATION_ID, createNotification(), types)
-            } catch (e: Exception) {
-                android.util.Log.e("AutoGLM", "Failed to upgrade foreground service type: ${e.message}")
-            }
-        }
 
         if (_serviceState.value == ServiceState.EXECUTING_TASK) {
             onError?.invoke("Already executing a task")
@@ -606,6 +1273,11 @@ class WakeWordService : Service() {
         _serviceState.value = ServiceState.EXECUTING_TASK
         android.util.Log.d("AutoGLM", "State changed to EXECUTING_TASK")
         onTaskStarted?.invoke(task)
+        agentStatusOverlay?.onTaskStarted(withCoordinator = enablePlanning)
+        // 步骤：新任务开始时关闭旧的总结悬浮窗
+        taskSummaryOverlay?.dismiss()
+        // 步骤：任务开始时同步更新通知栏
+        updateNotification("正在执行任务...")
 
         currentTaskJob = scope.launch {
             // 获取 WakeLock 防止 CPU 休眠
@@ -619,7 +1291,16 @@ class WakeWordService : Service() {
                 onError?.invoke("Task error: ${e.message}")
             } finally {
                 releaseWakeLock()
+                // 安全网：确保任务结束/取消后 IME 被还原（即使 PhoneAgent.finally 失败）
+                try {
+                    ShellExecutor.endAdbKeyboardSession()
+                } catch (e: Exception) {
+                    android.util.Log.w("AutoGLM", "任务结束后还原输入法失败: ${e.message}")
+                }
                 _serviceState.value = ServiceState.IDLE
+                agentStatusOverlay?.onTaskFinished()
+                // 步骤: 任务结束后更新通知栏
+                updateNotification("就绪")
             }
         }
     }
@@ -645,10 +1326,84 @@ class WakeWordService : Service() {
 
     fun stopCurrentTask() {
         android.util.Log.w("AutoGLM", "=== WakeWordService.stopCurrentTask() called ===")
-        Exception("stopCurrentTask trace").printStackTrace()
         currentTaskJob?.cancel()
         phoneAgent?.stop()
         _serviceState.value = ServiceState.IDLE
+        agentStatusOverlay?.onTaskFinished()
+        interventionOverlay?.dismiss()
+        taskSummaryOverlay?.dismiss()
+        // 步骤: 停止任务后恢复唤醒词监听，避免用户需要手动重启服务
+        startWakeWordListening()
+    }
+
+    /**
+     * 显示干预输入浮窗
+     * 调用位置：通知栏"干预"按钮 → onStartCommand → 此方法
+     */
+    private fun showInterventionInput() {
+        android.util.Log.i(TAG, "showInterventionInput called, serviceState=${_serviceState.value}")
+        if (_serviceState.value != ServiceState.EXECUTING_TASK) {
+            android.util.Log.w(TAG, "No task running, ignore intervention request (state=${_serviceState.value})")
+            return
+        }
+        if (interventionOverlay == null) {
+            interventionOverlay = InterventionInputOverlay(this).apply {
+                onInterventionSubmit = { instruction ->
+                    handleIntervention(instruction)
+                }
+            }
+        }
+        interventionOverlay?.show()
+    }
+
+    /**
+     * 显示任务总结悬浮窗
+     * 调用位置：onTaskSummary 回调 → 总结生成完成后展示
+     */
+    private fun showTaskSummaryOverlay(summary: String) {
+        if (taskSummaryOverlay == null) {
+            taskSummaryOverlay = TaskSummaryOverlay(this)
+        }
+        taskSummaryOverlay?.show(summary)
+    }
+
+    /**
+     * 处理用户的干预指令
+     * 流程：stop 已中断当前执行 → 注入干预消息到对话历史 → 重新启动 agent 执行
+     * 行为类似"发送新对话"，但保留已有对话上下文
+     */
+    private fun handleIntervention(instruction: String) {
+        android.util.Log.i(TAG, "Handling intervention (resume): $instruction")
+        interventionOverlay?.dismiss()
+
+        // 恢复执行状态和悬浮窗（旧协程 cancel 后 finally 会关闭它们）
+        _serviceState.value = ServiceState.EXECUTING_TASK
+        val prefs = App.instance.preferenceManager
+        agentStatusOverlay?.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
+        agentStatusOverlay?.updateCoordinatorTask("干预: ${instruction.take(30)}...")
+        updateNotification("正在处理干预：${instruction.take(30)}...")
+
+        // 通知 UI 添加干预消息气泡（利用 _lastRecognizedText 驱动 LaunchedEffect）
+        // 先清空再设值，确保 StateFlow 能触发（即使内容相同）
+        _lastRecognizedText.value = ""
+        _lastRecognizedText.value = "✎ $instruction"
+
+        // 以干预指令重新启动执行（保留对话历史）
+        currentTaskJob = scope.launch {
+            acquireWakeLock()
+            try {
+                val result = phoneAgent?.resumeWithIntervention(instruction) ?: "No agent"
+                android.util.Log.i(TAG, "Intervention task completed: ${result.take(100)}")
+            } catch (e: CancellationException) {
+                android.util.Log.i(TAG, "Intervention task cancelled")
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Intervention task error: ${e.message}", e)
+                onError?.invoke("Intervention error: ${e.message}")
+            } finally {
+                releaseWakeLock()
+                // 注意：不设 IDLE，让 onTaskComplete/onError 回调处理状态转换
+            }
+        }
     }
 
     private fun speak(text: String) {
@@ -683,13 +1438,31 @@ class WakeWordService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        val notification = NotificationCompat.Builder(this, App.NOTIFICATION_CHANNEL_ID)
+        // 构建干预操作的 PendingIntent（仅任务执行中时显示）
+        val isExecuting = _serviceState.value == ServiceState.EXECUTING_TASK
+
+        val builder = NotificationCompat.Builder(this, App.NOTIFICATION_CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
-            .build()
 
+        if (isExecuting) {
+            val interventionIntent = Intent(this, WakeWordService::class.java).apply {
+                action = ACTION_SHOW_INTERVENTION
+            }
+            val interventionPending = PendingIntent.getService(
+                this, 1, interventionIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(
+                android.R.drawable.ic_dialog_info,
+                "干预",
+                interventionPending
+            )
+        }
+
+        val notification = builder.build()
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         notificationManager.notify(App.NOTIFICATION_ID, notification)
     }
@@ -698,11 +1471,68 @@ class WakeWordService : Service() {
         android.util.Log.w("AutoGLM", "=== WakeWordService.onDestroy() called - SERVICE IS BEING DESTROYED ===")
         instance = null
         super.onDestroy()
-        stopCurrentTask()
-        scope.cancel()
-        wakeWordEngine.release()
-        speechRecognizer.release()
-        textToSpeech.release()
-        phoneAgent?.release()
+        
+        // 步骤0: 服务销毁时始终还原输入法（避免用户退出后 IME 仍停留在 ADB Keyboard）
+        try {
+            kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                ShellExecutor.endAdbKeyboardSession()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("AutoGLM", "还原输入法失败: ${e.message}", e)
+        }
+        
+        // 业务目的：避免取消正在执行的任务
+        // 原因：系统可能因资源压力暂时销毁前台服务，但任务应该继续执行
+        // 步骤1：仅停止唤醒词监听，不停止任务执行
+        // 步骤2：如果服务重启，任务可以通过协程恢复
+        val isTaskRunning = _serviceState.value == ServiceState.EXECUTING_TASK
+        if (isTaskRunning) {
+            android.util.Log.w("AutoGLM", "=== 任务正在执行，不取消任务，仅清理唤醒词相关资源 ===")
+            // 只释放唤醒词相关资源，保持任务继续执行
+            try {
+                wakeEngineManager.release()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "释放唤醒引擎失败", e)
+            }
+            try {
+                speechRecognizer?.release()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "释放语音识别器失败", e)
+            }
+            try {
+                apiSpeechRecognizer?.release()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "释放 API 语音识别器失败", e)
+            }
+            try {
+                imeVoiceSttHelper?.cancel()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "释放 IME 语音识别器失败", e)
+            }
+            try {
+                textToSpeech.release()
+            } catch (e: Exception) {
+                android.util.Log.e("AutoGLM", "释放语音合成失败", e)
+            }
+            // 不释放 phoneAgent 和 agentStatusOverlay，让任务继续执行
+            // 不取消 scope 和 currentTaskJob
+        } else {
+            android.util.Log.w("AutoGLM", "=== 无任务执行，正常清理所有资源 ===")
+            // 无任务执行时才完全清理
+            stopCurrentTask()
+            scope.cancel()
+            wakeEngineManager.release()
+            speechRecognizer?.release()
+            apiSpeechRecognizer?.release()
+            imeVoiceSttHelper?.cancel()
+            textToSpeech.release()
+            phoneAgent?.release()
+            agentStatusOverlay?.release()
+            agentStatusOverlay = null
+            wakeListeningOverlay?.release()
+            wakeListeningOverlay = null
+            taskSummaryOverlay?.dismiss()
+            taskSummaryOverlay = null
+        }
     }
 }

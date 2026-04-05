@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -33,6 +34,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import com.autoglm.assistant.service.WakeWordService
+import com.autoglm.assistant.ui.components.AccessibilityServiceStatusCard
+import com.autoglm.assistant.ui.components.BatteryRestrictionCard
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyGridState
 import java.util.Calendar
@@ -50,15 +53,28 @@ fun HomeScreen(
     val shortcutManager = remember { ShortcutManager(context) }
     val prefs = com.autoglm.assistant.App.instance.preferenceManager
     var shortcuts by remember { mutableStateOf(shortcutManager.loadShortcuts()) }
-    var inputText by remember { mutableStateOf("") }
+    var inputText by remember { mutableStateOf(TextFieldValue("")) }
     var showEditDialog by remember { mutableStateOf<ShortcutData?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var showParameterDialog by remember { mutableStateOf<ShortcutData?>(null) }
     var isEditMode by remember { mutableStateOf(false) }
-    // 使用全局设置作为默认值：全局开关控制手动输入任务的默认规划开关状态
+    // 使用全局设置作为初始值，并监听配置变化实时同步
     var enablePlanning by remember { mutableStateOf(prefs.smartCoordinatorEnabled) }
     var enableOptimizer by remember { mutableStateOf(true) }
     val haptic = LocalHapticFeedback.current
+
+    // 监听全局配置变化，实时同步到界面
+    DisposableEffect(Unit) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == "smart_coordinator_enabled") {
+                enablePlanning = prefs.smartCoordinatorEnabled
+            }
+        }
+        prefs.registerListener(listener)
+        onDispose {
+            prefs.unregisterListener(listener)
+        }
+    }
 
     Column(
         modifier = modifier
@@ -118,12 +134,30 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
-        // 正在运行的任务卡片
+        
+        // 无障碍服务状态卡片
+        AccessibilityServiceStatusCard(
+            onOpenSettings = {
+                try {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (e: Exception) {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_SETTINGS))
+                }
+            },
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // 电池限制状态卡片（MIUI等系统后台冻结检测）
+        BatteryRestrictionCard(
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // 正在运行的任务卡片（唤醒服务状态已在顶部状态栏显示，此处仅展示执行中的任务）
         val wakeWordService = WakeWordService.instance
         if (wakeWordService != null) {
             val serviceState by wakeWordService.serviceState.collectAsState()
             val currentTask by wakeWordService.lastRecognizedText.collectAsState()
-            
+
             if (serviceState == WakeWordService.ServiceState.EXECUTING_TASK) {
                 Card(
                     modifier = Modifier
@@ -256,11 +290,14 @@ fun HomeScreen(
                 shape = RoundedCornerShape(16.dp),
                 color = if (enablePlanning) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier
-                    .clickable { enablePlanning = !enablePlanning }
+                    .clickable {
+                        enablePlanning = !enablePlanning
+                        prefs.smartCoordinatorEnabled = enablePlanning  // 同步到全局配置
+                    }
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.AccountTree,
@@ -286,7 +323,7 @@ fun HomeScreen(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoFixHigh,
@@ -319,26 +356,26 @@ fun HomeScreen(
             },
             trailingIcon = {
                 IconButton(onClick = {
-                    if (inputText.isNotEmpty()) {
-                        onShortcutClick(inputText, enablePlanning, enableOptimizer)
-                        inputText = ""
+                    if (inputText.text.isNotEmpty()) {
+                        onShortcutClick(inputText.text, enablePlanning, enableOptimizer)
+                        inputText = TextFieldValue("")
                     }
                 }) {
                     Icon(
                         Icons.Default.Send, 
                         contentDescription = "发送", 
-                        tint = if (inputText.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (inputText.text.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = {
-                if (inputText.isNotEmpty()) {
-                    onShortcutClick(inputText, enablePlanning, enableOptimizer)
-                    inputText = ""
+                if (inputText.text.isNotEmpty()) {
+                    onShortcutClick(inputText.text, enablePlanning, enableOptimizer)
+                    inputText = TextFieldValue("")
                 }
             }),
-            singleLine = true
+            maxLines = 3
         )
     }
 

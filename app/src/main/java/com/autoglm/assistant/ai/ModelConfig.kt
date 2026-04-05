@@ -10,7 +10,9 @@ data class ModelConfig(
     val maxTokens: Int = 3000,
     val temperature: Float = 0.0f,
     val topP: Float = 0.85f,
-    val frequencyPenalty: Float = 0.2f
+    val frequencyPenalty: Float = 0.2f,
+    // null = 不注入思考参数；true/false = 按模型方言注入开启/关闭思考参数
+    val enableThinking: Boolean? = null
 ) {
     val chatCompletionsUrl: String
         get() = "${baseUrl.trimEnd('/')}/chat/completions"

@@ -13,6 +13,7 @@ import java.io.InputStreamReader
  */
 object ShellExecutor {
     private const val TAG = Logger.SHELL
+    private const val ADB_KEYBOARD_IME_ID = "com.android.adbkeyboard/.AdbIME"
 
     // 缓存 Root 可用性检查结果
     @Volatile
@@ -25,6 +26,13 @@ object ShellExecutor {
     // 全局 Root 模式开关（可通过设置控制）
     @Volatile
     var globalUseRoot: Boolean = true
+
+    // 任务级输入法会话状态
+    @Volatile
+    private var imeSessionActive: Boolean = false
+
+    @Volatile
+    private var imeSessionOriginalIme: String? = null
 
     // 静态初始化 libsu Shell 配置
     init {
@@ -226,9 +234,87 @@ object ShellExecutor {
         return result.success
     }
 
-    suspend fun setIme(imeId: String): Boolean {
-        val result = execute("ime set $imeId")
+    /**
+     * 检查 App 是否已持有 WRITE_SECURE_SETTINGS 权限
+     * 业务目的：判断能否通过 Settings API 切换输入法（非root设备方案）
+     * 操作实现：使用 checkSelfPermission 对 WRITE_SECURE_SETTINGS 进行权限查询
+     */
+    private fun hasWriteSecureSettingsPermission(context: android.content.Context): Boolean {
+        return context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * 切换输入法（自动选择最优方式）
+     * 业务目的：在 root/非root 设备上均能可靠切换到指定输入法
+     * 操作实现：
+     *   步骤1 - 优先用 Settings.Secure API（非root设备）
+     *           前提：App 通过 `adb shell pm grant <包名> android.permission.WRITE_SECURE_SETTINGS` 预授权
+     *   步骤2 - 回退到 shell 命令（root 设备走 libsu；如无 root 且无 Settings 权限则失败）
+     * @param imeId 目标输入法 ID，如 "com.android.adbkeyboard/.AdbIME"
+     * @param enableFirst 是否先将 imeId 加入 enabled_input_methods（未启用的新 IME 需要）
+     * @param context 用于权限检查，null 时取 App.instance
+     */
+    suspend fun switchIme(
+        imeId: String,
+        enableFirst: Boolean = false,
+        context: android.content.Context? = null
+    ): Boolean {
+        val appContext = context ?: com.autoglm.assistant.App.instance
+
+        // 步骤1: 尝试 Settings.Secure API（非root友好，需 WRITE_SECURE_SETTINGS 权限）
+        if (hasWriteSecureSettingsPermission(appContext)) {
+            try {
+                // 步骤1a: 若需先启用，确保 imeId 已加入 enabled_input_methods
+                // 注意: Android 14+ 禁止 targetSdk>=34 的 App 通过 Settings.Secure.getString
+                // 读取 enabled_input_methods，改用 InputMethodManager.getEnabledInputMethodList()
+                if (enableFirst) {
+                    val imm = appContext.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                            as android.view.inputmethod.InputMethodManager
+                    val enabledIds = imm.enabledInputMethodList.map { it.id }
+                    if (!enabledIds.contains(imeId)) {
+                        // 在现有列表末尾追加新 IME ID，用冒号分隔（Settings 格式）
+                        val newEnabled = (enabledIds + imeId).joinToString(":")
+                        android.provider.Settings.Secure.putString(
+                            appContext.contentResolver,
+                            android.provider.Settings.Secure.ENABLED_INPUT_METHODS,
+                            newEnabled
+                        )
+                        Logger.d(TAG, "[SWITCH_IME] 已将 $imeId 加入 enabled_input_methods（原有 ${enabledIds.size} 个）")
+                    }
+                }
+                // 步骤1b: 设置默认输入法
+                android.provider.Settings.Secure.putString(
+                    appContext.contentResolver,
+                    android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+                    imeId
+                )
+                Logger.i(TAG, "[SWITCH_IME] Settings API 切换成功: $imeId")
+                return true
+            } catch (e: SecurityException) {
+                Logger.w(TAG, "[SWITCH_IME] Settings API 无权限，回退到 shell: ${e.message}")
+            } catch (e: Exception) {
+                Logger.e(TAG, "[SWITCH_IME] Settings API 异常，回退到 shell", e)
+            }
+        } else {
+            Logger.d(TAG, "[SWITCH_IME] 无 WRITE_SECURE_SETTINGS 权限，走 shell（需 root）")
+        }
+
+        // 步骤2: shell 命令回退（root 设备走 libsu，非root设备缺权限会失败）
+        val cmd = if (enableFirst) "ime enable $imeId && ime set $imeId"
+                  else "ime set $imeId"
+        val result = execute(cmd, useRoot = true)
+        if (result.success) {
+            Logger.i(TAG, "[SWITCH_IME] shell 命令切换成功: $imeId")
+        } else {
+            Logger.w(TAG, "[SWITCH_IME] shell 命令切换失败（非root设备请执行: " +
+                "adb shell pm grant com.autoglm.assistant android.permission.WRITE_SECURE_SETTINGS）: ${result.stderr}")
+        }
         return result.success
+    }
+
+    suspend fun setIme(imeId: String): Boolean {
+        return switchIme(imeId)
     }
 
     suspend fun getCurrentIme(): String? {
@@ -303,9 +389,9 @@ object ShellExecutor {
             // 如果 clipper 不可用，尝试 service call 方式
             if (!setClipResult.success || !setClipResult.stdout.contains("result=0")) {
                 Logger.d(TAG, "[TYPE_CLIP] clipper 不可用，尝试 service call 方式")
-                // 使用 service call 设置剪贴板
+                // 使用 service call 设置剪贴板（am broadcast 不需要 root，useRoot=false）
                 val base64Text = android.util.Base64.encodeToString(text.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
-                val serviceResult = execute("echo '$text' | am broadcast -a ADB_INPUT_TEXT --es msg '$text'", useRoot = true)
+                val serviceResult = execute("echo '$text' | am broadcast -a ADB_INPUT_TEXT --es msg '$text'", useRoot = false)
                 if (!serviceResult.success) {
                     // 最后尝试：直接通过应用 Context 设置（可能不可靠）
                     Logger.d(TAG, "[TYPE_CLIP] 尝试使用 Context 剪贴板")
@@ -342,14 +428,116 @@ object ShellExecutor {
     }
 
     /**
+     * 检查ADB Keyboard是否已安装
+     */
+    suspend fun isAdbKeyboardInstalled(): Boolean {
+        val result = execute("pm list packages | grep adbkeyboard", useRoot = false)
+        val installed = result.success && result.stdout.contains("adbkeyboard")
+        Logger.d(TAG, "[ADB_KEYBOARD] 安装状态: $installed")
+        return installed
+    }
+    
+    /**
+     * 自动安装ADB Keyboard
+     * 
+     * 业务目的：确保ADB Keyboard已安装，用于文本输入
+     * 操作实现：从GitHub下载并通过pm install命令安装
+     */
+    suspend fun ensureAdbKeyboardInstalled(context: android.content.Context): Result {
+        // 步骤1: 检查是否已安装
+        if (isAdbKeyboardInstalled()) {
+            Logger.d(TAG, "[ADB_KEYBOARD] ✅ 已安装，无需重复安装")
+            return Result(true, "ADB Keyboard already installed", "", 0)
+        }
+        
+        Logger.d(TAG, "[ADB_KEYBOARD] ⚠️ 未安装，开始自动安装...")
+        
+        try {
+            // 步骤2: 下载APK到临时目录
+            val cacheDir = context.cacheDir
+            val apkFile = java.io.File(cacheDir, "adbkeyboard.apk")
+            
+            Logger.d(TAG, "[ADB_KEYBOARD] 📥 正在下载 ADB Keyboard APK...")
+            
+            // GitHub releases URL
+            val downloadUrl = "https://github.com/senzhk/ADBKeyBoard/releases/download/v2.0/ADBKeyboard.apk"
+            
+            // 使用wget或curl下载（需要root）
+            val downloadResult = execute(
+                "wget -O ${apkFile.absolutePath} $downloadUrl || curl -L -o ${apkFile.absolutePath} $downloadUrl",
+                useRoot = true
+            )
+            
+            if (!downloadResult.success || !apkFile.exists()) {
+                Logger.e(TAG, "[ADB_KEYBOARD] ❌ 下载失败")
+                return Result(false, "", "下载 ADB Keyboard 失败", -1)
+            }
+            
+            Logger.d(TAG, "[ADB_KEYBOARD] ✅ 下载成功: ${apkFile.length()} bytes")
+            
+            // 步骤3: 安装APK（需要root）
+            Logger.d(TAG, "[ADB_KEYBOARD] 📦 正在安装...")
+            val installResult = execute("pm install -r ${apkFile.absolutePath}", useRoot = true)
+            
+            // 步骤4: 清理临时文件
+            apkFile.delete()
+            
+            if (installResult.success) {
+                Logger.d(TAG, "[ADB_KEYBOARD] ✅ 安装成功")
+                
+                // 步骤5: 启用输入法
+                val enableResult = execute("ime enable com.android.adbkeyboard/.AdbIME", useRoot = true)
+                if (enableResult.success) {
+                    Logger.d(TAG, "[ADB_KEYBOARD] ✅ 已启用输入法")
+                }
+                
+                return Result(true, "ADB Keyboard installed successfully", "", 0)
+            } else {
+                Logger.e(TAG, "[ADB_KEYBOARD] ❌ 安装失败: ${installResult.stderr}")
+                return installResult
+            }
+            
+        } catch (e: Exception) {
+            Logger.e(TAG, "[ADB_KEYBOARD] ❌ 安装异常", e)
+            return Result(false, "", "安装异常: ${e.message}", -1)
+        }
+    }
+
+    /**
      * 通过 ADB Keyboard 输入文本（备用方式）
      * 注意：切换输入法会导致输入框失去焦点
      */
-    suspend fun typeTextViaAdbKeyboard(text: String, delayMs: Int = 300): Result {
+    suspend fun typeTextViaAdbKeyboard(text: String, delayMs: Int = 300, context: android.content.Context? = null): Result {
         Logger.d(TAG, "[TYPE_ADB] text=${text.take(30)}..., delayMs=$delayMs")
 
         try {
-            val adbKeyboardId = "com.android.adbkeyboard/.AdbIME"
+            // 步骤0: 确保ADB Keyboard已安装
+            if (context != null && !isAdbKeyboardInstalled()) {
+                Logger.w(TAG, "[TYPE_ADB] ADB Keyboard 未安装，尝试自动安装...")
+                val installResult = ensureAdbKeyboardInstalled(context)
+                if (!installResult.success) {
+                    return Result(
+                        false, 
+                        "", 
+                        "ADB Keyboard 未安装且自动安装失败。请手动安装：https://github.com/senzhk/ADBKeyBoard/releases", 
+                        -1
+                    )
+                }
+            }
+            
+            // 任务级输入法会话开启时，不再每次输入都切换/恢复输入法
+            if (imeSessionActive) {
+                val currentImeResult = execute("settings get secure default_input_method", useRoot = true)
+                val currentIme = if (currentImeResult.success) currentImeResult.stdout.trim() else ""
+                if (!currentIme.contains("adbkeyboard", ignoreCase = true)) {
+                    val switched = switchIme(ADB_KEYBOARD_IME_ID, enableFirst = true, context = context)
+                    if (!switched) {
+                        return Result(false, "", "输入法会话中切换ADB Keyboard失败", -1)
+                    }
+                }
+                // 步骤1a: 通过 Java API 直接发送广播（不走 shell，不需要 INTERACT_ACROSS_USERS 权限）
+                return sendAdbInputBroadcast(text, context)
+            }
 
             // 1. 获取当前输入法
             val currentImeResult = execute("settings get secure default_input_method", useRoot = true)
@@ -359,31 +547,30 @@ object ShellExecutor {
             // 如果已经是 ADB Keyboard，直接发送
             if (currentIme.contains("adbkeyboard")) {
                 Logger.d(TAG, "[TYPE_ADB] 已在使用 ADB Keyboard，直接发送")
-                val escapedText = text.replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
-                return execute("am broadcast -a ADB_INPUT_TEXT --es msg \"$escapedText\"", useRoot = true)
+                // 通过 Java API 直接发送广播（不走 shell，不需要 INTERACT_ACROSS_USERS 权限）
+                return sendAdbInputBroadcast(text, context)
             }
 
             // 2. 切换到 ADB Keyboard
             Logger.d(TAG, "[TYPE_ADB] 正在切换到 ADB Keyboard")
-            val switchResult = execute("ime enable $adbKeyboardId && ime set $adbKeyboardId", useRoot = true)
-            if (!switchResult.success) {
-                Logger.e(TAG, "[TYPE_ADB] 切换失败: ${switchResult.stderr}")
+            val switched = switchIme(ADB_KEYBOARD_IME_ID, enableFirst = true, context = context)
+            if (!switched) {
+                Logger.e(TAG, "[TYPE_ADB] 切换失败")
                 return Result(false, "", "切换到 ADB Keyboard 失败", -1)
             }
 
             kotlinx.coroutines.delay(delayMs.toLong())
 
-            // 3. 发送文本
-            val escapedText = text.replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+            // 3. 发送文本：通过 Java API 直接发送广播（不走 shell，不需要 INTERACT_ACROSS_USERS 权限）
             Logger.d(TAG, "[TYPE_ADB] 正在发送文本")
-            val inputResult = execute("am broadcast -a ADB_INPUT_TEXT --es msg \"$escapedText\"", useRoot = true)
+            val inputResult = sendAdbInputBroadcast(text, context)
 
             kotlinx.coroutines.delay(200)
 
             // 4. 恢复原输入法
             if (currentIme.isNotEmpty()) {
                 Logger.d(TAG, "[TYPE_ADB] 正在恢复输入法: $currentIme")
-                execute("ime set $currentIme", useRoot = true)
+                switchIme(currentIme)
             }
 
             kotlinx.coroutines.delay(300)
@@ -392,6 +579,107 @@ object ShellExecutor {
             Logger.e(TAG, "[TYPE_ADB] 异常: ${e.message}", e)
             return Result(false, "", "异常: ${e.message}", -1)
         }
+    }
+
+    /**
+     * 通过 Java API 向 ADB Keyboard 发送输入广播
+     * 目的: 替代 `am broadcast` shell 命令——App 进程执行 am broadcast 需要 INTERACT_ACROSS_USERS
+     *       权限，但直接调用 Context.sendBroadcast() 不需要该权限
+     * 操作: 1) 优先使用 context.sendBroadcast()；2) context 为 null 时降级到 shell（加 --user 0）
+     */
+    private suspend fun sendAdbInputBroadcast(text: String, context: android.content.Context?): Result {
+        if (context != null) {
+            // 步骤1: 直接通过 Java API 发广播，无需 shell，无需 root 或跨用户权限
+            val intent = android.content.Intent("ADB_INPUT_TEXT").apply {
+                putExtra("msg", text)
+            }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                context.sendBroadcast(intent)
+            }
+            Logger.d(TAG, "[TYPE_ADB] Java API 广播已发送，text=${text.take(30)}")
+            return Result(true, "已发送 ADB_INPUT_TEXT 广播", "", 0)
+        } else {
+            // 步骤2: 无 context 时降级到 shell，指定 --user 0 避免 -2 (ALL_USERS) 触发权限检查
+            val escapedText = text.replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+            Logger.w(TAG, "[TYPE_ADB] 无 context，降级到 shell am broadcast --user 0")
+            return execute("am broadcast --user 0 -a ADB_INPUT_TEXT --es msg \"$escapedText\"", useRoot = false)
+        }
+    }
+
+    /**
+     * 开启任务级 ADB Keyboard 输入法会话。
+     * 行为：保存当前输入法 -> 切换到 ADB Keyboard；后续输入不再重复切换。
+     */
+    suspend fun beginAdbKeyboardSession(context: android.content.Context? = null): Boolean {
+        if (imeSessionActive) {
+            Logger.d(TAG, "[IME_SESSION] 已处于会话中，跳过重复开启")
+            return true
+        }
+
+        if (context != null && !isAdbKeyboardInstalled()) {
+            val installResult = ensureAdbKeyboardInstalled(context)
+            if (!installResult.success) {
+                Logger.w(TAG, "[IME_SESSION] ADB Keyboard 未安装且自动安装失败")
+                return false
+            }
+        }
+
+        // 步骤1: 获取当前输入法 — 优先 Java API（不依赖 root），降级 shell 命令
+        val currentIme = try {
+            android.provider.Settings.Secure.getString(
+                com.autoglm.assistant.App.instance.contentResolver,
+                "default_input_method"
+            ) ?: ""
+        } catch (e: Exception) {
+            val shellResult = execute("settings get secure default_input_method", useRoot = true)
+            if (shellResult.success) shellResult.stdout.trim() else ""
+        }
+        imeSessionOriginalIme = currentIme
+
+        if (currentIme.contains("adbkeyboard", ignoreCase = true)) {
+            imeSessionActive = true
+            Logger.i(TAG, "[IME_SESSION] 当前已是 ADB Keyboard，直接复用")
+            return true
+        }
+
+        val switched = switchIme(ADB_KEYBOARD_IME_ID, enableFirst = true, context = context)
+        if (!switched) {
+            Logger.w(TAG, "[IME_SESSION] 切换到 ADB Keyboard 失败")
+            imeSessionOriginalIme = null
+            imeSessionActive = false
+            return false
+        }
+
+        imeSessionActive = true
+        Logger.i(TAG, "[IME_SESSION] 已开启，originalIme=$currentIme")
+        return true
+    }
+
+    /**
+     * 结束任务级输入法会话并恢复原输入法。
+     */
+    suspend fun endAdbKeyboardSession(): Boolean {
+        if (!imeSessionActive) {
+            return true
+        }
+
+        val originalIme = imeSessionOriginalIme.orEmpty()
+        imeSessionActive = false
+        imeSessionOriginalIme = null
+
+        if (originalIme.isBlank() || originalIme.contains("adbkeyboard", ignoreCase = true)) {
+            Logger.i(TAG, "[IME_SESSION] 结束会话，无需恢复输入法")
+            return true
+        }
+
+        val switched = switchIme(originalIme)
+        if (!switched) {
+            Logger.w(TAG, "[IME_SESSION] 恢复原输入法失败: $originalIme")
+            return false
+        }
+
+        Logger.i(TAG, "[IME_SESSION] 已恢复原输入法: $originalIme")
+        return true
     }
 
     suspend fun broadcastText(text: String): Boolean {
@@ -404,8 +692,19 @@ object ShellExecutor {
     }
 
     suspend fun clearText(): Boolean {
-        val result = execute("am broadcast -a ADB_CLEAR_TEXT")
-        return result.success
+        val imeResult = execute("settings get secure default_input_method", useRoot = true)
+        val currentIme = if (imeResult.success) imeResult.stdout.trim() else ""
+        if (!currentIme.contains("adbkeyboard", ignoreCase = true)) {
+            Logger.w(TAG, "[CLEAR_TEXT] 跳过 ADB_CLEAR_TEXT：当前输入法不是 ADB Keyboard (currentIme=$currentIme)")
+            return false
+        }
+
+        val result = execute("am broadcast -a ADB_CLEAR_TEXT", useRoot = true)
+        if (!result.success) {
+            Logger.w(TAG, "[CLEAR_TEXT] ADB_CLEAR_TEXT 广播失败: ${result.stderr}")
+            return false
+        }
+        return true
     }
 
     /**

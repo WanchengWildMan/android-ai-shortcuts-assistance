@@ -23,7 +23,12 @@ data class AgentConfig(
      * Prompt优化器配置
      * 如果启用，用户的简短指令会先被扩展为更详细的任务描述
      */
-    val optimizerConfig: PromptOptimizerConfig? = null
+    val optimizerConfig: PromptOptimizerConfig? = null,
+    /**
+     * 意图识别器配置
+     * 如果启用，用户输入会先尝试匹配快捷指令，匹配成功则使用指令模板执行
+     */
+    val intentConfig: IntentRecognizerConfig? = null
 ) {
     /**
      * 获取生效的系统提示词
@@ -45,7 +50,8 @@ data class StepResult(
     val action: String?,
     val thinking: String,
     val message: String?,
-    val needsHumanIntervention: Boolean = false
+    val needsHumanIntervention: Boolean = false,
+    val userQuestion: String? = null  // Agent中途提问，需要用户回答后继续执行
 )
 
 /**
@@ -63,5 +69,23 @@ data class PromptOptimizerConfig(
     /**
      * 是否启用任务完成后的自动总结
      */
-    val enableTaskSummary: Boolean = false
+    val enableTaskSummary: Boolean = false,
+    /**
+     * 自定义系统提示词（空字符串表示使用内置默认提示词）
+     */
+    val customSystemPrompt: String = ""
+)
+
+/**
+ * 意图识别器配置
+ */
+data class IntentRecognizerConfig(
+    /**
+     * 是否启用意图识别
+     */
+    val enabled: Boolean = false,
+    /**
+     * 识别器使用的模型配置
+     */
+    val modelConfig: ModelConfig? = null
 )

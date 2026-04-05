@@ -52,6 +52,7 @@ fun ShortcutEditDialog(
     var selectedColor by remember { mutableStateOf(shortcut?.colorHex ?: 0xFF64B5F6) }
     // 新建快捷指令时使用全局设置作为默认值，编辑时使用快捷指令自己的设置
     var enablePlanning by remember { mutableStateOf(shortcut?.enablePlanning ?: prefs.smartCoordinatorEnabled) }
+    var description by remember { mutableStateOf(shortcut?.description ?: "") }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showAddParamDialog by remember { mutableStateOf(false) }
     var showUnsavedConfirm by remember { mutableStateOf(false) }
@@ -60,12 +61,13 @@ fun ShortcutEditDialog(
     val scope = rememberCoroutineScope()
 
     // 检查是否有未保存的修改
-    val hasUnsavedChanges = remember(title, promptValue.text, selectedIcon, selectedColor, enablePlanning) {
+    val hasUnsavedChanges = remember(title, promptValue.text, selectedIcon, selectedColor, enablePlanning, description) {
         title != (shortcut?.title ?: "") ||
         promptValue.text != (shortcut?.prompt ?: "") ||
         selectedIcon != (shortcut?.iconName ?: "Star") ||
         selectedColor != (shortcut?.colorHex ?: 0xFF64B5F6) ||
-        enablePlanning != (shortcut?.enablePlanning ?: prefs.smartCoordinatorEnabled)
+        enablePlanning != (shortcut?.enablePlanning ?: prefs.smartCoordinatorEnabled) ||
+        description != (shortcut?.description ?: "")
     }
 
     Dialog(onDismissRequest = {
@@ -194,6 +196,22 @@ fun ShortcutEditDialog(
                         Text("添加参数", style = MaterialTheme.typography.labelMedium)
                     }
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 备注/描述输入框（供意图识别参考，可选填）
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("备注（可选）") },
+                    placeholder = { Text("描述指令用途，帮助语音识别更准确匹配") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 1,
+                    maxLines = 3,
+                    supportingText = {
+                        Text("供意图识别引擎参考，不影响指令执行")
+                    }
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -349,7 +367,8 @@ fun ShortcutEditDialog(
                                         prompt = promptValue.text,
                                         iconName = selectedIcon,
                                         colorHex = selectedColor,
-                                        enablePlanning = enablePlanning
+                                        enablePlanning = enablePlanning,
+                                        description = description.trim()
                                     )
                                 )
                             }

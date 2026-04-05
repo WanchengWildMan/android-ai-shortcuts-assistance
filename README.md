@@ -7,7 +7,32 @@
 - **离线语音唤醒**: 使用 Picovoice Porcupine 实现低功耗离线唤醒词检测
 - **语音对话**: 支持语音识别和语音合成
 - **AI 手机操作**: 基于 AutoGLM-Phone 模型的智能手机自动化操作
+- **独立无障碍服务**: 通过独立 Provider 应用提供无障碍能力，降低检测风险
 - **双模式执行**: 支持无障碍服务和 Shell 命令两种操作模式
+
+## 架构说明
+
+### 独立无障碍服务架构
+
+本项目采用**双应用架构**，将无障碍服务独立为单独的 Provider 应用：
+
+```
+┌─────────────────────┐         AIDL IPC        ┌──────────────────────┐
+│   主应用 (Main App)  │ ◄─────────────────────► │  Provider 应用       │
+│                     │                         │                      │
+│  - UI 界面          │   绑定服务请求           │  - 无障碍服务         │
+│  - AI 模型          │   ─────────────►        │  - 点击/滑动操作     │
+│  - 业务逻辑         │   ◄─────────────        │  - UI 层级获取       │
+│                     │   操作响应              │                      │
+└─────────────────────┘                         └──────────────────────┘
+```
+
+**优势**：
+- 🔒 **降低检测风险**: 主应用不直接包含无障碍服务，减少被目标应用检测的可能
+- 🔄 **独立升级**: Provider 可单独更新，不影响主应用
+- 🛡️ **权限隔离**: 敏感权限仅在 Provider 应用中申请
+
+**详细文档**: 查看 [docs/无障碍服务架构说明.md](docs/无障碍服务架构说明.md)
 
 ## 项目结构
 
@@ -19,6 +44,9 @@ app/src/main/java/com/autoglm/assistant/
 │   ├── WakeWordService.kt          # 语音唤醒后台服务
 │   ├── AutomationService.kt        # 无障碍服务
 │   └── FloatingWindowService.kt    # 悬浮窗服务
+├── accessibility/
+│   ├── UIHierarchyManager.kt       # 无障碍服务管理器（通过 AIDL 调用 Provider）
+│   └── AccessibilityProviderInstaller.kt  # Provider APK 安装管理
 ├── core/
 │   ├── agent/
 │   │   ├── PhoneAgent.kt           # 主 Agent 逻辑
@@ -45,6 +73,11 @@ app/src/main/java/com/autoglm/assistant/
     ├── ImageUtils.kt               # 图片处理工具
     ├── PreferenceManager.kt        # 配置存储
     └── PermissionHelper.kt         # 权限管理
+
+provider/src/main/java/com/autoglm/assistant/provider/
+├── AccessibilityProviderService.kt  # 无障碍服务实现
+├── ProviderBindService.kt          # AIDL 绑定服务
+└── IAccessibilityProvider.aidl     # AIDL 接口定义
 ```
 
 ## 构建要求
@@ -54,6 +87,35 @@ app/src/main/java/com/autoglm/assistant/
 - Gradle 8.2
 - Android SDK 34 (targetSdk)
 - minSdk 24 (Android 7.0)
+
+## 快速开始
+
+### 1. 编译并安装应用
+
+```bash
+# 方式1: 使用 Gradle 自动安装（推荐）
+./gradlew installDebug
+
+# 方式2: 使用安装脚本
+./install_both.sh
+
+# 方式3: 单独编译
+./gradlew :app:assembleDebug
+./gradlew :provider:assembleDebug
+```
+
+**注意**: 项目包含两个应用：
+- **主应用** (app): AutoGLM 智能助手
+- **Provider 应用** (provider): 独立的无障碍服务提供者
+
+### 2. 启用无障碍服务
+
+1. 安装完成后，打开主应用
+2. 系统会检测 Provider 应用并提示安装（如需要）
+3. 前往 **设置 > 无障碍 > Accessibility Provider**
+4. 开启服务并授予权限
+
+**详细部署文档**: [docs/无障碍服务部署指南.md](docs/无障碍服务部署指南.md)
 
 ## 配置步骤
 
@@ -74,12 +136,15 @@ app/src/main/java/com/autoglm/assistant/
 
 ### 3. 授权权限
 
-应用需要以下权限：
-
+**主应用需要的权限**：
 - **麦克风权限**: 用于语音唤醒和语音识别
 - **通知权限**: 用于显示后台服务通知
 - **悬浮窗权限**: 用于显示悬浮控制球
-- **无障碍服务**: 用于执行自动化操作
+
+**Provider 应用需要的权限**：
+- **无障碍服务**: 在系统设置中启用（用于执行自动化操作）
+
+**注意**: 主应用和 Provider 应用必须同时安装，主应用通过 AIDL 调用 Provider 的无障碍服务。
 
 ## 使用方式
 
@@ -136,6 +201,19 @@ private val APP_PACKAGES = mapOf(
 4. **Root 权限**: Shell 命令模式需要 Root 权限或 ADB 授权
 
 ## 故障排除
+
+### Provider 应用相关
+
+#### 安装失败 (INSTALL_PARSE_FAILED_NO_CERTIFICATES)
+
+- 问题原因：使用了 release APK 但未签名
+- 解决方案：使用 `./gradlew installDebug` 安装 debug 版本
+
+#### 无法连接到 Provider 服务
+
+- 检查 Provider 应用是否已安装
+- 确认无障碍服务已在系统设置中启用
+- 查看日志：`adb logcat -s UIHierarchyManager ProviderBindService`
 
 ### 语音唤醒不工作
 

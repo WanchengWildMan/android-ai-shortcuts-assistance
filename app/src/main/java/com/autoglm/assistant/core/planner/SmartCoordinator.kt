@@ -3,32 +3,31 @@ package com.autoglm.assistant.core.planner
 import com.autoglm.assistant.ai.Message
 import com.autoglm.assistant.ai.ModelClient
 import com.autoglm.assistant.util.Logger
-import com.google.gson.Gson
-import com.google.gson.JsonSyntaxException
-import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.withTimeout
 
 /**
  * 智能协调器
- * 使用更强大的模型统一负责：
- * 1. 将用户指令分解为明确的子任务
- * 2. 监督UI Agent的每步执行（检查thinking + action + screenshot）
- * 3. 判断是否达成目标，必要时提供纠正指令
- * 4. 收集和总结获取到的信息
+ * 使用更强大的模型负责：
+ * 1. 根据当前执行状态决定下一步指令
+ * 2. 判断任务是否完成
+ * 3. 收集和总结获取到的信息
  */
 class SmartCoordinator(
     private val config: TaskPlannerConfig
 ) {
-    private val gson = Gson()
     private var coordinatorClient: ModelClient? = null
     private val gatheredInfo = mutableListOf<String>()  // 收集的信息
+    private var stepCount = 0  // 当前步数
+
+    /** 获取当前协调器步数 */
+    fun getStepCount(): Int = stepCount
+
+    /** 获取协调器最大步数配置 */
+    fun getMaxSteps(): Int = config.maxCoordinatorSteps
 
     // 回调接口 - 用于UI显示
-    var onPlanningStart: (() -> Unit)? = null           // 开始规划
-    var onPlanningComplete: ((TaskPlan?) -> Unit)? = null  // 规划完成，传递格式化的任务计划
-    var onSubTaskGenerated: ((PlannedSubTask) -> Unit)? = null  // 生成一个新子任务（流式）
-    var onSubTaskStart: ((PlannedSubTask) -> Unit)? = null  // 开始执行子任务
-    var onSupervisionResult: ((SupervisionResult) -> Unit)? = null  // 监督结果
+    var onDecisionStart: (() -> Unit)? = null           // 开始决策
+    var onDecisionComplete: ((CoordinatorDecision) -> Unit)? = null  // 决策完成
 
     // 流式输出回调 - 用于打字机效果
     var onStreamToken: ((String) -> Unit)? = null       // 流式token回调
@@ -43,280 +42,311 @@ class SmartCoordinator(
     }
 
     /**
-     * 规划任务 - 将用户指令分解为子任务
+     * 决定下一步操作
+     * 根据原始任务、执行历史和当前截图，决定下一步应该做什么
      */
-    suspend fun planTask(userTask: String, language: String = "cn"): TaskPlan? {
-        // SmartCoordinator初始化后即可使用，不再检查config.enabled
-        // config.enabled现在只表示"默认启用规划"，不影响实际运行
-        // 是否使用规划由任务级别的enablePlanning参数控制
+    suspend fun decideNextStep(
+        originalTask: String,
+        executionHistory: String,
+        screenshotBase64: String?,
+        language: String = "cn"
+    ): CoordinatorDecision? {
         if (coordinatorClient == null) {
             Logger.w(Logger.AGENT, "SmartCoordinator model not configured")
             return null
         }
 
-        Logger.i(Logger.AGENT, "========== SMART COORDINATOR: PLANNING ==========")
-        Logger.i(Logger.AGENT, "Original task: $userTask")
-        Logger.startTimer("smart_planning")
+        stepCount++
+        Logger.i(Logger.AGENT, "========== SMART COORDINATOR: DECIDING STEP $stepCount ==========")
+        Logger.i(Logger.AGENT, "Original task: $originalTask")
+        Logger.startTimer("coordinator_decision")
 
         try {
-            val systemPrompt = if (language == "en") {
-                PlannerPrompts.SYSTEM_PROMPT_EN
+            val systemPrompt = if (config.customSystemPrompt.isNotBlank()) {
+                config.customSystemPrompt
+            } else if (language == "en") {
+                DECISION_SYSTEM_PROMPT_EN
             } else {
-                PlannerPrompts.SYSTEM_PROMPT_CN
+                DECISION_SYSTEM_PROMPT_CN
             }
 
-            val userPrompt = PlannerPrompts.buildPlanningPrompt(userTask, language)
-
-            val messages = listOf(
-                Message.System(systemPrompt),
-                Message.User(userPrompt)
-            )
-
-            Logger.i(Logger.AGENT, "Calling coordinator model: ${config.plannerModelConfig?.modelName}")
-            Logger.startTimer("coordinator_planning_request")
-
-            // 通知UI开始规划
-            onPlanningStart?.invoke()
-            onStreamStart?.invoke()
-
-            // 用于流式解析子任务
-            val streamBuffer = StringBuilder()
-            val generatedSubTasks = mutableListOf<PlannedSubTask>()
-            var subTaskIndex = 1
-
-            val response = withTimeout(config.planningTimeout) {
-                coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
-                    override fun onToken(token: String) {
-                        // 累积token用于解析子任务
-                        streamBuffer.append(token)
-
-                        // 检测是否有完整的子任务（以 ---SUBTASK--- 分隔）
-                        val currentText = streamBuffer.toString()
-                        val subtaskMarker = "---SUBTASK---"
-                        var markerIndex = currentText.indexOf(subtaskMarker)
-
-                        while (markerIndex != -1) {
-                            // 提取子任务JSON
-                            val subtaskJson = currentText.substring(0, markerIndex).trim()
-
-                            if (subtaskJson.isNotBlank()) {
-                                try {
-                                    // 解析子任务
-                                    val subTask = parseSubTask(subtaskJson, subTaskIndex, userTask)
-                                    if (subTask != null) {
-                                        generatedSubTasks.add(subTask)
-                                        // 立即回调UI显示这个子任务
-                                        onSubTaskGenerated?.invoke(subTask)
-                                        Logger.i(Logger.AGENT, "Stream generated sub-task $subTaskIndex: ${subTask.goal}")
-                                        subTaskIndex++
-                                    }
-                                } catch (e: Exception) {
-                                    Logger.w(Logger.AGENT, "Failed to parse streamed sub-task: ${e.message}")
-                                }
-                            }
-
-                            // 清除已处理的部分
-                            streamBuffer.clear()
-                            streamBuffer.append(currentText.substring(markerIndex + subtaskMarker.length))
-                            markerIndex = streamBuffer.toString().indexOf(subtaskMarker)
-                        }
-
-                        Logger.d(Logger.AGENT, "Coordinator planning token: $token")
-                    }
-
-                    override fun onThinkingComplete(thinking: String) {
-                        Logger.i(Logger.AGENT, "[COORDINATOR] Planning thinking (${thinking.length} chars): ${thinking.take(200)}...")
-                        onCoordinatorThinking?.invoke(thinking)
-                    }
-
-                    override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
-                        // 处理最后剩余的内容（可能是最后一个子任务）
-                        val remaining = streamBuffer.toString().trim()
-                        if (remaining.isNotBlank()) {
-                            try {
-                                val subTask = parseSubTask(remaining, subTaskIndex, userTask)
-                                if (subTask != null) {
-                                    generatedSubTasks.add(subTask)
-                                    onSubTaskGenerated?.invoke(subTask)
-                                    Logger.i(Logger.AGENT, "Stream generated final sub-task $subTaskIndex: ${subTask.goal}")
-                                }
-                            } catch (e: Exception) {
-                                Logger.w(Logger.AGENT, "Failed to parse final sub-task: ${e.message}")
-                            }
-                        }
-
-                        Logger.i(Logger.AGENT, "[COORDINATOR] Planning TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
-                        onStreamEnd?.invoke()
-                    }
-
-                    override fun onError(error: String) {
-                        Logger.e(Logger.AGENT, "[COORDINATOR] Planning error: $error")
-                        onStreamEnd?.invoke()
-                    }
-                })
-            }
-
-            val planningTime = Logger.endTimer("coordinator_planning_request", Logger.AGENT)
-            Logger.i(Logger.AGENT, "Planning completed in ${planningTime}ms")
-
-            // 如果流式解析生成了子任务，使用它们
-            val taskPlan = if (generatedSubTasks.isNotEmpty()) {
-                Logger.i(Logger.AGENT, "Task plan created from stream: ${generatedSubTasks.size} sub-tasks")
-                generatedSubTasks.forEachIndexed { index, task ->
-                    Logger.i(Logger.AGENT, "  Sub-task ${index + 1}: ${task.goal}")
-                }
-                TaskPlan(
-                    originalTask = userTask,
-                    analysis = "流式生成的任务计划",
-                    subTasks = generatedSubTasks,
-                    estimatedDuration = generatedSubTasks.size * 30
-                )
-            } else {
-                // 回退：如果流式解析失败，使用原来的完整解析
-                Logger.w(Logger.AGENT, "Stream parsing yielded no tasks, falling back to full parse")
-                parsePlanningResponse(response.action, userTask)
-            }
-
-            if (taskPlan == null) {
-                Logger.e(Logger.AGENT, "Failed to create task plan")
-            }
-
-            val totalTime = Logger.endTimer("smart_planning", Logger.AGENT)
-            Logger.i(Logger.AGENT, "========== PLANNING COMPLETE (${totalTime}ms) ==========")
-
-            // 通知UI规划完成（传递格式化的任务计划，而非原始JSON）
-            onPlanningComplete?.invoke(taskPlan)
-
-            return taskPlan
-
-        } catch (e: Exception) {
-            Logger.e(Logger.AGENT, "Task planning failed", e)
-            return null
-        }
-    }
-
-    /**
-     * 解析单个子任务JSON
-     */
-    private fun parseSubTask(jsonText: String, index: Int, originalTask: String): PlannedSubTask? {
-        try {
-            // 尝试解析为SubTaskResponse对象
-            val subTaskResponse = gson.fromJson(jsonText, SubTaskResponse::class.java)
-            return PlannedSubTask(
-                index = index,
-                goal = subTaskResponse.goal ?: originalTask,
-                currentState = subTaskResponse.currentState ?: "待开始",
-                actions = subTaskResponse.actions ?: "",
-                context = subTaskResponse.context ?: "",
-                dependencies = subTaskResponse.dependencies ?: emptyList()
-            )
-        } catch (e: Exception) {
-            Logger.w(Logger.AGENT, "Failed to parse sub-task JSON: ${e.message}, json: $jsonText")
-            return null
-        }
-    }
-
-    /**
-     * 监督子任务执行 - 检查 UI Agent 的执行结果并提供反馈
-     */
-    suspend fun superviseExecution(
-        subTask: PlannedSubTask,
-        agentThinking: String,
-        agentAction: String,
-        screenshotBase64: String?,
-        language: String = "cn"
-    ): SupervisionResult {
-        if (!config.enableSupervision || coordinatorClient == null) {
-            // 如果未启用监督，默认认为成功
-            return SupervisionResult(
-                status = SupervisionStatus.SUCCESS,
-                assessment = "监督功能已禁用",
-                correctionInstruction = null,
-                gatheredInfo = ""
-            )
-        }
-
-        Logger.i(Logger.AGENT, "========== SMART COORDINATOR: SUPERVISING SUB-TASK ${subTask.index} ==========")
-        Logger.startTimer("smart_supervision")
-
-        try {
-            val systemPrompt = buildSupervisionSystemPrompt(language)
-            val userPrompt = buildSupervisionPrompt(subTask, agentThinking, agentAction, language)
+            val userPrompt = buildDecisionPrompt(originalTask, executionHistory, language)
 
             val messages = listOf(
                 Message.System(systemPrompt),
                 Message.User(userPrompt, screenshotBase64)
             )
 
-            Logger.i(Logger.AGENT, "正在调用协调器监督子任务 ${subTask.index}")
-            Logger.startTimer("coordinator_supervision_request")
+            Logger.i(Logger.AGENT, "Calling coordinator model: ${config.plannerModelConfig?.modelName}")
+            Logger.i(Logger.AGENT, "[DEBUG] API URL: ${config.plannerModelConfig?.baseUrl}")
+            Logger.i(Logger.AGENT, "[DEBUG] System prompt length: ${systemPrompt.length} chars")
+            Logger.i(Logger.AGENT, "[DEBUG] User prompt length: ${userPrompt.length} chars")
+            Logger.i(Logger.AGENT, "[DEBUG] Screenshot attached: ${screenshotBase64 != null}")
+            Logger.i(Logger.AGENT, "[DEBUG] Timeout: ${config.planningTimeout}ms")
+            Logger.startTimer("coordinator_decision_request")
+
+            onDecisionStart?.invoke()
             onStreamStart?.invoke()
 
-            val response = coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
-                override fun onToken(token: String) {
-                    // 将 token 传递给 UI 以实现打字机效果
-                    onStreamToken?.invoke(token)
-                    Logger.d(Logger.AGENT, "Supervision token: $token")
+            val response = withTimeout(config.planningTimeout) {
+                coordinatorClient!!.chat(messages, object : ModelClient.StreamCallback {
+                    override fun onToken(token: String) {
+                        onStreamToken?.invoke(token)
+                        Logger.d(Logger.AGENT, "Coordinator decision token: $token")
+                    }
+
+                    override fun onThinkingComplete(thinking: String) {
+                        Logger.i(Logger.AGENT, "[COORDINATOR] Decision thinking (${thinking.length} chars): ${thinking.take(200)}...")
+                        // 后处理：将 JSON 格式的思考内容转为可读文本
+                        val formatted = formatThinkingOutput(thinking)
+                        onCoordinatorThinking?.invoke(formatted)
+                    }
+
+                    override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
+                        Logger.i(Logger.AGENT, "[COORDINATOR] Decision TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
+                        onStreamEnd?.invoke()
+                    }
+
+                    override fun onError(error: String) {
+                        Logger.e(Logger.AGENT, "[COORDINATOR] Decision error: $error")
+                        onStreamEnd?.invoke()
+                    }
+                })
+            }
+
+            val decisionTime = Logger.endTimer("coordinator_decision_request", Logger.AGENT)
+            Logger.i(Logger.AGENT, "Decision completed in ${decisionTime}ms")
+            Logger.i(Logger.AGENT, "[DEBUG] Raw response.action: ${response.action.take(200)}...")
+            Logger.i(Logger.AGENT, "[DEBUG] Response.action length: ${response.action.length} chars")
+            Logger.i(Logger.AGENT, "[DEBUG] Response.thinking length: ${response.thinking.length} chars")
+
+            // 业务目的：协调器只产出"下一步目标指令"给 PhoneAgent，
+            // 不再强依赖 JSON 协议，减少格式波动导致的执行中断。
+            val decision = parseDecisionResponse(response.action)
+
+            if (decision != null) {
+                Logger.i(Logger.AGENT, "Decision status: ${decision.status}")
+                Logger.i(Logger.AGENT, "Assessment: ${decision.assessment}")
+                if (decision.nextInstruction != null) {
+                    Logger.i(Logger.AGENT, "Next instruction: ${decision.nextInstruction}")
+                }
+                if (decision.gatheredInfo.isNotBlank()) {
+                    gatheredInfo.add("[步骤$stepCount] ${decision.gatheredInfo}")
+                    Logger.i(Logger.AGENT, "Gathered info: ${decision.gatheredInfo}")
                 }
 
-                override fun onThinkingComplete(thinking: String) {
-                    Logger.i(Logger.AGENT, "[COORDINATOR] Supervision thinking (${thinking.length} chars): ${thinking.take(200)}...")
-                    onCoordinatorThinking?.invoke(thinking)
+                onDecisionComplete?.invoke(decision)
+            }
+
+            val totalTime = Logger.endTimer("coordinator_decision", Logger.AGENT)
+            Logger.i(Logger.AGENT, "========== DECISION COMPLETE (${totalTime}ms) ==========")
+
+            return decision
+
+        } catch (e: Exception) {
+            Logger.e(Logger.AGENT, "Decision making failed: ${e.javaClass.simpleName}", e)
+            Logger.e(Logger.AGENT, "[DEBUG] Exception message: ${e.message}")
+            Logger.e(Logger.AGENT, "[DEBUG] Exception cause: ${e.cause?.message}")
+
+            // 根据异常类型生成明确的错误描述，区分 API 调用错误和决策逻辑错误
+            val errorDetail = when {
+                e is RuntimeException && e.message?.startsWith("API Error:") == true -> {
+                    // API 调用返回错误码（如 401、429、500 等）
+                    e.message ?: "API 调用失败"
                 }
-
-                override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
-                    Logger.i(Logger.AGENT, "[COORDINATOR] Supervision TTFT: ${response.timeToFirstToken}ms, Total: ${response.totalTime}ms")
-                    onStreamEnd?.invoke()
+                e is kotlinx.coroutines.TimeoutCancellationException -> {
+                    "协调器请求超时（${config.planningTimeout}ms）"
                 }
-
-                override fun onError(error: String) {
-                    Logger.e(Logger.AGENT, "[COORDINATOR] Supervision error: $error")
-                    onStreamEnd?.invoke()
+                e is java.net.UnknownHostException -> {
+                    "无法连接服务器：${e.message}"
                 }
-            })
-
-            val supervisionTime = Logger.endTimer("coordinator_supervision_request", Logger.AGENT)
-            Logger.i(Logger.AGENT, "监督完成，耗时 ${supervisionTime}ms")
-            Logger.i(Logger.AGENT, "[COORDINATOR] 原始监督响应 (${response.action.length} 字符): ${response.action.take(500)}...")
-            
-            val result = parseSupervisionResponse(response.action)
-
-            if (result != null) {
-                Logger.i(Logger.AGENT, "监督状态: ${result.status}")
-                Logger.i(Logger.AGENT, "评估: ${result.assessment}")
-
-                if (result.status == SupervisionStatus.SUCCESS && result.gatheredInfo.isNotBlank()) {
-                    gatheredInfo.add("[子任务${subTask.index}] ${result.gatheredInfo}")
-                    Logger.i(Logger.AGENT, "收集到的信息: ${result.gatheredInfo}")
+                e is java.net.SocketTimeoutException -> {
+                    "网络连接超时"
                 }
-
-                if (result.status == SupervisionStatus.NEEDS_CORRECTION) {
-                    Logger.w(Logger.AGENT, "需要纠正: ${result.correctionInstruction}")
+                e is javax.net.ssl.SSLException -> {
+                    "SSL/TLS 连接错误：${e.message}"
+                }
+                else -> {
+                    "协调器内部错误：${e.javaClass.simpleName} - ${e.message}"
                 }
             }
 
-            val totalTime = Logger.endTimer("smart_supervision", Logger.AGENT)
-            Logger.i(Logger.AGENT, "========== SUPERVISION COMPLETE (${totalTime}ms) ==========")
-
-            // 通知UI监督结果
-            result?.let { onSupervisionResult?.invoke(it) }
-
-            return result ?: SupervisionResult(
-                status = SupervisionStatus.UNCERTAIN,
-                assessment = "Failed to parse supervision response",
-                correctionInstruction = null,
-                gatheredInfo = ""
-            )
-
-        } catch (e: Exception) {
-            Logger.e(Logger.AGENT, "Supervision failed", e)
-            return SupervisionResult(
-                status = SupervisionStatus.UNCERTAIN,
-                assessment = "Supervision error: ${e.message}",
-                correctionInstruction = null,
+            // 返回带明确错误信息的 FAILED decision，而非 null
+            // 使 PhoneAgent 能向用户展示具体的失败原因
+            return CoordinatorDecision(
+                status = DecisionStatus.FAILED,
+                assessment = errorDetail,
+                nextInstruction = null,
                 gatheredInfo = ""
             )
         }
+    }
+
+    /**
+     * 构建决策提示词
+     * 第一次协调时告知当前在 AutoGLM 页面（已知界面，无需截图）
+     */
+    private fun buildDecisionPrompt(
+        originalTask: String,
+        executionHistory: String,
+        language: String
+    ): String {
+        val isFirstStep = stepCount <= 1
+        val historySection = executionHistory.ifBlank {
+            if (language == "en") "(none yet)" else "（暂无）"
+        }
+
+        val key = if (language == "en") com.autoglm.assistant.ai.PromptKey.COORDINATOR_USER_EN
+                  else com.autoglm.assistant.ai.PromptKey.COORDINATOR_USER_CN
+        var prompt = com.autoglm.assistant.ai.PromptRegistry.get(key, mapOf(
+            "original_task" to originalTask,
+            "execution_history" to historySection
+        ))
+
+        // 首步附加提示：当前处于 AutoGLM 主页（已知界面，无需截图）
+        if (isFirstStep) {
+            val firstStepKey = if (language == "en") com.autoglm.assistant.ai.PromptKey.COORDINATOR_FIRST_STEP_EN
+                               else com.autoglm.assistant.ai.PromptKey.COORDINATOR_FIRST_STEP_CN
+            prompt += "\n\n" + com.autoglm.assistant.ai.PromptRegistry.get(firstStepKey)
+        }
+
+        return prompt
+    }
+
+    /**
+     * 解析决策响应
+     * 设计原则：模型输出什么就直接当指令用，协调器只是"说话的"不是"执行的"。
+     * 只判断 [COMPLETE] / [FAILED] 前缀，其余全部作为 nextInstruction 交给 PhoneAgent。
+     * 如果模型不听话输出了 JSON，兜底提取 instruction 字段。
+     */
+    private fun parseDecisionResponse(responseText: String): CoordinatorDecision? {
+        val raw = responseText.trim()
+        Logger.i(Logger.AGENT, "[DEBUG] parseDecisionResponse input (${raw.length} chars): ${raw.take(200)}")
+        if (raw.isBlank()) {
+            Logger.w(Logger.AGENT, "[DEBUG] Response is blank, returning null")
+            return null
+        }
+
+        // 步骤1：如果模型输出了 JSON，提取其中的 instruction 文本
+        val text = extractTextFromJsonIfNeeded(raw)
+        val upper = text.uppercase().trimStart()
+        Logger.i(Logger.AGENT, "[DEBUG] Effective text: ${text.take(100)}")
+
+        // 步骤2：判断完成/失败前缀
+        return when {
+            upper.startsWith("[COMPLETE]") || upper.startsWith("COMPLETE:") -> {
+                val reason = text
+                    .replace(Regex("^\\[?COMPLETE\\]?:?\\s*", RegexOption.IGNORE_CASE), "")
+                    .trim().ifBlank { "任务已完成" }
+                CoordinatorDecision(
+                    status = DecisionStatus.COMPLETE,
+                    assessment = reason,
+                    nextInstruction = null,
+                    gatheredInfo = ""
+                )
+            }
+            upper.startsWith("[FAILED]") || upper.startsWith("FAILED:") -> {
+                val reason = text
+                    .replace(Regex("^\\[?FAILED\\]?:?\\s*", RegexOption.IGNORE_CASE), "")
+                    .trim().ifBlank { "任务失败" }
+                CoordinatorDecision(
+                    status = DecisionStatus.FAILED,
+                    assessment = reason,
+                    nextInstruction = null,
+                    gatheredInfo = ""
+                )
+            }
+            else -> {
+                // 步骤3：其余全部作为 PhoneAgent 的下一步目标指令
+                val instruction = text
+                    .replace(Regex("^\\[?CONTINUE\\]?:?\\s*", RegexOption.IGNORE_CASE), "")
+                    .trim()
+                // 最后一道防线：再次过滤操作指令
+                val finalInstruction = stripActionCommands(instruction.ifBlank { text })
+                CoordinatorDecision(
+                    status = DecisionStatus.CONTINUE,
+                    assessment = "继续执行",
+                    nextInstruction = finalInstruction,  // 绝不返回空指令（stripActionCommands 内部有兜底）
+                    gatheredInfo = ""
+                )
+            }
+        }
+    }
+
+    /**
+     * 从模型输出中提取有效文本指令
+     * 如果模型不听话输出了 JSON，提取其中的 instruction 字段；
+     * 如果是纯文本，原样返回。
+     * 最后过滤掉 do(action=...) 等具体操作指令。
+     * 核心原则：绝不返回空字符串，总有东西交给 PhoneAgent。
+     */
+    private fun extractTextFromJsonIfNeeded(raw: String): String {
+        val cleaned = stripMarkdownCodeBlock(raw)
+        // 非 JSON 格式 → 过滤操作指令后返回
+        if (!(cleaned.startsWith("{") && cleaned.endsWith("}"))) {
+            return stripActionCommands(raw)
+        }
+
+        return try {
+            val json = org.json.JSONObject(cleaned)
+            // 按优先级依次尝试常见的 instruction 字段名
+            val instruction = json.optString("next_instruction", "")
+                .ifBlank { json.optString("instruction", "") }
+                .ifBlank { json.optString("next_step", "") }
+                .ifBlank { json.optString("goal", "") }
+                .ifBlank { json.optString("assessment", "") }
+            // 提取到了有效字段 → 过滤操作指令后返回
+            if (instruction.isNotBlank()) {
+                val filtered = stripActionCommands(instruction)
+                Logger.i(Logger.AGENT, "[DEBUG] Extracted from JSON: ${filtered.take(80)}")
+                return filtered.ifBlank { raw }  // 如果过滤后为空，兜底返回原文
+            } else {
+                // JSON 中没有可识别的字段，把所有 value 拼起来当指令
+                val values = json.keys().asSequence().map { json.optString(it, "") }.filter { it.isNotBlank() }
+                val joined = values.joinToString("；")
+                Logger.w(Logger.AGENT, "[DEBUG] No known JSON field, joining all values: ${joined.take(80)}")
+                stripActionCommands(joined.ifBlank { raw })
+            }
+        } catch (_: Exception) {
+            stripActionCommands(raw)  // JSON 解析失败 → 过滤后当纯文本用
+        }
+    }
+
+    /**
+     * 过滤协调器输出中混入的 PhoneAgent 操作指令
+     * 协调器应该只输出目标描述（"打开微信"），不应输出具体操作（"do(action='Tap')"）
+     * 
+     * 过滤模式：
+     * - do(action="...", ...) → 删除
+     * - finish(message="...") → 删除
+     * - 点击坐标(x,y) → 删除
+     * - 点击"按钮名" → 点击"按钮名"（保留，这是目标描述）
+     */
+    private fun stripActionCommands(text: String): String {
+        var result = text
+            // 过滤 do(action=...) 格式
+            .replace(Regex("""do\s*\(\s*action\s*=\s*["'][^"']*["'][^)]*\)""", RegexOption.IGNORE_CASE), "")
+            // 过滤 finish(message=...) 格式
+            .replace(Regex("""finish\s*\(\s*message\s*=\s*["'][^"']*["']\s*\)""", RegexOption.IGNORE_CASE), "")
+            // 过滤坐标格式：(123, 456) 或 坐标(123,456)
+            .replace(Regex("""[坐标coordinates]*\s*\(\s*\d+\s*,\s*\d+\s*\)""", RegexOption.IGNORE_CASE), "")
+            .trim()
+        
+        // 清理多余空白
+        result = result.replace(Regex("""\s{2,}"""), " ").trim()
+        
+        if (result.isBlank() && text.isNotBlank()) {
+            Logger.w(Logger.AGENT, "[COORDINATOR] Output was entirely action commands: ${text.take(100)}")
+            // 尝试从 Launch 动作中提取应用名，转为自然语言指令
+            val launchMatch = Regex("""do\s*\(\s*action\s*=\s*["']Launch["']\s*,\s*app\s*=\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE).find(text)
+            if (launchMatch != null) {
+                val appName = launchMatch.groupValues[1]
+                return "打开${appName}应用"
+            }
+            // 其他动作类型无法转换，返回原文让 PhoneAgent 自己处理
+            return text
+        }
+        return result
     }
 
     /**
@@ -340,191 +370,7 @@ class SmartCoordinator(
      */
     fun clearGatheredInfo() {
         gatheredInfo.clear()
-    }
-
-    /**
-     * 解析规划响应
-     * 支持两种格式：
-     * 1. JSON格式 - 解析为多个子任务
-     * 2. 自然语言 - 作为单个子任务的指导
-     */
-    private fun parsePlanningResponse(responseText: String, originalTask: String): TaskPlan? {
-        // 先尝试解析JSON格式
-        try {
-            val jsonText = extractJson(responseText)
-            if (jsonText.isNotBlank()) {
-                val planResponse = gson.fromJson(jsonText, PlanResponse::class.java)
-
-                if (planResponse.subTasks.size > config.maxSubTasks) {
-                    Logger.w(Logger.AGENT, "Too many sub-tasks (${planResponse.subTasks.size}), truncating to ${config.maxSubTasks}")
-                    planResponse.subTasks = planResponse.subTasks.take(config.maxSubTasks)
-                }
-
-                Logger.i(Logger.AGENT, "Successfully parsed JSON plan with ${planResponse.subTasks.size} sub-tasks")
-                return TaskPlan(
-                    originalTask = originalTask,
-                    analysis = planResponse.analysis,
-                    subTasks = planResponse.subTasks.map { subTask ->
-                        PlannedSubTask(
-                            index = subTask.index,
-                            goal = subTask.goal,
-                            currentState = subTask.currentState,
-                            actions = subTask.actions,
-                            context = subTask.context,
-                            dependencies = subTask.dependencies
-                        )
-                    },
-                    estimatedDuration = planResponse.estimatedDuration
-                )
-            }
-        } catch (e: JsonSyntaxException) {
-            Logger.w(Logger.AGENT, "JSON parse failed, will use natural language response: ${e.message}")
-        } catch (e: Exception) {
-            Logger.w(Logger.AGENT, "Error parsing JSON, will use natural language response: ${e.message}")
-        }
-
-        // JSON解析失败或没有JSON，把模型的自然语言输出作为任务指导
-        if (responseText.isNotBlank()) {
-            Logger.i(Logger.AGENT, "Using natural language response as task guidance")
-            return TaskPlan(
-                originalTask = originalTask,
-                analysis = responseText,  // 整个回复作为分析
-                subTasks = listOf(
-                    PlannedSubTask(
-                        index = 1,
-                        goal = originalTask,
-                        currentState = "待执行",
-                        actions = responseText,  // 模型的自然语言输出作为操作指导
-                        context = "协调器提供的任务指导",
-                        dependencies = emptyList()
-                    )
-                )
-            )
-        }
-
-        Logger.e(Logger.AGENT, "Empty response from coordinator")
-        return null
-    }
-
-    /**
-     * 解析监督响应
-     */
-    private fun parseSupervisionResponse(responseText: String): SupervisionResult? {
-        try {
-            val jsonText = extractJson(responseText)
-            if (jsonText.isBlank()) {
-                return null
-            }
-
-            val response = gson.fromJson(jsonText, SupervisionResponse::class.java)
-
-            return SupervisionResult(
-                status = when (response.status.lowercase()) {
-                    "success" -> SupervisionStatus.SUCCESS
-                    "needs_correction" -> SupervisionStatus.NEEDS_CORRECTION
-                    "failed" -> SupervisionStatus.FAILED
-                    else -> SupervisionStatus.UNCERTAIN
-                },
-                assessment = response.assessment,
-                correctionInstruction = response.correctionInstruction,
-                gatheredInfo = response.gatheredInfo ?: ""
-            )
-
-        } catch (e: JsonSyntaxException) {
-            Logger.e(Logger.AGENT, "Failed to parse supervision response", e)
-            return null
-        }
-    }
-
-    /**
-     * 从响应中提取JSON
-     */
-    private fun extractJson(text: String): String {
-        val jsonBlockRegex = "```json\\s*([\\s\\S]*?)\\s*```".toRegex()
-        val jsonMatch = jsonBlockRegex.find(text)
-        if (jsonMatch != null) {
-            return jsonMatch.groupValues[1].trim()
-        }
-
-        val codeBlockRegex = "```\\s*([\\s\\S]*?)\\s*```".toRegex()
-        val codeMatch = codeBlockRegex.find(text)
-        if (codeMatch != null) {
-            return codeMatch.groupValues[1].trim()
-        }
-
-        val jsonObjectRegex = "\\{[\\s\\S]*\\}".toRegex()
-        val objectMatch = jsonObjectRegex.find(text)
-        if (objectMatch != null) {
-            return objectMatch.value.trim()
-        }
-
-        return text.trim()
-    }
-
-    /**
-     * 构建监督系统提示词
-     */
-    private fun buildSupervisionSystemPrompt(language: String): String {
-        return when (language) {
-            "en" -> SUPERVISION_SYSTEM_PROMPT_EN
-            else -> SUPERVISION_SYSTEM_PROMPT_CN
-        }
-    }
-
-    /**
-     * 构建监督用户提示词
-     */
-    private fun buildSupervisionPrompt(
-        subTask: PlannedSubTask,
-        agentThinking: String,
-        agentAction: String,
-        language: String
-    ): String {
-        return when (language) {
-            "en" -> """
-You need to supervise the execution of the following sub-task:
-
-**Sub-task Goal:**
-${subTask.goal}
-
-**Expected Operations:**
-${subTask.actions}
-
-**Context:**
-${subTask.context}
-
-**UI Agent's Execution:**
-- Thinking: $agentThinking
-- Action: $agentAction
-
-**Current Screenshot:**
-Please check the screenshot to verify if the sub-task goal has been achieved.
-
-Please analyze and provide your supervision result in JSON format.
-            """.trimIndent()
-
-            else -> """
-你需要监督以下子任务的执行情况：
-
-**子任务目标：**
-${subTask.goal}
-
-**应该执行的操作：**
-${subTask.actions}
-
-**上下文：**
-${subTask.context}
-
-**UI Agent的执行情况：**
-- 思考过程：$agentThinking
-- 执行的操作：$agentAction
-
-**当前截图：**
-请查看截图，判断子任务目标是否已达成。
-
-请分析并以JSON格式提供你的监督结果。
-            """.trimIndent()
-        }
+        stepCount = 0
     }
 
     /**
@@ -533,157 +379,114 @@ ${subTask.context}
     fun release() {
         coordinatorClient = null
         gatheredInfo.clear()
+        stepCount = 0
     }
 
-    // ==================== 内部数据类 ====================
+    /**
+     * 后处理协调器思考输出
+     * 检测 JSON 格式（含 markdown 代码块包裹）并转为可读的自然语言文本
+     */
+    private fun formatThinkingOutput(thinking: String): String {
+        // 先剥离 markdown 代码块标记（```json ... ```）
+        val cleaned = stripMarkdownCodeBlock(thinking.trim())
+        // 检测是否为 JSON 对象或数组
+        if (!((cleaned.startsWith("{") && cleaned.endsWith("}")) ||
+              (cleaned.startsWith("[") && cleaned.endsWith("]")))) {
+            return thinking
+        }
+        return try {
+            val json = org.json.JSONObject(cleaned)
+            buildString {
+                for (key in json.keys()) {
+                    val label = THINKING_KEY_LABELS[key] ?: key
+                    appendLine("$label：${json.get(key)}")
+                }
+            }.trimEnd()
+        } catch (_: Exception) {
+            try {
+                val arr = org.json.JSONArray(cleaned)
+                buildString {
+                    for (i in 0 until arr.length()) {
+                        appendLine("- ${arr.get(i)}")
+                    }
+                }.trimEnd()
+            } catch (_: Exception) {
+                thinking
+            }
+        }
+    }
 
-    private data class PlanResponse(
-        @SerializedName("analysis")
-        val analysis: String,
-
-        @SerializedName("estimated_duration")
-        val estimatedDuration: Int?,
-
-        @SerializedName("sub_tasks")
-        var subTasks: List<SubTaskResponse>
-    )
-
-    private data class SubTaskResponse(
-        @SerializedName("index")
-        val index: Int,
-
-        @SerializedName("goal")
-        val goal: String,
-
-        @SerializedName("current_state")
-        val currentState: String,
-
-        @SerializedName("actions")
-        val actions: String,
-
-        @SerializedName("context")
-        val context: String,
-
-        @SerializedName("dependencies")
-        val dependencies: List<Int> = emptyList()
-    )
-
-    private data class SupervisionResponse(
-        @SerializedName("status")
-        val status: String,
-
-        @SerializedName("assessment")
-        val assessment: String,
-
-        @SerializedName("correction_instruction")
-        val correctionInstruction: String?,
-
-        @SerializedName("gathered_info")
-        val gatheredInfo: String?
-    )
+    /**
+     * 剥离 markdown 代码块标记
+     * 处理 ```json\n{...}\n``` 或 ```\n{...}\n``` 格式
+     */
+    private fun stripMarkdownCodeBlock(text: String): String {
+        val trimmed = text.trim()
+        if (!trimmed.startsWith("```")) return trimmed
+        // 去掉首行 ```json 或 ``` 和末尾 ```
+        val lines = trimmed.lines()
+        val start = if (lines.first().startsWith("```")) 1 else 0
+        val end = if (lines.last().trim() == "```") lines.size - 1 else lines.size
+        return lines.subList(start, end).joinToString("\n").trim()
+    }
 
     companion object {
-        /**
-         * 监督系统提示词（中文）
-         */
-        val SUPERVISION_SYSTEM_PROMPT_CN = """你是一个任务监督专家，负责监督UI Agent执行任务的质量。
-
-你的职责：
-1. 查看UI Agent的思考过程和执行的操作
-2. 查看执行后的截图
-3. 判断子任务目标是否已正确达成
-4. 如果有问题，提供清晰的纠正指令
-5. 提取和总结获取到的有用信息
-
-**关键判断原则：**
-1. **success判断**（非常重要）：
-   - ✅ 界面已改变且新界面符合子任务目标
-   - ✅ 操作已完成且无进行中的加载动画
-   - ✅ 用户能在截图中清楚看到任务已完成的视觉反馈
-   - ❌ 不要过度谨慎！如果目标明确达成就标记为success，不要因为"可能需要确认"就标记为uncertain
-
-2. **needs_correction判断**：
-   - 操作方向正确但有小偏差（如点击位置不精准）
-   - 找到的是相似但不完全正确的目标
-   - Agent找到了目标但遗漏了额外要求（如"少冰少糖"）
-
-3. **避免过度使用uncertain**：
-   - 只有在完全无法判断时才用uncertain（如图片不清楚、加载中等）
-   - 不要因为"还需要后续步骤"就标记为uncertain，每个子任务独立判断
-
-请严格按照以下JSON格式输出监督结果：
-
-```json
-{
-  "status": "success | needs_correction | failed | uncertain",
-  "assessment": "对执行情况的详细评估（必须明确说明达成情况）",
-  "correction_instruction": "纠正指令（如果status是needs_correction）",
-  "gathered_info": "从当前截图或执行过程中获取到的有用信息"
-}```
-
-**状态说明：**
-- **success**: 子任务已正确完成，达成了预期目标。即使还有后续步骤，只要这个子任务的目标达成就标记为success
-- **needs_correction**: 操作方向正确但有偏差，需要纠正。Agent需要调整才能正确达成目标
-- **failed**: 操作完全错误或进入了错误的应用/界面，完全未能达成目标
-- **uncertain**: 无法判断当前状态（如加载中、图片不清楚等）。谨慎使用此状态，优先选择success或needs_correction
-
-**纠正指令原则：**
-1. 指令要具体、可执行
-2. 说明哪里出了问题
-3. 提供明确的改进方向
-4. 例如："当前点击位置偏上，实际的搜索框在坐标(500, 200)处，请重新点击正确位置"
-
-**信息收集原则：**
-1. 提取截图中的关键信息（如商品价格、店铺名称、评分等）
-2. 总结操作达成的中间状态
-3. 记录可能对后续任务有帮助的信息
-4. 例如："找到星巴克门店，地址：XX路XX号，评分4.8分，配送费5元"
-"""
+        /** 思考 JSON key → 中文标签映射 */
+        private val THINKING_KEY_LABELS = mapOf(
+            "assessment" to "当前评估",
+            "analysis" to "分析",
+            "current_state" to "当前状态",
+            "next_step" to "下一步",
+            "next_action" to "下一步操作",
+            "instruction" to "指令",
+            "reason" to "原因",
+            "reasoning" to "推理",
+            "status" to "状态",
+            "thought" to "思考",
+            "observation" to "观察",
+            "plan" to "计划",
+            "goal" to "目标",
+            "progress" to "进度",
+            "gathered_info" to "收集信息"
+        )
 
         /**
-         * 监督系统提示词（英文）
+         * 决策系统提示词 — 统一通过 PromptRegistry 获取
          */
-        val SUPERVISION_SYSTEM_PROMPT_EN = """You are a task supervision expert responsible for monitoring the quality of UI Agent's task execution.
-
-Your responsibilities:
-1. Review UI Agent's thinking process and executed operations
-2. View the screenshot after execution
-3. Determine if the sub-task goal has been correctly achieved
-4. If there are problems, provide clear correction instructions
-5. Extract and summarize useful information obtained
-
-Please output supervision results strictly in the following JSON format:
-
-```json
-{
-  "status": "success | needs_correction | failed | uncertain",
-  "assessment": "Detailed assessment of the execution",
-  "correction_instruction": "Correction instruction (if status is needs_correction)",
-  "gathered_info": "Useful information obtained from current screenshot or execution process"
-}```
-
-**Status explanation:**
-- **success**: Sub-task correctly completed, achieved expected goal
-- **needs_correction**: Operation direction correct but has deviation, needs correction
-- **failed**: Operation completely wrong, failed to achieve goal
-- **uncertain**: Cannot determine, need to continue observing
-"""
+        val DECISION_SYSTEM_PROMPT_CN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.COORDINATOR_SYSTEM_CN)
+        val DECISION_SYSTEM_PROMPT_EN: String get() = com.autoglm.assistant.ai.PromptRegistry.get(com.autoglm.assistant.ai.PromptKey.COORDINATOR_SYSTEM_EN)
     }
 }
 
 /**
- * 监督状态
+ * 决策状态
  */
-enum class SupervisionStatus {
-    SUCCESS,            // 成功完成
-    NEEDS_CORRECTION,   // 需要纠正
-    FAILED,            // 失败
-    UNCERTAIN          // 不确定
+enum class DecisionStatus {
+    CONTINUE,       // 继续执行
+    COMPLETE,       // 任务完成
+    FAILED          // 任务失败
 }
 
 /**
- * 监督结果
+ * 协调器决策结果
  */
+data class CoordinatorDecision(
+    val status: DecisionStatus,
+    val assessment: String,
+    val nextInstruction: String?,
+    val gatheredInfo: String
+)
+
+// 保留旧的枚举和数据类以保持兼容性，但标记为废弃
+@Deprecated("Use CoordinatorDecision instead")
+enum class SupervisionStatus {
+    SUCCESS,
+    NEEDS_CORRECTION,
+    FAILED,
+    UNCERTAIN
+}
+
+@Deprecated("Use CoordinatorDecision instead")
 data class SupervisionResult(
     val status: SupervisionStatus,
     val assessment: String,

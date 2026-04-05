@@ -24,6 +24,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var optimizerMessageIndex = -1
     private var plannerMessageIndex = -1
     private var summaryMessageIndex = -1
+    private var stepMessageIndex = -1
     private var hasShownSubtaskCards = false
     private var lastCoordinatorContent: String? = null
     
@@ -95,9 +96,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         
         conv.timestamp = System.currentTimeMillis()
         
-        // Auto-generate title
-        if (conv.title == "New Chat" && message.isUser) {
-            conv.title = message.content.take(30) + if (message.content.length > 30) "..." else ""
+        // 自动生成标题：新对话收到第一条用户消息时截取内容作为标题
+        if (conv.title == Conversation.DEFAULT_CONVERSATION_TITLE && message.isUser) {
+            conv.title = Conversation.generateTitle(message.content)
         }
         
         // Reorder conversations
@@ -129,6 +130,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         optimizerMessageIndex = -1
         plannerMessageIndex = -1
         summaryMessageIndex = -1
+        stepMessageIndex = -1
         hasShownSubtaskCards = false
         lastCoordinatorContent = null
         lastThinkingContent = null
@@ -191,26 +193,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // 根据消息类型确定来源标识，用于UI渲染不同图标
+        val source = when (msg.type) {
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_STREAMING,
+            WakeWordService.CoordinatorMessageType.OPTIMIZER_COMPLETE -> MessageSource.OPTIMIZER
+            WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING,
+            WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> MessageSource.SUMMARY
+            else -> MessageSource.COORDINATOR
+        }
+
         val displayContent = when (msg.type) {
             WakeWordService.CoordinatorMessageType.OPTIMIZER_STREAMING -> {
-                if (msg.content.isBlank()) "✨ 正在优化指令..." 
-                else "✨ 正在优化指令...\n\n${msg.content}"
+                if (msg.content.isBlank()) "✨ **[优化器]** 正在优化指令..." 
+                else "✨ **[优化器]** 正在优化指令...\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.OPTIMIZER_COMPLETE -> {
-                "✨ **指令优化完成**\n\n${msg.content}"
+                "✨ **[优化器]** 指令优化完成\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.PLANNING_STREAMING -> {
-                if (msg.content.isBlank()) "🤔 正在规划任务..."
-                else "🤔 正在规划任务...\n\n${msg.content}"
+                if (msg.content.isBlank()) "🤔 **[规划器]** 正在规划任务..."
+                else "🤔 **[规划器]** 正在规划任务...\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.PLAN_COMPLETE -> {
-                "📋 **任务规划：**\n\n${msg.content}"
+                "📋 **[规划器]** 任务规划：\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
                 msg.content // JSON content, will be rendered by UI
             }
             WakeWordService.CoordinatorMessageType.SUBTASK_START -> {
-                "▶️ 开始执行子任务：${msg.content}"
+                "▶️ **[协调器]** ${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.SUPERVISION_RESULT -> {
                 val parts = msg.content.split("|", limit = 2)
@@ -226,14 +237,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 "$emoji 监督结果\n\n$content"
             }
             WakeWordService.CoordinatorMessageType.COORDINATOR_THINKING -> {
-                "💭 协调器思考：\n${msg.content}"
+                "🎯 **[协调器]** ${msg.content}"
+            }
+            WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
+                // content 格式: "currentStep|maxSteps"
+                val parts = msg.content.split("|", limit = 2)
+                val current = parts.getOrNull(0) ?: "?"
+                val max = parts.getOrNull(1) ?: "?"
+                "🔄 **[协调器]** 执行中 [$current/$max]"
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING -> {
-                if (msg.content.isBlank()) "📝 正在生成任务总结..."
-                else "📝 正在总结...\n\n${msg.content}"
+                if (msg.content.isBlank()) "📝 **[总结]** 正在生成任务总结..."
+                else "📝 **[总结]** 正在总结...\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {
-                "📝 **任务总结：**\n\n${msg.content}"
+                "📝 **[总结]** 任务总结：\n\n${msg.content}"
             }
             WakeWordService.CoordinatorMessageType.CLEAR -> ""
         }
@@ -249,10 +267,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         id = oldMsg.id,
                         content = displayContent,
                         isUser = false,
-                        timestamp = oldMsg.timestamp
+                        timestamp = oldMsg.timestamp,
+                        source = source
                     ))
                 } else {
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    addMessage(ChatMessage(content = displayContent, isUser = false, source = source))
                     optimizerMessageIndex = messages.size - 1
                 }
 
@@ -275,16 +294,33 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         id = oldMsg.id,
                         content = content,
                         isUser = false,
-                        timestamp = oldMsg.timestamp
+                        timestamp = oldMsg.timestamp,
+                        source = source
                     ))
                 } else {
-                    addMessage(ChatMessage(content = content, isUser = false))
+                    addMessage(ChatMessage(content = content, isUser = false, source = source))
                     plannerMessageIndex = messages.size - 1
                 }
             }
             WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
                 hasShownSubtaskCards = true
-                addMessage(ChatMessage(content = displayContent, isUser = false))
+                addMessage(ChatMessage(content = displayContent, isUser = false, source = source))
+            }
+            WakeWordService.CoordinatorMessageType.COORDINATOR_STEP -> {
+                // 步骤计数器：原地更新同一条消息，避免刷屏
+                if (stepMessageIndex >= 0 && stepMessageIndex < messages.size) {
+                    val oldMsg = messages[stepMessageIndex]
+                    updateMessage(stepMessageIndex, ChatMessage(
+                        id = oldMsg.id,
+                        content = displayContent,
+                        isUser = false,
+                        timestamp = oldMsg.timestamp,
+                        source = source
+                    ))
+                } else {
+                    addMessage(ChatMessage(content = displayContent, isUser = false, source = source))
+                    stepMessageIndex = messages.size - 1
+                }
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING,
             WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {
@@ -295,18 +331,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         id = oldMsg.id,
                         content = displayContent,
                         isUser = false,
-                        timestamp = oldMsg.timestamp
+                        timestamp = oldMsg.timestamp,
+                        source = source
                     ))
                 } else {
                     // 对于SUMMARY_COMPLETE或新的SUMMARY_STREAMING，总是添加新消息
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    addMessage(ChatMessage(content = displayContent, isUser = false, source = source))
                     summaryMessageIndex = messages.size - 1
                 }
             }
             else -> {
                 if (displayContent != lastCoordinatorContent) {
                     lastCoordinatorContent = displayContent
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    addMessage(ChatMessage(content = displayContent, isUser = false, source = source))
                 }
             }
         }

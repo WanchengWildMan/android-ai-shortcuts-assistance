@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Install Packages (for ADB Keyboard auto-install) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Audio Recording for Wake Word -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
@@ -28,6 +31,12 @@
 
     <!-- Vibration -->
     <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Battery Optimization - 确保后台服务不会被系统杀死 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- 非root设备切换输入法 - 需通过 adb shell pm grant <包名> android.permission.WRITE_SECURE_SETTINGS 授予 -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <application
         android:name=".App"
@@ -62,7 +71,11 @@
             android:name=".service.WakeWordService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="microphone|mediaProjection" />
+            android:foregroundServiceType="microphone|mediaProjection|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="task_execution" />
+        </service>
 
         <!-- Floating Window Service -->
         <service
@@ -87,6 +100,25 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- FileProvider for APK installation -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Assistant Translucent Activity for STT -->
+        <activity
+            android:name=".voice.AssistantActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
 
     </application>
 

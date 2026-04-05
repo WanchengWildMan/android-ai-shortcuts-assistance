@@ -321,5 +321,40 @@ object AppDetector {
         return@withContext result
     }
 
+    /**
+     * 获取与搜索词相似的已安装应用名称和包名（用于 Launch 失败时提示AI）
+     * @return 最多5个相似应用，格式为 "应用名(包名)" 列表，便于AI用包名重试
+     */
+    suspend fun getSimilarInstalledApps(context: Context, appName: String): List<String> = withContext(Dispatchers.IO) {
+        val result = mutableListOf<Triple<String, String, Int>>() // label, packageName, score
+        try {
+            val pm = context.packageManager
+            val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            val searchName = appName.lowercase()
+
+            for (appInfo in packages) {
+                try {
+                    // 只包含有启动器图标的应用
+                    if (pm.getLaunchIntentForPackage(appInfo.packageName) == null) continue
+                    val label = pm.getApplicationLabel(appInfo).toString()
+                    val labelLower = label.lowercase()
+
+                    // 计算相似度分数
+                    val score = when {
+                        labelLower.contains(searchName) || searchName.contains(labelLower) -> 80
+                        // 共有字符比例
+                        labelLower.toSet().intersect(searchName.toSet()).size.toFloat() / searchName.length > 0.5f -> 30
+                        else -> 0
+                    }
+                    if (score > 0) {
+                        result.add(Triple(label, appInfo.packageName, score))
+                    }
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+        // 返回格式: "应用名(包名)"，让AI可以直接用包名进行 Launch
+        result.sortedByDescending { it.third }.take(5).map { "${it.first}(${it.second})" }
+    }
+
     fun getSupportedApps(): Map<String, String> = APP_PACKAGES
 }

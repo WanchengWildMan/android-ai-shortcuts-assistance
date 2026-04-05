@@ -135,3 +135,10 @@ hs_err_pid*
 # Downloaded wake word files
 小爱_zh_android_v4_0_0.zip
 小爱_zh_android_v4_0_0/
+/~/.claude-memories
+/docs/Operit
+/logs
+*.jpg
+.claude-memory/
+.claude/
+~/
