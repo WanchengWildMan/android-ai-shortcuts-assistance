@@ -245,6 +245,14 @@ adb logcat | grep -E "AutoGLM|PhoneAgent|WakeWordService"
 
 ---
 
+## 致谢
+
+- [Open-AutoGLM](https://github.com/THUDM/AutoGLM) — 核心 AI 手机操作框架
+- [Operit AI](https://github.com/AAswordman/Operit) — 安卓 AI 助手应用，本项目无障碍服务架构和部分实现方案参考了 Operit 的设计
+- [Picovoice Porcupine](https://picovoice.ai/platform/porcupine/) — 离线语音唤醒引擎
+
+---
+
 ## License
 
 本项目基于 Open-AutoGLM 框架开发。
