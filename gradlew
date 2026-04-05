@@ -32,8 +32,10 @@ if [ ! -f "$WRAPPER_JAR" ]; then
     GRADLE_VERSION=$(grep "distributionUrl" "$WRAPPER_PROPERTIES" | sed 's/.*gradle-\([0-9.]*\).*/\1/')
     echo "Downloading Gradle wrapper jar..."
     mkdir -p "$APP_HOME/gradle/wrapper"
-    curl -sLo "$WRAPPER_JAR" "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" 2>/dev/null || \
-    curl -sLo "$WRAPPER_JAR" "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-wrapper.jar.md5" 2>/dev/null
+    if ! curl -fsSL -o "$WRAPPER_JAR" "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar"; then
+        echo "Failed to download gradle-wrapper.jar for Gradle ${GRADLE_VERSION}" >&2
+        exit 1
+    fi
 fi
 
 # Find java
