@@ -139,3 +139,6 @@ hs_err_pid*
 /docs/Operit
 /logs
 *.jpg
+.claude-memory/
+.claude/
+~/
