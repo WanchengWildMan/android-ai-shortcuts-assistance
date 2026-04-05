@@ -78,7 +78,8 @@ class SystemSttWakeEngine(
     private fun checkRecognitionSupport() {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             throw IllegalStateException(
-                "设备不支持系统语音识别。可能原因：1) 未安装 Google 语音服务 2) 语音服务被禁用"
+                "该设备不支持系统语音识别（可能是无 Google 服务的国产 ROM）。" +
+                "建议：1) 在设置中改用「API 模式」唤醒词识别 2) 安装 Google 语音服务"
             )
         }
     }

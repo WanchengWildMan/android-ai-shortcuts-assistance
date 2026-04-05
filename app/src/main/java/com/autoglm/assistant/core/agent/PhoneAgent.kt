@@ -557,17 +557,15 @@ class PhoneAgent(
             when (decision.status) {
                 com.autoglm.assistant.core.planner.DecisionStatus.COMPLETE -> {
                     Logger.i(Logger.AGENT, "✓ Coordinator: Task complete")
-                    // 任务完成，恢复默认行为并返回 app
-                    actionExecutor.returnToAppOnFinish = true
-                    actionExecutor.returnToAutoGLM()
-                    // 步骤: 执行完成后立即恢复输入法
+                    // 步骤1: 恢复输入法（不阻塞）
                     ShellExecutor.endAdbKeyboardSession()
-                    val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: decision.assessment
+                    // 步骤2: 立即通知服务任务完成，使唤醒监听尽快恢复
+                    // 不等待总结生成（LLM 调用耗时 17-20 秒，会阻塞服务恢复）
                     if (!stopRequested) {
-                        onTaskComplete?.invoke(summaryMessage)
-                    } else {
-                        Logger.w(Logger.AGENT, "Stop requested during coordinator summary, skipping onTaskComplete")
+                        onTaskComplete?.invoke(decision.assessment)
                     }
+                    // 步骤3: 异步生成任务总结，通过 onTaskSummary 回调更新
+                    val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: decision.assessment
                     return summaryMessage
                 }
 
@@ -655,15 +653,12 @@ class PhoneAgent(
         val finalMessage = "Task execution completed after $coordinatorSteps coordinator steps"
         Logger.i(Logger.AGENT, "========== COORDINATOR EXECUTION COMPLETE ==========")
 
-        // 协调器任务全部结束，恢复默认行为并执行一次返回 app
-        actionExecutor.returnToAppOnFinish = true
-        actionExecutor.returnToAutoGLM()
-
-        // 步骤: 执行完成后立即恢复输入法，不等总结生成
+        // 步骤1: 恢复输入法（不阻塞）
         ShellExecutor.endAdbKeyboardSession()
-
+        // 步骤2: 立即通知服务任务完成，使唤醒监听尽快恢复
+        onTaskComplete?.invoke(finalMessage)
+        // 步骤3: 异步生成任务总结（LLM 调用可能耗时 17-20 秒，不阻塞服务恢复）
         val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
-        onTaskComplete?.invoke(summaryMessage)
         return summaryMessage
     }
 
@@ -894,20 +889,17 @@ class PhoneAgent(
         Logger.i(Logger.AGENT, "========== TASK COMPLETED ==========")
         Logger.i(Logger.AGENT, "Result: $finalMessage (steps: $currentStep)")
 
-        // 步骤: 执行完成后立即恢复输入法，不等总结生成
+        // 步骤1: 恢复输入法（不阻塞）
         ShellExecutor.endAdbKeyboardSession()
-
-        // 生成任务总结（如果启用）
-        val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
-
-        // 防御：如果总结生成期间用户触发了干预（stop），不触发 onTaskComplete
-        // 否则会覆盖干预流程设置的 EXECUTING_TASK 状态
-        if (stopRequested) {
-            Logger.w(Logger.AGENT, "Stop requested during summary, skipping onTaskComplete")
-            return summaryMessage
+        // 步骤2: 立即通知服务任务完成，使唤醒监听尽快恢复
+        // 不等待总结生成（LLM 调用耗时 17-20 秒，期间进程可能被系统杀死）
+        if (!stopRequested) {
+            onTaskComplete?.invoke(finalMessage)
+        } else {
+            Logger.w(Logger.AGENT, "Stop requested, skipping onTaskComplete")
         }
-
-        onTaskComplete?.invoke(summaryMessage)
+        // 步骤3: 异步生成任务总结
+        val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
         return summaryMessage
     }
 

@@ -115,6 +115,16 @@ class WakeListeningOverlay(context: Context) {
     }
 
     /**
+     * 将文字设置到"输入指令"输入框中（供外部调用，如语音识别中间结果回填）
+     */
+    fun setInputFieldText(text: String) {
+        mainHandler.post {
+            inputField?.setText(text)
+            inputField?.setSelection(text.length)
+        }
+    }
+
+    /**
      * 更新 STT 实时识别的部分结果
      */
     fun updatePartialResult(partial: String) {

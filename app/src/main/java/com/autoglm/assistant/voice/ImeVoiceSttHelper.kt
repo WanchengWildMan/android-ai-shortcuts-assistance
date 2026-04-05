@@ -18,19 +18,21 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import com.autoglm.assistant.accessibility.UIHierarchyManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * 通过 IME（输入法）语音功能实现 STT 的辅助类
  *
  * 流程：
  * 1. 弹出悬浮输入框 → 获取焦点 → 输入法弹出
- * 2. 用 root 权限模拟长按输入法空格键 → 触发语音输入
+ * 2. 通过无障碍服务点击语音按钮坐标 → 开始录音
  * 3. 监听输入框文字变化 → 当文字稳定后作为识别结果返回
- * 4. 收起输入框
+ * 4. 再次点击同一坐标结束录音，收起输入框
  *
- * 注意：空格键坐标因设备和键盘布局而异，需在设置中配置
+ * 注意：语音按钮坐标因设备和键盘布局而异，需在设置中配置
  */
 class ImeVoiceSttHelper(private val context: Context) {
 
@@ -38,8 +40,6 @@ class ImeVoiceSttHelper(private val context: Context) {
         private const val TAG = "ImeVoiceSTT"
         // 文字稳定后等待时间（毫秒），超过此时间无新文字则认为识别完成
         private const val TEXT_STABLE_DELAY_MS = 2000L
-        // 长按空格键持续时间（毫秒）
-        private const val LONG_PRESS_DURATION_MS = 600
         // 弹出输入法后等待键盘就绪的延迟（毫秒）
         private const val KEYBOARD_READY_DELAY_MS = 800L
         // 最大等待时间（毫秒），超过后自动超时
@@ -88,10 +88,10 @@ class ImeVoiceSttHelper(private val context: Context) {
             }
             onStatusChange?.invoke("等待键盘就绪...")
 
-            // 步骤4: 等待键盘弹出后模拟长按空格
+            // 步骤4: 等待键盘弹出后点击语音按钮开始录音
             mainHandler.postDelayed({
                 if (!isActive) return@postDelayed
-                simulateLongPressSpace()
+                tapVoiceButton()
                 onStatusChange?.invoke("请说话...")
                 startTextMonitor()
                 startTimeout()
@@ -108,32 +108,19 @@ class ImeVoiceSttHelper(private val context: Context) {
     }
 
     /**
-     * 模拟长按空格键（需要 root 权限）
+     * 点击语音按钮（开始或结束录音）
+     * 通过无障碍服务 Provider 执行单击，不需要 root
+     * 失败时仅记录日志，不中断主流程
      */
-    private fun simulateLongPressSpace() {
-        Thread {
+    private fun tapVoiceButton() {
+        CoroutineScope(Dispatchers.IO).launch {
             try {
-                // 使用 input swipe 在同一点模拟长按
-                val cmd = "su -c 'input swipe $spaceX $spaceY $spaceX $spaceY $LONG_PRESS_DURATION_MS'"
-                Log.i(TAG, "模拟长按空格键: ($spaceX, $spaceY), 持续 ${LONG_PRESS_DURATION_MS}ms")
-                val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-                val exitCode = process.waitFor()
-                if (exitCode != 0) {
-                    val error = BufferedReader(InputStreamReader(process.errorStream)).readText()
-                    Log.e(TAG, "模拟长按失败: exitCode=$exitCode, error=$error")
-                    mainHandler.post {
-                        onError?.invoke("模拟长按失败（需要 root 权限）: $error")
-                        cleanup()
-                    }
-                }
+                val success = UIHierarchyManager.performClick(context, spaceX, spaceY)
+                Log.i(TAG, "点击语音按钮 ($spaceX, $spaceY): ${if (success) "成功" else "失败（无障碍服务未连接）"}")
             } catch (e: Exception) {
-                Log.e(TAG, "模拟长按异常", e)
-                mainHandler.post {
-                    onError?.invoke("模拟长按异常: ${e.message}")
-                    cleanup()
-                }
+                Log.w(TAG, "点击语音按钮异常: ${e.message}")
             }
-        }.start()
+        }
     }
 
     /**
@@ -145,7 +132,12 @@ class ImeVoiceSttHelper(private val context: Context) {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
                 val text = s?.toString()?.trim() ?: ""
-                if (text.isBlank()) return
+                if (text.isBlank()) {
+                    // 步骤: 退格完全清空时，同步通知外部清空 inputField 显示，但不触发稳定检测
+                    lastText = ""
+                    onStatusChange?.invoke("识别中: ")
+                    return
+                }
 
                 lastText = text
                 onStatusChange?.invoke("识别中: $text")
@@ -156,6 +148,8 @@ class ImeVoiceSttHelper(private val context: Context) {
                     if (isActive && lastText.isNotBlank()) {
                         Log.i(TAG, "文字已稳定: $lastText")
                         isActive = false
+                        // 步骤: 再次点击原位结束录音
+                        tapVoiceButton()
                         onResult?.invoke(lastText)
                         cleanup()
                     }
@@ -173,6 +167,8 @@ class ImeVoiceSttHelper(private val context: Context) {
             if (isActive) {
                 Log.w(TAG, "IME 语音输入超时")
                 isActive = false
+                // 步骤: 点击原位结束录音
+                tapVoiceButton()
                 if (lastText.isNotBlank()) {
                     onResult?.invoke(lastText)
                 } else {
@@ -209,74 +205,50 @@ class ImeVoiceSttHelper(private val context: Context) {
     }
 
     /**
-     * 创建悬浮输入框
+     * 创建不可见的焦点承载窗口
+     * 目的: 仅用于获取输入法焦点、接收 IME 语音识别回填的文字，本身完全透明不可见
+     * 状态和结果通过 onStatusChange/onResult 回调传给外层悬浮卡片（WakeListeningOverlay）显示
      */
     private fun createOverlay() {
         if (overlayView != null) return
 
+        // 步骤1: 透明容器，无任何视觉元素（不显示给用户）
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(16).toFloat()
-                setColor(Color.parseColor("#F0181A20"))
-                setStroke(dp(1), Color.parseColor("#4D64B5F6"))
-            }
+            setBackgroundColor(Color.TRANSPARENT)
         }
 
-        // 提示文字
-        val hintLabel = TextView(context).apply {
-            text = "🎤 语音输入中..."
-            setTextColor(Color.parseColor("#E8EAED"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            gravity = Gravity.CENTER
-        }
-        container.addView(hintLabel)
-        hintText = hintLabel
-
-        // 输入框（接收 IME 语音识别的文字）
+        // 步骤2: 功能性 EditText — 透明不可见，仅用于接收键盘焦点和 IME 语音回填文字
         val et = EditText(context).apply {
-            hint = "等待语音输入..."
-            setHintTextColor(Color.parseColor("#66FFFFFF"))
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(8).toFloat()
-                setColor(Color.parseColor("#33FFFFFF"))
-            }
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setBackgroundColor(Color.TRANSPARENT)
+            setTextColor(Color.TRANSPARENT)
+            setHintTextColor(Color.TRANSPARENT)
             isFocusable = true
             isFocusableInTouchMode = true
             maxLines = 3
         }
-        val etParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(8) }
-        container.addView(et, etParams)
+        container.addView(et, LinearLayout.LayoutParams(1, 1))  // 1x1 像素，不占屏幕空间
         editText = et
+        hintText = null  // 无提示文字控件
 
         overlayView = container
 
-        // WindowManager 参数 —— 底部显示（靠近键盘）
-        val screenWidth = context.resources.displayMetrics.widthPixels
+        // 步骤3: WindowManager 参数 — 透明、不拦截触摸、可获取焦点（输入法必须）
         val params = WindowManager.LayoutParams(
-            (screenWidth * 0.85f).toInt(),
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            1, 1,  // 1x1 像素，视觉上不可见
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             else
                 @Suppress("DEPRECATION")
                 WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
+            // FLAG_NOT_TOUCH_MODAL: 不拦截窗口外触摸事件
+            // 不加 FLAG_NOT_FOCUSABLE: 允许获得焦点（输入法弹出必须）
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSPARENT
         ).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            y = dp(300)  // 键盘上方
+            gravity = Gravity.BOTTOM or Gravity.START
+            x = 0
+            y = 0
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
         }
 
