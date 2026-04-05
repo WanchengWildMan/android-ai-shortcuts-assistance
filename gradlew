@@ -30,7 +30,7 @@ WRAPPER_PROPERTIES="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
 # Download wrapper jar if not exist
 if [ ! -f "$WRAPPER_JAR" ]; then
     GRADLE_VERSION=$(grep "distributionUrl" "$WRAPPER_PROPERTIES" | sed 's/.*gradle-\([0-9.]*\).*/\1/')
-    # HARD: 该 URL 为 Gradle 官方仓库固定路径，用于下载与 distributionUrl 对应版本的 gradle-wrapper.jar
+    # HARD: 该 URL 为 Gradle 官方仓库固定路径；若对应版本不存在，curl 会失败并触发下方 exit 1（预期为显式失败，避免把非 jar 内容当作可执行 wrapper）
     WRAPPER_JAR_URL="https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar"
     echo "Downloading Gradle wrapper jar..."
     mkdir -p "$APP_HOME/gradle/wrapper"
