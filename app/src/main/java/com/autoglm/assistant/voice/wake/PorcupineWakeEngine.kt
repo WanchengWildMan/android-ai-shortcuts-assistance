@@ -6,7 +6,13 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
 import ai.picovoice.porcupine.Porcupine
+import ai.picovoice.porcupine.PorcupineActivationException
+import ai.picovoice.porcupine.PorcupineActivationLimitException
+import ai.picovoice.porcupine.PorcupineActivationRefusedException
+import ai.picovoice.porcupine.PorcupineActivationThrottledException
 import ai.picovoice.porcupine.PorcupineException
+import ai.picovoice.porcupine.PorcupineIOException
+import ai.picovoice.porcupine.PorcupineRuntimeException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -88,11 +94,59 @@ class PorcupineWakeEngine(
             _engineState.value = WakeEngine.EngineState.READY
             Log.i(TAG, "初始化成功，灵敏度: ${config.sensitivity}")
             true
-        } catch (e: PorcupineException) {
-            val errorMsg = "Porcupine 初始化错误: ${e.message}"
+        } catch (e: PorcupineActivationRefusedException) {
+            // 步骤: AccessKey 被 Picovoice 服务器拒绝 — 通常是同一 AccessKey 在过多设备上激活
+            val errorMsg = "Porcupine AccessKey 被拒绝，同一 AccessKey 不能同时在多台设备上使用"
             _lastError.value = errorMsg
             _engineState.value = WakeEngine.EngineState.ERROR
-            Log.e(TAG, errorMsg, e)
+            // 安全: 不传入 exception 对象，避免 Porcupine 的 stacktrace 携带 AccessKey 明文
+            Log.e(TAG, errorMsg)
+            false
+        } catch (e: PorcupineActivationLimitException) {
+            // 步骤: AccessKey 激活次数已达上限
+            val errorMsg = "Porcupine AccessKey 激活次数已达上限，请更换或升级 AccessKey"
+            _lastError.value = errorMsg
+            _engineState.value = WakeEngine.EngineState.ERROR
+            Log.e(TAG, errorMsg)
+            false
+        } catch (e: PorcupineActivationThrottledException) {
+            // 步骤: 激活请求被限速，稍后可重试
+            val errorMsg = "Porcupine AccessKey 激活请求过于频繁，请稍后重试"
+            _lastError.value = errorMsg
+            _engineState.value = WakeEngine.EngineState.ERROR
+            Log.e(TAG, errorMsg)
+            false
+        } catch (e: PorcupineActivationException) {
+            // 步骤: 通用激活失败 — AccessKey 无效或格式错误（Failed to parse AccessKey）
+            val errorMsg = "Porcupine AccessKey 激活失败，请检查 AccessKey 是否有效（来自 picovoice.ai 控制台）"
+            _lastError.value = errorMsg
+            _engineState.value = WakeEngine.EngineState.ERROR
+            Log.e(TAG, errorMsg)
+            false
+        } catch (e: PorcupineIOException) {
+            // 步骤: ppn 文件不存在或无法读取
+            val path = config.keywordPath ?: "内置词"
+            val errorMsg = "Porcupine ppn 文件不存在或无法读取: $path"
+            _lastError.value = errorMsg
+            _engineState.value = WakeEngine.EngineState.ERROR
+            Log.e(TAG, errorMsg)
+            false
+        } catch (e: PorcupineRuntimeException) {
+            // 步骤: native 层运行时错误 — 常见原因：ppn 与 SDK 版本不兼容、模型文件损坏
+            val errorMsg = "Porcupine 运行时错误（ppn 文件可能与 SDK v4 不兼容，或模型文件损坏）"
+            _lastError.value = errorMsg
+            _engineState.value = WakeEngine.EngineState.ERROR
+            Log.e(TAG, errorMsg)
+            false
+        } catch (e: PorcupineException) {
+            // 步骤: 其他 Porcupine 异常 — 对 e.message 脱敏，避免 AccessKey 明文泄露到日志
+            val sanitized = e.message
+                ?.replace(Regex("AccessKey `[^`]+`"), "AccessKey `***`")
+                ?: "未知错误"
+            val errorMsg = "Porcupine 初始化错误: $sanitized"
+            _lastError.value = errorMsg
+            _engineState.value = WakeEngine.EngineState.ERROR
+            Log.e(TAG, errorMsg)
             false
         }
     }
@@ -115,6 +169,16 @@ class PorcupineWakeEngine(
             CHANNEL_CONFIG,
             AUDIO_FORMAT
         )
+
+        // 步骤: 防御性清理 — 如果实例变量残留了上一次的 AudioRecord（stopListening 和
+        // startListening 存在竞争，stopListening 可能还没执行到 release 这里），先手动释放
+        // 避免 native 层 AudioRecord 资源泄漏或状态不一致导致 releaseBuffer assert 崩溃
+        audioRecord?.let { stale ->
+            Log.w(TAG, "startListening: 发现残留 AudioRecord，执行防御性清理")
+            try { stale.stop() } catch (_: Exception) {}
+            try { stale.release() } catch (_: Exception) {}
+        }
+        audioRecord = null
 
         try {
             audioRecord = AudioRecord(
@@ -183,6 +247,14 @@ class PorcupineWakeEngine(
 
         val job = processingJob
         processingJob = null
+
+        // 步骤: 先取出老引用并立刻清空实例变量
+        // 原因：stopListening 的 job.join() 是异步等待，等待期间并发的 startListening()
+        // 可能已经将 audioRecord 替换为新对象。若直接对 this.audioRecord 操作，
+        // 会把新的 AudioRecord stop/release 掉，导致新协程 read 时 native SIGABRT 崩溃。
+        val recordToRelease = audioRecord
+        audioRecord = null
+
         if (job != null) {
             job.cancel()
             // 绝不能在另一个线程粗暴 stop，小米等系统会发生 AudioRecord native crash
@@ -191,12 +263,11 @@ class PorcupineWakeEngine(
         }
 
         try {
-            audioRecord?.stop()
+            recordToRelease?.stop()
         } catch (e: Exception) {}
         try {
-            audioRecord?.release()
+            recordToRelease?.release()
         } catch (e: Exception) {}
-        audioRecord = null
     }
 
     override fun release() {

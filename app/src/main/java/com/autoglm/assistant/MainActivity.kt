@@ -475,14 +475,19 @@ fun MainScreen(
     val agentMessage = getAgentMessage()?.collectAsState()
     val coordinatorMessage = getCoordinatorMessage()?.collectAsState()
 
-    // 从实际服务状态派生运行状态，避免UI与服务不同步
-    val isServiceRunning = serviceState?.value != null &&
-        serviceState?.value != WakeWordService.ServiceState.IDLE
+    // 步骤: 服务是否运行 — 用 serviceState != null 判断（而非 != IDLE）
+    // 原因：引擎初始化失败时 serviceState = IDLE 但服务仍在前台运行，
+    //       若用 != IDLE 会导致右上角显示"启动"按钮，用户无法停止服务
+    val isServiceRunning = serviceState?.value != null
         
     android.util.Log.d("AutoGLM_START", "MainScreen recompose: serviceState=${serviceState?.value}, isServiceRunning=$isServiceRunning")
     
     val wakeWordError = getLastWakeWordError()?.collectAsState()
     val activeEngine = getActiveEngineType()?.collectAsState()
+
+    // 任务发起时锁定的对话 ID，用于将 agent/coordinator 消息路由到正确的对话
+    // 防止用户切换对话后，老任务消息错误写入新的当前对话
+    var taskOwnerConversationId by remember { mutableStateOf<String?>(null) }
 
     // Coordinator消息状态
     var lastCoordinatorContent by remember { mutableStateOf<String?>(null) }
@@ -596,6 +601,36 @@ fun MainScreen(
         }
     }
 
+    // 步骤: 将 agent/coordinator 消息写入任务所属对话
+    // 若任务对话 == 当前对话，走正常 addMessage 逻辑（更新显示）
+    // 若用户已切换对话，只写后台对话（不更新 messages 显示），避免消息串屏
+    fun addMessageToTask(message: ChatMessage) {
+        val ownerId = taskOwnerConversationId
+        if (ownerId == null || ownerId == currentConversation?.id) {
+            addMessage(message)
+            return
+        }
+        val ownerConv = conversations.firstOrNull { it.id == ownerId } ?: run {
+            addMessage(message) // 后备：找不到任务对话则写当前
+            return
+        }
+        ownerConv.messages.add(message)
+        ownerConv.timestamp = System.currentTimeMillis()
+        conversations.remove(ownerConv)
+        conversations.add(0, ownerConv)
+        scope.launch { messageManager.saveConversation(ownerConv) }
+    }
+
+    // 步骤: streaming 原地更新任务对话消息
+    // 仅当任务对话是当前对话时生效；已切走则跳过（后台对话无需 streaming 更新）
+    fun updateMessageInTask(index: Int, message: ChatMessage) {
+        val ownerId = taskOwnerConversationId
+        if (ownerId == null || ownerId == currentConversation?.id) {
+            updateMessage(index, message)
+        }
+        // 已切换对话时 streaming update 无意义，跳过
+    }
+
     fun compactStatusText(raw: String): String {
         return raw
             .replace("\r\n", "\n")
@@ -618,8 +653,16 @@ fun MainScreen(
 
     LaunchedEffect(lastRecognizedText?.value) {
         lastRecognizedText?.value?.let { text ->
-            if (text.isNotBlank() && currentRoute == "chat") {
+            if (text.isNotBlank()) {
+                // 步骤1: 确保存在当前对话；语音唤醒时没有对话则自动创建
+                if (currentConversation == null) createNewConversation()
                 addMessage(ChatMessage(content = text, isUser = true))
+                // 步骤2: 锁定任务所属对话，防止后续消息写入用户切换后的新对话
+                taskOwnerConversationId = currentConversation?.id
+                // 步骤3: 若不在 chat 页面（如 home 页语音唤醒），自动导航过去展示执行过程
+                if (currentRoute != "chat") {
+                    navController.navigate("chat")
+                }
             }
         }
     }
@@ -687,9 +730,7 @@ fun MainScreen(
             return@LaunchedEffect
         }
 
-        // 只有在 chat 页面时才处理消息
-        if (currentRoute != "chat") return@LaunchedEffect
-
+        // 步骤: showProcess 关闭时不显示协调器过程消息（RESULT 在 agent channel 发送，不受影响）
         if (!showProcess) return@LaunchedEffect
 
         // 根据类型格式化显示内容
@@ -759,14 +800,14 @@ fun MainScreen(
                 // 优化器消息：流式更新同一条
                 if (optimizerMessageIndex >= 0 && optimizerMessageIndex < messages.size) {
                     val oldMsg = messages[optimizerMessageIndex]
-                    updateMessage(optimizerMessageIndex, ChatMessage(
+                    updateMessageInTask(optimizerMessageIndex, ChatMessage(
                         id = oldMsg.id,
                         content = displayContent,
                         isUser = false,
                         timestamp = oldMsg.timestamp
                     ))
                 } else {
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    addMessageToTask(ChatMessage(content = displayContent, isUser = false))
                     optimizerMessageIndex = messages.size - 1
                 }
             }
@@ -782,35 +823,35 @@ fun MainScreen(
 
                 if (plannerMessageIndex >= 0 && plannerMessageIndex < messages.size) {
                     val oldMsg = messages[plannerMessageIndex]
-                    updateMessage(plannerMessageIndex, ChatMessage(
+                    updateMessageInTask(plannerMessageIndex, ChatMessage(
                         id = oldMsg.id,
                         content = content,
                         isUser = false,
                         timestamp = oldMsg.timestamp
                     ))
                 } else {
-                    addMessage(ChatMessage(content = content, isUser = false))
+                    addMessageToTask(ChatMessage(content = content, isUser = false))
                     plannerMessageIndex = messages.size - 1
                 }
             }
             WakeWordService.CoordinatorMessageType.SUBTASK_CARD -> {
                 // 子任务卡片：每个都是独立的新消息
                 hasShownSubtaskCards = true
-                addMessage(ChatMessage(content = displayContent, isUser = false))
+                addMessageToTask(ChatMessage(content = displayContent, isUser = false))
             }
             WakeWordService.CoordinatorMessageType.SUMMARY_STREAMING,
             WakeWordService.CoordinatorMessageType.SUMMARY_COMPLETE -> {
                 // 总结消息：流式更新同一条（与优化器和规划器消息分开）
                 if (summaryMessageIndex >= 0 && summaryMessageIndex < messages.size) {
                     val oldMsg = messages[summaryMessageIndex]
-                    updateMessage(summaryMessageIndex, ChatMessage(
+                    updateMessageInTask(summaryMessageIndex, ChatMessage(
                         id = oldMsg.id,
                         content = displayContent,
                         isUser = false,
                         timestamp = oldMsg.timestamp
                     ))
                 } else {
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    addMessageToTask(ChatMessage(content = displayContent, isUser = false))
                     summaryMessageIndex = messages.size - 1
                 }
             }
@@ -818,14 +859,14 @@ fun MainScreen(
                 // 步骤计数器：原地更新同一条消息
                 if (stepMessageIndex >= 0 && stepMessageIndex < messages.size) {
                     val oldMsg = messages[stepMessageIndex]
-                    updateMessage(stepMessageIndex, ChatMessage(
+                    updateMessageInTask(stepMessageIndex, ChatMessage(
                         id = oldMsg.id,
                         content = displayContent,
                         isUser = false,
                         timestamp = oldMsg.timestamp
                     ))
                 } else {
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    addMessageToTask(ChatMessage(content = displayContent, isUser = false))
                     stepMessageIndex = messages.size - 1
                 }
             }
@@ -833,7 +874,7 @@ fun MainScreen(
                 // 其他消息：添加新消息
                 if (displayContent != lastCoordinatorContent) {
                     lastCoordinatorContent = displayContent
-                    addMessage(ChatMessage(content = displayContent, isUser = false))
+                    addMessageToTask(ChatMessage(content = displayContent, isUser = false))
                 }
             }
         }
@@ -856,9 +897,6 @@ fun MainScreen(
                 WakeWordService.AgentMessageType.RESULT -> null
             }
 
-            // 只有在 chat 页面时才处理消息
-            if (currentRoute != "chat") return@LaunchedEffect
-
             // Read setting dynamically each time
             val showProcess = App.instance.preferenceManager.showAgentProcess
             val shouldShow = when (msg.type) {
@@ -873,7 +911,7 @@ fun MainScreen(
                     lastThinkingContent = msg.content
                     // 只有在应该显示且内容不为空时才添加临时消息
                     if (shouldShow && msg.content.isNotBlank()) {
-                        addMessage(ChatMessage(content = "**思考：**\n${msg.content}", isUser = false))
+                        addMessageToTask(ChatMessage(content = "**思考：**\n${msg.content}", isUser = false))
                         lastThinkingMessageIndex = messages.size - 1
                     } else {
                         // 内容为空或不应显示，但仍需标记索引为null
@@ -897,14 +935,14 @@ fun MainScreen(
                         // 如果之前添加了thinking消息，替换它；否则添加新消息
                         if (lastThinkingMessageIndex != null && lastThinkingMessageIndex!! < messages.size) {
                             val oldMsg = messages[lastThinkingMessageIndex!!]
-                            updateMessage(lastThinkingMessageIndex!!, ChatMessage(
+                            updateMessageInTask(lastThinkingMessageIndex!!, ChatMessage(
                                 id = oldMsg.id,
                                 content = content,
                                 isUser = false,
                                 timestamp = oldMsg.timestamp
                             ))
                         } else {
-                            addMessage(ChatMessage(content = content, isUser = false))
+                            addMessageToTask(ChatMessage(content = content, isUser = false))
                         }
                     }
 
@@ -914,11 +952,13 @@ fun MainScreen(
                 }
                 WakeWordService.AgentMessageType.RESULT -> {
                     if (shouldShow || msg.type == WakeWordService.AgentMessageType.RESULT) {
-                        addMessage(ChatMessage(content = msg.content, isUser = false))
+                        addMessageToTask(ChatMessage(content = msg.content, isUser = false))
                     }
                     // 清空thinking缓存
                     lastThinkingContent = null
                     lastThinkingMessageIndex = null
+                    // 任务完成，解除任务对话锁定
+                    taskOwnerConversationId = null
                 }
             }
         }
@@ -1079,14 +1119,14 @@ fun MainScreen(
                         }
                     }
 
-                    // 错误信息详情（有错误时展示完整内容）
+                    // 错误信息详情（有错误时展示完整内容，最多6行覆盖多引擎失败的4行 errorMsg）
                     if (errorText != null) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             errorText,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
-                            maxLines = 3,
+                            maxLines = 6,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                         )
                     }
@@ -1107,6 +1147,8 @@ fun MainScreen(
                             android.util.Log.d("AutoGLM", "Shortcut clicked: $prompt, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer")
                             createNewConversation()
                             addMessage(ChatMessage(content = prompt, isUser = true))
+                            // 步骤: 锁定任务所属对话
+                            taskOwnerConversationId = currentConversation?.id
                             // Navigate first, then execute task
                             navController.navigate("chat")
                             // Execute task after navigation to ensure UI is ready
@@ -1155,6 +1197,8 @@ fun MainScreen(
                         onSendMessage = { text, enablePlanning, enableOptimizer ->
                             checkAndExecute(text, enablePlanning, enableOptimizer, messages)
                             addMessage(ChatMessage(content = text, isUser = true))
+                            // 步骤: 锁定任务所属对话
+                            taskOwnerConversationId = currentConversation?.id
                         },
                         onStopTask = onStopTask,
                         modifier = Modifier.fillMaxSize()
@@ -1321,6 +1365,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     // 自定义 ppn 模型文件状态
     var customPpnName by remember { mutableStateOf(prefs.customPpnName) }
     var customPpnPath by remember { mutableStateOf(prefs.customPpnPath) }
+    val originalCustomPpnPath = remember { prefs.customPpnPath }
     // ppn 文件选择器
     val ppnFileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -1348,10 +1393,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                 }
 
-                // 步骤3: 保存路径到 preferences
+                // 步骤3: 立即写入 prefs 并更新 UI 状态（ppn 文件只在此处变更，不经过 saveSettings 弹窗）
                 customPpnName = fileName
                 customPpnPath = destFile.absolutePath
                 wakeWordKeyword = "CUSTOM"  // 自动切换到自定义模型
+                prefs.customPpnName = fileName
+                prefs.customPpnPath = destFile.absolutePath
+                prefs.wakeWordKeyword = "CUSTOM"
 
                 android.util.Log.i("AutoGLM", "自定义 ppn 模型已导入: $fileName -> ${destFile.absolutePath}")
                 android.widget.Toast.makeText(context, "模型文件已导入: $fileName", android.widget.Toast.LENGTH_SHORT).show()
@@ -1517,6 +1565,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             porcupineKey.text != originalPorcupineKey ||
             wakeWordKeyword != originalWakeWordKeyword ||
             wakeEngineType != originalWakeEngineType ||
+            customPpnPath != originalCustomPpnPath ||
             sttWakePhrase.text != originalSttWakePhrase ||
             commandSttMode != originalCommandSttMode ||
             sttApiType != originalSttApiType ||
@@ -1768,13 +1817,9 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
 
-    // Handle system back button — 有变更时弹出确认+变更列表
+    // Handle system back button — 始终弹出确认框，防止意外丢失修改
     androidx.activity.compose.BackHandler(enabled = true) {
-        if (hasChanges) {
-            showExitDialog = true
-        } else {
-            onBack()
-        }
+        showExitDialog = true
     }
 
     Scaffold(
@@ -1783,11 +1828,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 title = { Text(strings.title) },
                 navigationIcon = {
                     IconButton(onClick = {
-                        if (hasChanges) {
-                            showExitDialog = true
-                        } else {
-                            onBack()
-                        }
+                        showExitDialog = true
                     }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
@@ -3640,7 +3681,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
         AlertDialog(
             onDismissRequest = { showExitDialog = false },
-            title = { Text(if (isChinese) "以下设置已修改" else "Settings Changed") },
+            title = { Text(if (isChinese) (if (hasChanges) "以下设置已修改" else "是否保存设置？") else (if (hasChanges) "Settings Changed" else "Save Settings?")) },
             text = {
                 Column {
                     Text(changesSummary)

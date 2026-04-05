@@ -70,11 +70,11 @@ class ActionExecutor(
 
         /**
          * 需要跳过ADB Keyboard、优先使用剪贴板粘贴的应用包名集合。
-         * 业务原因：这些应用的输入框对ADB Keyboard/ACTION_SET_TEXT兼容性差，
-         * 直接使用剪贴板粘贴更稳定。
+         * 业务原因：这些应用的输入框对ACTION_SET_TEXT兼容性差，直接使用剪贴板粘贴更稳定。
+         * 注意：微信(com.tencent.mm)已从此列表移除——ADB Keyboard broadcast方案在微信有效，
+         *       而 ACTION_PASTE 无障碍方案在微信虽返回 true 但实际无效。
          */
         private val CLIPBOARD_PREFERRED_PACKAGES = setOf(
-            "com.tencent.mm",      // 微信
             "com.tencent.wework",  // 企业微信
             "com.sankuai.meituan", // 美团
             "com.sankuai.meituan.takeoutnew" // 美团外卖
@@ -799,10 +799,7 @@ class ActionExecutor(
 
     private suspend fun executeFinish(action: ParsedAction): ActionResult {
         val message = action.params["message"] as? String
-        // 仅在非协调器模式下返回 app（协调器模式下子步骤 finish 不应弹回）
-        if (returnToAppOnFinish) {
-            returnToAutoGLM()
-        }
+        // 任务完成后留在当前界面，由悬浮窗显示任务总结
         return ActionResult(success = true, message = message)
     }
 

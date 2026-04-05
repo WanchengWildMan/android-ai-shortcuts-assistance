@@ -35,6 +35,9 @@
     <!-- Battery Optimization - 确保后台服务不会被系统杀死 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- 非root设备切换输入法 - 需通过 adb shell pm grant <包名> android.permission.WRITE_SECURE_SETTINGS 授予 -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
     <application
         android:name=".App"
         android:allowBackup="true"
