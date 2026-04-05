@@ -3,15 +3,12 @@ name: Android CI
 on:
   push:
     branches: [ master ]
-  pull_request:
-    branches: [ master ]
-    types: [closed]
 
 jobs:
   build:
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
-
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
     - name: Checkout code
