@@ -2,6 +2,7 @@ package com.autoglm.assistant
 
 import android.app.Activity
 import android.content.Intent
+import com.autoglm.assistant.util.ServiceHelper
 import android.os.Build
 import android.provider.Settings
 import android.os.Bundle
@@ -527,12 +528,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             context.stopService(Intent(context, WakeWordService::class.java))
             // 延迟后重启（给服务时间完全停止）
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                val serviceIntent = Intent(context, WakeWordService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent)
-                } else {
-                    context.startService(serviceIntent)
-                }
+                ServiceHelper.startWakeWordService(context)
             }, 500)
             Toast.makeText(context, if (language == "cn") "设置已保存，服务重启中..." else "Settings saved, restarting service...", Toast.LENGTH_SHORT).show()
         } else {

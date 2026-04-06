@@ -2,6 +2,7 @@ package com.autoglm.assistant
 
 import android.Manifest
 import android.app.Activity
+import com.autoglm.assistant.util.ServiceHelper
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -197,17 +198,8 @@ class MainActivity : ComponentActivity() {
 
         if (hasMicPermission && hasOverlayPermission) {
             Logger.i(Logger.SERVICE, "=== 语音唤醒已开启，自动启动服务 ===")
-            val serviceIntent = Intent(this, WakeWordService::class.java).apply {
-                putExtra("START_WAKE_WORD", true)
-            }
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
-                }
-            } catch (e: Exception) {
-                Logger.e(Logger.SERVICE, "自动启动服务失败: ${e.message}", e)
+            if (!ServiceHelper.startWakeWordService(this, startWakeWord = true)) {
+                Logger.e(Logger.SERVICE, "自动启动服务失败")
             }
         } else {
             Logger.w(Logger.SERVICE, "=== 语音唤醒已开启但权限不足（mic=$hasMicPermission, overlay=$hasOverlayPermission），跳过自动启动 ===")
@@ -297,18 +289,8 @@ class MainActivity : ComponentActivity() {
         // 步骤3: 启动语音唤醒服务（需要麦克风权限）
         val wakeWordEnabled = App.instance.preferenceManager.wakeWordEnabled
         Logger.d(Logger.SERVICE, "startWakeWordService preparing intent, wakeWordEnabled=$wakeWordEnabled")
-        val serviceIntent = Intent(this, WakeWordService::class.java).apply {
-            putExtra("START_WAKE_WORD", wakeWordEnabled)
-        }
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
-        } catch (e: Exception) {
-            Toast.makeText(this, "启动服务失败: ${e.message}", Toast.LENGTH_LONG).show()
-            Logger.e(Logger.SERVICE, "启动服务失败", e)
+        if (!ServiceHelper.startWakeWordService(this, startWakeWord = wakeWordEnabled)) {
+            Toast.makeText(this, "启动服务失败", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -360,18 +342,7 @@ class MainActivity : ComponentActivity() {
      * 业务目的：前台服务在 unbindService 后不会被销毁，确保任务在后台持续执行
      */
     private fun ensureServiceStartedAsForeground() {
-        val serviceIntent = Intent(this, WakeWordService::class.java).apply {
-            putExtra("START_WAKE_WORD", false)  // 不启动语音唤醒，仅确保前台服务运行
-        }
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
-        } catch (e: Exception) {
-            Logger.w(Logger.SERVICE, "⚠️ 无法启动前台服务: ${e.message}")
-        }
+        ServiceHelper.startWakeWordService(this, startWakeWord = false)
     }
     
     private fun executeTaskInternal(task: String, enablePlanning: Boolean, enableOptimizer: Boolean, messages: List<ChatMessage>) {
@@ -394,34 +365,24 @@ class MainActivity : ComponentActivity() {
         // 步骤1: 确保服务已启动（作为MediaProjection类型的前台服务）
         if (!serviceBound) {
             // 启动服务（不需要语音唤醒，但需要MediaProjection类型）
-            val serviceIntent = Intent(this, WakeWordService::class.java).apply {
-                putExtra("START_WAKE_WORD", false)  // 不启动语音唤醒
-            }
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
-                }
-                
-                // 绑定服务以获取引用
-                bindService(
-                    Intent(this, WakeWordService::class.java),
-                    serviceConnection,
-                    0  // 不使用BIND_AUTO_CREATE，因为已经启动了
-                )
-                
-                // 等待绑定完成后再请求权限
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    screenCapturePermissionLauncher.launch(projectionManager.createScreenCaptureIntent())
-                }, 200)
-                return
-            } catch (e: Exception) {
-                Toast.makeText(this, "启动服务失败: ${e.message}", Toast.LENGTH_LONG).show()
-                Logger.e(Logger.SERVICE, "启动服务失败", e)
+            if (!ServiceHelper.startWakeWordService(this, startWakeWord = false)) {
+                Toast.makeText(this, "启动服务失败", Toast.LENGTH_LONG).show()
                 return
             }
+                
+            // 绑定服务以获取引用
+            bindService(
+                Intent(this, WakeWordService::class.java),
+                serviceConnection,
+                0  // 不使用BIND_AUTO_CREATE，因为已经启动了
+            )
+                
+            // 等待绑定完成后再请求权限
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                screenCapturePermissionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            }, 200)
+            return
         }
         
         // 步骤2: 服务已启动，直接请求权限

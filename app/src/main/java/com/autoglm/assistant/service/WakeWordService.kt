@@ -156,6 +156,35 @@ class WakeWordService : Service() {
         initializeComponents()
     }
 
+    /**
+     * 版本适配的前台服务启动
+     *
+     * 流程：
+     * 1. Android 11+ (R)：声明 MICROPHONE + SPECIAL_USE（+ 可选 MEDIA_PROJECTION）
+     * 2. Android 10 (Q)：仅声明 MICROPHONE（+ 可选 MEDIA_PROJECTION）
+     * 3. Android 8-9 (O-P)：无类型声明
+     *
+     * @param includeMediaProjection 是否包含 MEDIA_PROJECTION 类型（截图权限升级时需要）
+     */
+    private fun startForegroundCompat(includeMediaProjection: Boolean = false) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            if (includeMediaProjection) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            startForeground(App.NOTIFICATION_ID, createNotification(), types)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            if (includeMediaProjection) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            startForeground(App.NOTIFICATION_ID, createNotification(), types)
+        } else {
+            startForeground(App.NOTIFICATION_ID, createNotification())
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Logger.d(Logger.SERVICE, "WakeWordService onStartCommand called. intent action=${intent?.action}, extra START_WAKE_WORD=${intent?.getBooleanExtra("START_WAKE_WORD", false)}")
         // 处理干预操作请求（通知栏按钮触发）
@@ -180,23 +209,7 @@ class WakeWordService : Service() {
             }
             
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    // 包含所有可能需要的服务类型：语音+任务执行 (在自动启动阶段不要携带 MEDIA_PROJECTION 避免崩溃)
-                    startForeground(
-                        App.NOTIFICATION_ID,
-                        createNotification(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or 
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                    )
-                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        App.NOTIFICATION_ID,
-                        createNotification(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                    )
-                } else {
-                    startForeground(App.NOTIFICATION_ID, createNotification())
-                }
+                startForegroundCompat()
                 startWakeWordListening()
             } catch (e: Exception) {
                 Logger.e(Logger.SERVICE, "❌ 启动前台服务失败: ${e.message}", e)
@@ -208,22 +221,7 @@ class WakeWordService : Service() {
             // 只需要任务执行服务，不需要语音功能
             // 不使用 MEDIA_PROJECTION（Android 14 要求 MediaProjection Token，但截图通过无障碍服务实现）
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    startForeground(
-                        App.NOTIFICATION_ID,
-                        createNotification(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                    )
-                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        App.NOTIFICATION_ID,
-                        createNotification(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                    )
-                } else {
-                    startForeground(App.NOTIFICATION_ID, createNotification())
-                }
+                startForegroundCompat()
             } catch (e: Exception) {
                 // 业务目的：启动前台服务失败时必须停止服务
                 // 原因：若不成为前台服务，系统会在应用切后台时杀死服务导致任务中断
@@ -822,22 +820,7 @@ class WakeWordService : Service() {
     fun setScreenCapturePermission(resultCode: Int, data: Intent) {
         // 步骤1: 在设置权限前，确保服务以MediaProjection类型运行
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                // 升级服务类型为包含MediaProjection
-                startForeground(
-                    App.NOTIFICATION_ID,
-                    createNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or 
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    App.NOTIFICATION_ID,
-                    createNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                )
-            }
+            startForegroundCompat(includeMediaProjection = true)
             Logger.d(Logger.SERVICE, "✅ 服务已升级为MediaProjection类型")
         } catch (e: Exception) {
             Logger.e(Logger.SERVICE, "❌ 升级服务类型失败: ${e.message}", e)

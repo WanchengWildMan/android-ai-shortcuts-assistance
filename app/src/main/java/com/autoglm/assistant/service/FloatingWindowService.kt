@@ -2,6 +2,7 @@ package com.autoglm.assistant.service
 
 import android.app.Notification
 import android.app.PendingIntent
+import com.autoglm.assistant.util.ServiceHelper
 import android.app.Service
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -132,12 +133,7 @@ class FloatingWindowService : Service() {
 
     fun startWakeWordListening() {
         // Delegate to WakeWordService
-        val intent = Intent(this, WakeWordService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        ServiceHelper.startWakeWordService(this, startWakeWord = true)
     }
 
     fun openMainActivity() {
