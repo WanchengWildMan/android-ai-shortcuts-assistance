@@ -35,9 +35,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import com.autoglm.assistant.service.WakeWordService
 import com.autoglm.assistant.ui.components.AccessibilityServiceStatusCard
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.autoglm.assistant.ui.components.BatteryRestrictionCard
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyGridState
+import androidx.compose.ui.unit.sp
 import java.util.Calendar
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -53,6 +58,61 @@ fun HomeScreen(
     val shortcutManager = remember { ShortcutManager(context) }
     val prefs = com.autoglm.assistant.App.instance.preferenceManager
     var shortcuts by remember { mutableStateOf(shortcutManager.loadShortcuts()) }
+
+    // 步骤: 快捷指令导出 launcher — 用户选定文件路径后将快捷指令列表序列化为 JSON 写入
+    val exportShortcutsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val json = Gson().toJson(shortcuts)
+                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(json) }
+                android.widget.Toast.makeText(context, "已导出 ${shortcuts.size} 条快捷指令", android.widget.Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(context, "导出失败：${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // 步骤: 快捷指令导入 launcher — 用户选定 JSON 文件后解析并与本地快捷指令合并
+    // 合并策略：id 相同则替换，id 不存在则追加，保留本地独有快捷指令
+    val importShortcutsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val json = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
+                if (!json.isNullOrEmpty()) {
+                    val type = object : TypeToken<List<ShortcutData>>() {}.type
+                    val imported: List<ShortcutData> = Gson().fromJson(json, type)
+                    // 步骤: 合并 — 遍历导入列表，id 已存在则就地替换，否则追加到末尾
+                    val merged = shortcuts.toMutableList()
+                    var updatedCount = 0
+                    var addedCount = 0
+                    for (item in imported) {
+                        val idx = merged.indexOfFirst { it.id == item.id }
+                        if (idx >= 0) {
+                            merged[idx] = item
+                            updatedCount++
+                        } else {
+                            merged.add(item)
+                            addedCount++
+                        }
+                    }
+                    shortcutManager.saveShortcuts(merged)
+                    shortcuts = shortcutManager.loadShortcuts()
+                    android.widget.Toast.makeText(
+                        context,
+                        "导入完成：更新 $updatedCount 条，新增 $addedCount 条",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(context, "导入失败：${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     var inputText by remember { mutableStateOf(TextFieldValue("")) }
     var showEditDialog by remember { mutableStateOf<ShortcutData?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -215,16 +275,36 @@ fun HomeScreen(
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
-            if (isEditMode) {
-                TextButton(onClick = { isEditMode = false }) {
-                    Text("完成")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 步骤1: 导入按钮 — 选取 JSON 文件，解析后完整覆盖当前快捷指令列表
+                TextButton(onClick = { importShortcutsLauncher.launch("application/json") }) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("导入", fontSize = 12.sp)
                 }
-            } else {
-                Text(
-                    text = "长按编辑排序",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                // 步骤2: 导出按钮 — 将当前快捷指令序列化为带时间戳的 JSON 文件
+                TextButton(onClick = {
+                    val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                        .format(java.util.Date())
+                    exportShortcutsLauncher.launch("autoglm_shortcuts_$ts.json")
+                }) {
+                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("导出", fontSize = 12.sp)
+                }
+                // 步骤3: 编辑模式切换
+                if (isEditMode) {
+                    TextButton(onClick = { isEditMode = false }) {
+                        Text("完成")
+                    }
+                } else {
+                    Text(
+                        text = "长按编辑排序",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
+                }
             }
         }
 
@@ -260,7 +340,8 @@ fun HomeScreen(
                                 if (shortcut.hasParameters()) {
                                     showParameterDialog = shortcut
                                 } else {
-                                    onShortcutClick(shortcut.prompt, shortcut.enablePlanning, true) // 快捷指令默认开启优化？还是关闭？
+                                    // 步骤: 无参数快捷指令直接使用指令自身配置的规划器/优化器开关
+                                    onShortcutClick(shortcut.prompt, shortcut.enablePlanning, shortcut.enableOptimizer)
                                 }
                             }
                         },
@@ -465,7 +546,7 @@ fun ShortcutCard(
         elevation = CardDefaults.cardElevation(defaultElevation = elevation),
         modifier = Modifier
             .fillMaxWidth()
-            .height(80.dp)
+            .heightIn(min = 80.dp)  // HARD: 允许两行文字时撑高，同行卡片自动对齐
             .graphicsLayer {
                 rotationZ = rotation
             }
@@ -475,11 +556,18 @@ fun ShortcutCard(
                 onLongClick = onLongPress
             )
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                // 步骤: 卡片内容区最小高度 80dp，若文字换行则自然撑高；
+                // fillMaxWidth 而非 fillMaxSize，避免高度约束失效导致无法居中
+                .defaultMinSize(minHeight = 80.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
             Row(
                 modifier = Modifier
                     .padding(12.dp)
-                    .fillMaxSize(),
+                    .fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Start
             ) {
@@ -504,6 +592,7 @@ fun ShortcutCard(
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Start
                 )
             }

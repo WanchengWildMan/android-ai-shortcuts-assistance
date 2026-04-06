@@ -56,6 +56,12 @@ class PorcupineWakeEngine(
         _lastError.value = null
 
         return try {
+            // 步骤: 释放旧的 Porcupine native 实例（若存在）
+            // 原因: reinitialize 路径会再次调 initialize()，若不先 delete 旧对象，
+            //   旧 native 实例会泄漏内存，且在极端情况下可能占用音频资源
+            porcupine?.delete()
+            porcupine = null
+
             val builder = Porcupine.Builder()
                 .setAccessKey(config.accessKey)
                 .setSensitivity(config.sensitivity)
@@ -64,11 +70,11 @@ class PorcupineWakeEngine(
                 config.keywordPath != null -> {
                     // 使用指定路径的自定义唤醒词文件
                     builder.setKeywordPath(config.keywordPath)
-                    // 如果自定义唤醒词带 zh，自动配合中文模型
-                    if (config.keywordPath.contains("zh", ignoreCase = true) || config.keywordPath.contains("xiaoai", ignoreCase = true)) {
-                        builder.setModelPath("porcupine_params_zh.pv")
-                    }
-                    Log.d(TAG, "初始化自定义唤醒词: ${config.keywordPath}")
+                    // 自定义 ppn 一律配合中文声学模型（porcupine_params_zh.pv）
+                    // 原因：此 app 仅支持中文唤醒词；英文内置词通过 setKeyword() 路径走默认英文模型，不经过这里
+                    // 之前依靠文件名是否含 "zh"/"xiaoai" 来判断语言，若文件名不包含这些字母则误用英文模型导致初始化失败并降级 STT
+                    builder.setModelPath("porcupine_params_zh.pv")
+                    Log.d(TAG, "初始化自定义唤醒词: ${config.keywordPath}，使用中文声学模型")
                 }
                 config.keywordName == "XIAOAI" -> {
                     // 使用 assets 中的"小爱"自定义唤醒词

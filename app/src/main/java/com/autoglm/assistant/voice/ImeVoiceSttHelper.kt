@@ -40,8 +40,9 @@ class ImeVoiceSttHelper(private val context: Context) {
         private const val TAG = "ImeVoiceSTT"
         // 文字稳定后等待时间（毫秒），超过此时间无新文字则认为识别完成
         private const val TEXT_STABLE_DELAY_MS = 2000L
-        // 弹出输入法后等待键盘就绪的延迟（毫秒）
-        private const val KEYBOARD_READY_DELAY_MS = 800L
+        // 弹出输入法后等待键盘就绪的延迟后备值（毫秒）；实际延迟由实例变量 keyboardReadyDelay 决定
+        // HARD: 此默认值仅作兜底，业务上应从 PreferenceManager.DEFAULT_IME_VOICE_KEYBOARD_DELAY_MS 读取
+        private const val KEYBOARD_READY_DELAY_DEFAULT_MS = 1200L
         // 最大等待时间（毫秒），超过后自动超时
         private const val MAX_WAIT_MS = 30000L
     }
@@ -62,6 +63,8 @@ class ImeVoiceSttHelper(private val context: Context) {
     // 空格键坐标
     var spaceX: Int = 704
     var spaceY: Int = 2978
+    // 步骤: 键盘就绪等待延迟（毫秒）；可由 WakeWordService 从 PreferenceManager 注入
+    var keyboardReadyDelay: Long = KEYBOARD_READY_DELAY_DEFAULT_MS
 
     // 文字稳定检测
     private var stableCheckRunnable: Runnable? = null
@@ -95,7 +98,7 @@ class ImeVoiceSttHelper(private val context: Context) {
                 onStatusChange?.invoke("请说话...")
                 startTextMonitor()
                 startTimeout()
-            }, KEYBOARD_READY_DELAY_MS)
+            }, keyboardReadyDelay)
         }
     }
 
@@ -109,14 +112,23 @@ class ImeVoiceSttHelper(private val context: Context) {
 
     /**
      * 点击语音按钮（开始或结束录音）
-     * 通过无障碍服务 Provider 执行单击，不需要 root
-     * 失败时仅记录日志，不中断主流程
+     * 复用与 ActionExecutor.getEffectiveMode() 一致的模式选择逻辑：
+     * 步骤1: Root 模式开启 → ShellExecutor.tap()（更稳定，无需无障碍服务已连接）
+     * 步骤2: 无 Root → UIHierarchyManager.performClick()（无障碍服务手势）
+     * 步骤3: 两种方式均失败时仅记录警告，不中断主流程
      */
     private fun tapVoiceButton() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val success = UIHierarchyManager.performClick(context, spaceX, spaceY)
-                Log.i(TAG, "点击语音按钮 ($spaceX, $spaceY): ${if (success) "成功" else "失败（无障碍服务未连接）"}")
+                val success = if (com.autoglm.assistant.util.ShellExecutor.globalUseRoot) {
+                    // 步骤1: Root 模式 → input tap（与 ActionExecutor SHELL_INPUT 分支一致）
+                    com.autoglm.assistant.util.ShellExecutor.tap(spaceX, spaceY)
+                } else {
+                    // 步骤2: 无 Root → 无障碍服务手势（与 ActionExecutor ACCESSIBILITY 分支一致）
+                    UIHierarchyManager.performClick(context, spaceX, spaceY)
+                }
+                // 步骤3: 记录最终结果
+                Log.i(TAG, "点击语音按钮 ($spaceX, $spaceY) [root=${com.autoglm.assistant.util.ShellExecutor.globalUseRoot}]: ${if (success) "成功" else "失败"}")
             } catch (e: Exception) {
                 Log.w(TAG, "点击语音按钮异常: ${e.message}")
             }

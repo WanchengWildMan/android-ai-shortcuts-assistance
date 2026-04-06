@@ -1175,22 +1175,16 @@ class WakeWordService : Service() {
 
     fun reinitializeWakeWord() {
         scope.launch {
-            val wasListening = wakeEngineManager.isListening
-            wakeEngineManager.stopListening()
-
-            val prefs = App.instance.preferenceManager
-            val engineType = try {
-                WakeEngine.EngineType.valueOf(prefs.wakeEngineType)
-            } catch (e: IllegalArgumentException) {
-                WakeEngine.EngineType.PORCUPINE
-            }
-
-            val config = createEngineConfig(engineType, prefs)
-            wakeEngineManager.reinitialize(config)
-
-            if (wasListening) {
-                startWakeWordListening()
-            }
+            // 步骤1: 彻底释放当前引擎的所有资源（停止监听 + 释放 native 对象 + 重置状态为 UNINITIALIZED）
+            // 原因: 之前用 reinitialize() 存在两个问题：
+            //   (a) 若 Porcupine 曾失败降级到 STT，currentEngine 类型为 SystemSttWakeEngine，
+            //       传入 PorcupineConfig 会因类型不匹配直接返回 false，引擎进入 ERROR 状态
+            //   (b) reinitialize 不切换引擎类型，无法从降级后的 STT 回到 Porcupine
+            // 改为 release() 彻底清理后由 startWakeWordListening() 根据最新 prefs 全新初始化
+            wakeEngineManager.release()
+            // 步骤2: 根据最新 prefs 重新创建引擎并开始监听
+            // startWakeWordListening 内部会检测到 isInitialized==false，走 switchEngine 全新路径
+            startWakeWordListening()
         }
     }
 

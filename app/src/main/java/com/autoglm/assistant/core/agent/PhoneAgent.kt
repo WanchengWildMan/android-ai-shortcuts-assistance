@@ -118,6 +118,14 @@ class PhoneAgent(
     var onBeforeAction: (() -> Unit)? = null
     var onAfterAction: (() -> Unit)? = null
 
+    /** ADB Keyboard 未安装回调，由 WakeWordService 设置并显示提示悬浮卡 */
+    var onAdbKeyboardNotInstalled: (() -> Unit)? = null
+        set(value) {
+            field = value
+            // 同步到已初始化的 actionExecutor
+            if (::actionExecutor.isInitialized) actionExecutor.onAdbKeyboardNotInstalled = value
+        }
+
     // SmartCoordinator 回调 - 用于任务规划
     var onPlanningStart: (() -> Unit)? = null
     var onPlanningComplete: ((TaskPlan?) -> Unit)? = null
@@ -146,6 +154,8 @@ class PhoneAgent(
             screenCapture.screenWidth,
             screenCapture.screenHeight
         )
+        // 将外部设置的回调同步到 actionExecutor
+        actionExecutor.onAdbKeyboardNotInstalled = onAdbKeyboardNotInstalled
 
         // 初始化智能协调器（如果配置了API信息）
         // 只要配置了plannerConfig且有有效的模型配置，就初始化SmartCoordinator
@@ -1028,7 +1038,7 @@ class PhoneAgent(
     private suspend fun captureScreenWithOverlayControl() = try {
         onBeforeScreenshot?.invoke()
         // 给系统一个很短的窗口，把悬浮条从下一帧中移除
-        delay(90)
+        delay(200)
         screenCapture.capture()
     } finally {
         onAfterScreenshot?.invoke()

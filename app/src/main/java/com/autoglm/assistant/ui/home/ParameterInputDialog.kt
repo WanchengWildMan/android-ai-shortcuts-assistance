@@ -26,7 +26,8 @@ fun ParameterInputDialog(
         parameterNames.forEach { put(it, "") }
     }}
     var enablePlanning by remember { mutableStateOf(shortcut.enablePlanning) }
-    var enableOptimizer by remember { mutableStateOf(true) }
+    // 步骤: 以快捷指令的配置作为初始值，用户可在参数输入弹窗中临时覆盖
+    var enableOptimizer by remember { mutableStateOf(shortcut.enableOptimizer) }
 
     // 调试日志：显示快捷指令的规划设置
     android.util.Log.d("AutoGLM", "ParameterInputDialog: shortcut.enablePlanning=${shortcut.enablePlanning}, initial enablePlanning=$enablePlanning")

@@ -5,10 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
 import android.view.accessibility.AccessibilityNodeInfo
-import android.widget.Toast
 import com.autoglm.assistant.core.screen.AppDetector
 import com.autoglm.assistant.service.AutomationService
 import com.autoglm.assistant.util.Logger
@@ -48,7 +45,11 @@ class ActionExecutor(
      * 用于悬浮窗显示点击位置指示器
      */
     var onTapPosition: ((x: Int, y: Int) -> Unit)? = null
-
+    /**
+     * ADB Keyboard 未安装时的回调
+     * 由 WakeWordService 设置，调用后显示悬浮卡片提示安装
+     */
+    var onAdbKeyboardNotInstalled: (() -> Unit)? = null
     companion object {
         // 延时配置（根据操作类型优化，单位：毫秒）
         private const val DELAY_TAP = 800L              // 点击后等待 UI 响应
@@ -287,7 +288,7 @@ class ActionExecutor(
 
                 // 检查是否因为未安装而失败
                 if (adbResult.output.contains("未安装", ignoreCase = true)) {
-                    showAdbKeyboardDownloadToast()
+                    onAdbKeyboardNotInstalled?.invoke()
                 }
             }
 
@@ -400,7 +401,7 @@ class ActionExecutor(
 
             // 检查是否因为未安装而失败，如果是则提示用户下载
             if (adbResult.output.contains("未安装", ignoreCase = true)) {
-                showAdbKeyboardDownloadToast()
+                onAdbKeyboardNotInstalled?.invoke()
             }
 
             return ActionResult(false, "Shell输入失败: ADB Keyboard(${adbResult.output})")
@@ -510,38 +511,8 @@ class ActionExecutor(
         }
     }
     
-    /**
-     * 显示ADB Keyboard下载提示
-     * 包含可点击的下载链接
-     */
-    private fun showAdbKeyboardDownloadToast() {
-        val downloadUrl = "https://github.com/senzhk/ADBKeyBoard/releases"
-        
-        Handler(Looper.getMainLooper()).post {
-            // 显示Toast提示
-            Toast.makeText(
-                context,
-                "⌨️ ADB Keyboard 未安装\n点击通知栏消息可下载",
-                Toast.LENGTH_LONG
-            ).show()
-            
-            // 尝试打开浏览器（方便用户直接下载）
-            try {
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl)).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
-                Logger.d(Logger.ACTION, "[TYPE] 已打开ADB Keyboard下载页面: $downloadUrl")
-            } catch (e: Exception) {
-                Logger.e(Logger.ACTION, "[TYPE] 无法打开下载页面: ${e.message}")
-                // 再次Toast显示链接
-                Toast.makeText(
-                    context,
-                    "请手动访问: $downloadUrl",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
+    private fun dp(value: Int): Int {
+        return (value * context.resources.displayMetrics.density).toInt()
     }
 
     private suspend fun executeLongPress(action: ParsedAction): ActionResult {
