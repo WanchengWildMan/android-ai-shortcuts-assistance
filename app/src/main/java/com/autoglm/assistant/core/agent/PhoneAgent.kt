@@ -79,59 +79,15 @@ class PhoneAgent(
     private var currentSubTaskIndex: Int = 0
     private var lastSampleTimestampMs: Long = 0L
 
-    // 回调
-    var onStepStart: ((Int) -> Unit)? = null
-    var onThinking: ((String) -> Unit)? = null
-    var onAction: ((String) -> Unit)? = null
-    var onStepComplete: ((StepResult) -> Unit)? = null
-    var onTaskComplete: ((String) -> Unit)? = null
-    var onError: ((String) -> Unit)? = null
-    var onHumanInterventionNeeded: ((String) -> Unit)? = null
-    var onUserQuestionAsked: (suspend (String) -> String)? = null  // Agent中途提问回调：传入问题，挂起等待用户回答
-    var onMaxStepsReached: ((Int, String) -> Unit)? = null  // (步数, 任务ID) 达到最大步数时回调
-    var onTaskSaved: ((String) -> Unit)? = null  // 任务保存时回调
-    // 流式输出回调 - 用于打字机效果（如果需要）
-    // SmartCoordinator 回调
-    var onDecisionStart: (() -> Unit)? = null           // 开始决策
-    var onDecisionComplete: ((com.autoglm.assistant.core.planner.CoordinatorDecision) -> Unit)? = null  // 决策完成
-    var onStreamToken: ((String) -> Unit)? = null       // 流式 token 回调
-    var onCoordinatorThinking: ((String) -> Unit)? = null  // 协调器思考过程
-    var onStreamStart: (() -> Unit)? = null             // 流式输出开始
-    var onStreamEnd: (() -> Unit)? = null               // 流式输出结束
-    // Prompt 优化器回调
-    var onPromptOptimizing: (() -> Unit)? = null        // 正在优化 prompt
-    var onPromptOptimized: ((String) -> Unit)? = null   // prompt 优化完成
-    var onTaskSummarizing: (() -> Unit)? = null         // 正在生成任务总结
-    var onTaskSummary: ((String) -> Unit)? = null       // 任务总结完成
-    // 意图识别器回调
-    var onIntentRecognizing: (() -> Unit)? = null       // 正在识别意图
-    var onIntentRecognized: ((com.autoglm.assistant.ai.IntentResult) -> Unit)? = null // 意图识别完成
-    // 干预回调
-    var onInterventionProcessed: ((String) -> Unit)? = null  // 干预指令被处理后通知
-    
-    // 协调器步数回调 — 用于在消息中显示当前步数
-    var onCoordinatorStep: ((currentStep: Int, maxSteps: Int) -> Unit)? = null
-    // 截图生命周期回调 — 用于控制悬浮窗在截图时临时隐藏
-    var onBeforeScreenshot: (() -> Unit)? = null
-    var onAfterScreenshot: (() -> Unit)? = null
-    // 操作执行生命周期回调 — 控制悬浮窗在点击/滑动等操作时隐藏，避免遮挡目标
-    var onBeforeAction: (() -> Unit)? = null
-    var onAfterAction: (() -> Unit)? = null
-
-    /** ADB Keyboard 未安装回调，由 WakeWordService 设置并显示提示悬浮卡 */
-    var onAdbKeyboardNotInstalled: (() -> Unit)? = null
+    // Agent 事件监听器 — 统一回调接口，替代分散的 lambda 属性
+    var listener: AgentListener? = null
         set(value) {
             field = value
             // 同步到已初始化的 actionExecutor
-            if (::actionExecutor.isInitialized) actionExecutor.onAdbKeyboardNotInstalled = value
+            if (::actionExecutor.isInitialized) {
+                actionExecutor.onAdbKeyboardNotInstalled = { value?.onAdbKeyboardNotInstalled() }
+            }
         }
-
-    // SmartCoordinator 回调 - 用于任务规划
-    var onPlanningStart: (() -> Unit)? = null
-    var onPlanningComplete: ((TaskPlan?) -> Unit)? = null
-    var onSubTaskGenerated: ((PlannedSubTask) -> Unit)? = null
-    var onSubTaskStart: ((PlannedSubTask) -> Unit)? = null
-    var onSupervisionResult: ((com.autoglm.assistant.core.planner.SupervisionResult) -> Unit)? = null
 
     // 状态
     private val _isRunning = MutableStateFlow(false)
@@ -154,8 +110,8 @@ class PhoneAgent(
             screenCapture.screenWidth,
             screenCapture.screenHeight
         )
-        // 将外部设置的回调同步到 actionExecutor
-        actionExecutor.onAdbKeyboardNotInstalled = onAdbKeyboardNotInstalled
+        // 将 listener 中的 ADB Keyboard 回调同步到 actionExecutor
+        actionExecutor.onAdbKeyboardNotInstalled = { listener?.onAdbKeyboardNotInstalled() }
 
         // 初始化智能协调器（如果配置了API信息）
         // 只要配置了plannerConfig且有有效的模型配置，就初始化SmartCoordinator
@@ -163,30 +119,28 @@ class PhoneAgent(
         agentConfig.plannerConfig?.let { config ->
             if (config.plannerModelConfig != null) {
                 smartCoordinator = SmartCoordinator(config).apply {
-                    // 设置结构化回调 - 用于显示格式化内容
-
-                    // 连接流式输出回调 - 用于打字机效果
+                    // 连接流式输出回调 - 转发到 listener
                     onStreamToken = { token ->
                         Logger.d(Logger.AGENT, "[COORDINATOR->UI] Token: $token")
-                        this@PhoneAgent.onStreamToken?.invoke(token)
+                        this@PhoneAgent.listener?.onStreamToken(token)
                     }
                     onDecisionStart = {
-                        this@PhoneAgent.onDecisionStart?.invoke()
+                        this@PhoneAgent.listener?.onDecisionStart()
                     }
                     onDecisionComplete = { decision ->
-                        this@PhoneAgent.onDecisionComplete?.invoke(decision)
+                        this@PhoneAgent.listener?.onDecisionComplete(decision)
                     }
                     onStreamStart = {
                         Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream start")
-                        this@PhoneAgent.onStreamStart?.invoke()
+                        this@PhoneAgent.listener?.onStreamStart()
                     }
                     onStreamEnd = {
                         Logger.i(Logger.AGENT, "[COORDINATOR->UI] Stream end")
-                        this@PhoneAgent.onStreamEnd?.invoke()
+                        this@PhoneAgent.listener?.onStreamEnd()
                     }
                     onCoordinatorThinking = { thinking ->
                         Logger.i(Logger.AGENT, "[COORDINATOR->UI] Thinking: ${thinking.take(100)}...")
-                        this@PhoneAgent.onCoordinatorThinking?.invoke(thinking)
+                        this@PhoneAgent.listener?.onCoordinatorThinking(thinking)
                     }
                 }
                 Logger.i(Logger.AGENT, "SmartCoordinator initialized with model: ${config.plannerModelConfig.modelName}")
@@ -200,20 +154,19 @@ class PhoneAgent(
             if (config.enabled && config.modelConfig != null) {
                 promptOptimizer = PromptOptimizer(config.modelConfig, config.customSystemPrompt).apply {
                     onOptimizing = {
-                        this@PhoneAgent.onPromptOptimizing?.invoke()
+                        this@PhoneAgent.listener?.onPromptOptimizing()
                     }
                     onOptimized = { optimizedPrompt ->
-                        this@PhoneAgent.onPromptOptimized?.invoke(optimizedPrompt)
+                        this@PhoneAgent.listener?.onPromptOptimized(optimizedPrompt)
                     }
                     onStreamToken = { token ->
-                        // Logger.d(Logger.AGENT, "[OPTIMIZER->UI] Token: $token")
-                        this@PhoneAgent.onStreamToken?.invoke(token)
+                        this@PhoneAgent.listener?.onStreamToken(token)
                     }
                     onSummarizing = {
-                        this@PhoneAgent.onTaskSummarizing?.invoke()
+                        this@PhoneAgent.listener?.onTaskSummarizing()
                     }
                     onSummarized = { summary ->
-                        this@PhoneAgent.onTaskSummary?.invoke(summary)
+                        this@PhoneAgent.listener?.onTaskSummary(summary)
                     }
                 }
                 Logger.i(Logger.AGENT, "PromptOptimizer initialized with model: ${config.modelConfig.modelName}")
@@ -225,10 +178,10 @@ class PhoneAgent(
             if (config.enabled && config.modelConfig != null) {
                 intentRecognizer = com.autoglm.assistant.ai.IntentRecognizer(config.modelConfig).apply {
                     onRecognizing = {
-                        this@PhoneAgent.onIntentRecognizing?.invoke()
+                        this@PhoneAgent.listener?.onIntentRecognizing()
                     }
                     onRecognized = { result ->
-                        this@PhoneAgent.onIntentRecognized?.invoke(result)
+                        this@PhoneAgent.listener?.onIntentRecognized(result)
                     }
                 }
                 Logger.i(Logger.AGENT, "IntentRecognizer initialized with model: ${config.modelConfig.modelName}")
@@ -306,7 +259,7 @@ class PhoneAgent(
         conversationHistory.add(Message.User(
             "【用户干预】用户要求调整执行方向：$effectiveInstruction"
         ))
-        onInterventionProcessed?.invoke(instruction)
+        listener?.onInterventionProcessed(instruction)
 
         // 步骤4: 干预恢复执行前开启任务级输入法会话（任务结束/打断时自动恢复）
         val imeSessionStarted = ShellExecutor.beginAdbKeyboardSession(context)
@@ -326,7 +279,7 @@ class PhoneAgent(
         } catch (e: Exception) {
             val error = "Error: ${e.message}"
             Logger.e(Logger.AGENT, "Intervention task failed: $error", e)
-            onError?.invoke(error)
+            listener?.onError(error)
             return error
         } finally {
             // 步骤: 用 NonCancellable 确保协程取消时仍能恢复输入法
@@ -366,7 +319,7 @@ class PhoneAgent(
                 "⚠️ Planning not available: Please configure Smart Coordinator API in settings"
             }
             Logger.w(Logger.AGENT, warningMsg)
-            onThinking?.invoke(warningMsg)
+            listener?.onThinking(warningMsg)
         }
 
         // 步骤: 意图识别 — 将用户自然语言输入匹配到快捷指令
@@ -471,7 +424,7 @@ class PhoneAgent(
         } catch (e: Exception) {
             val error = "Error: ${e.message}"
             Logger.e(Logger.AGENT, "Task failed: $error", e)
-            onError?.invoke(error)
+            listener?.onError(error)
             return error
         } finally {
             // 步骤: 用 NonCancellable 确保协程取消时仍能恢复输入法
@@ -518,7 +471,7 @@ class PhoneAgent(
             Logger.i(Logger.AGENT, "---------- Coordinator Step $coordinatorSteps ----------")
 
             // 通知UI当前执行步数
-            onCoordinatorStep?.invoke(coordinatorSteps, maxCoordinatorSteps)
+            listener?.onCoordinatorStep(coordinatorSteps, maxCoordinatorSteps)
 
             // 获取当前截图
             val screenshot = captureScreenWithOverlayControl()
@@ -554,7 +507,7 @@ class PhoneAgent(
                     } else {
                         "协调器连续决策失败，任务已停止"
                     }
-                    onError?.invoke(failMessage)
+                    listener?.onError(failMessage)
                     return failMessage
                 }
                 continue
@@ -572,7 +525,7 @@ class PhoneAgent(
                     // 步骤2: 立即通知服务任务完成，使唤醒监听尽快恢复
                     // 不等待总结生成（LLM 调用耗时 17-20 秒，会阻塞服务恢复）
                     if (!stopRequested) {
-                        onTaskComplete?.invoke(decision.assessment)
+                        listener?.onTaskComplete(decision.assessment)
                     }
                     // 步骤3: 异步生成任务总结，通过 onTaskSummary 回调更新
                     val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: decision.assessment
@@ -589,7 +542,7 @@ class PhoneAgent(
                     } else {
                         "任务失败：${decision.assessment}"
                     }
-                    onError?.invoke(failMessage)
+                    listener?.onError(failMessage)
                     return failMessage
                 }
 
@@ -606,7 +559,7 @@ class PhoneAgent(
                             } else {
                                 "协调器连续未提供下一步指令，任务已停止"
                             }
-                            onError?.invoke(failMessage)
+                            listener?.onError(failMessage)
                             return failMessage
                         }
                         continue
@@ -632,7 +585,7 @@ class PhoneAgent(
 
                     if (result.needsHumanIntervention) {
                         Logger.w(Logger.AGENT, "Human intervention needed")
-                        onHumanInterventionNeeded?.invoke(result.message ?: "Human intervention needed")
+                        listener?.onHumanInterventionNeeded(result.message ?: "Human intervention needed")
                         return result.message ?: "Task paused for human intervention"
                     }
 
@@ -666,7 +619,7 @@ class PhoneAgent(
         // 步骤1: 恢复输入法（不阻塞）
         ShellExecutor.endAdbKeyboardSession()
         // 步骤2: 立即通知服务任务完成，使唤醒监听尽快恢复
-        onTaskComplete?.invoke(finalMessage)
+        listener?.onTaskComplete(finalMessage)
         // 步骤3: 异步生成任务总结（LLM 调用可能耗时 17-20 秒，不阻塞服务恢复）
         val summaryMessage = generateTaskSummaryIfEnabled(task, stopped = false) ?: finalMessage
         return summaryMessage
@@ -833,7 +786,7 @@ class PhoneAgent(
             if (result.userQuestion != null) {
                 val question = result.userQuestion!!
                 Logger.i(Logger.AGENT, "Agent asks user question: $question")
-                val answer = onUserQuestionAsked?.invoke(question)
+                val answer = listener?.onUserQuestionAsked(question)
                 if (answer != null) {
                     Logger.i(Logger.AGENT, "User answered: $answer")
                     conversationHistory.add(Message.User("【用户回答】$answer"))
@@ -874,7 +827,7 @@ class PhoneAgent(
 
             if (result.needsHumanIntervention) {
                 Logger.w(Logger.AGENT, "Human intervention needed: ${result.message}")
-                onHumanInterventionNeeded?.invoke(result.message ?: "Human intervention needed")
+                listener?.onHumanInterventionNeeded(result.message ?: "Human intervention needed")
                 break
             }
 
@@ -882,7 +835,7 @@ class PhoneAgent(
             if (result.userQuestion != null) {
                 val question = result.userQuestion!!
                 Logger.i(Logger.AGENT, "Agent asks user question (direct mode): $question")
-                val answer = onUserQuestionAsked?.invoke(question)
+                val answer = listener?.onUserQuestionAsked(question)
                 if (answer != null) {
                     Logger.i(Logger.AGENT, "User answered: $answer")
                     conversationHistory.add(Message.User("【用户回答】$answer"))
@@ -904,7 +857,7 @@ class PhoneAgent(
         // 步骤2: 立即通知服务任务完成，使唤醒监听尽快恢复
         // 不等待总结生成（LLM 调用耗时 17-20 秒，期间进程可能被系统杀死）
         if (!stopRequested) {
-            onTaskComplete?.invoke(finalMessage)
+            listener?.onTaskComplete(finalMessage)
         } else {
             Logger.w(Logger.AGENT, "Stop requested, skipping onTaskComplete")
         }
@@ -923,7 +876,7 @@ class PhoneAgent(
         currentStep++
         Logger.agent("---------- Step $currentStep ----------")
         Logger.startTimer("step_$currentStep")
-        onStepStart?.invoke(currentStep)
+        listener?.onStepStart(currentStep)
 
         // 给屏幕采样增加最小间隔，避免过于频繁地抓取导致状态抖动。
         val now = System.currentTimeMillis()
@@ -968,11 +921,11 @@ class PhoneAgent(
         val response = modelClient.chat(conversationHistory, object : ModelClient.StreamCallback {
             override fun onToken(token: String) {
                 // 流式 token 转发到 UI，悬浮窗实时显示思考内容
-                onStreamToken?.invoke(token)
+                listener?.onStreamToken(token)
             }
 
             override fun onThinkingComplete(thinking: String) {
-                onThinking?.invoke(thinking)
+                listener?.onThinking(thinking)
             }
 
             override fun onComplete(response: com.autoglm.assistant.ai.ModelResponse) {
@@ -991,8 +944,8 @@ class PhoneAgent(
 
         Logger.agent("Thinking: ${response.thinking.take(100)}...")
         Logger.agent("Action: ${response.action}")
-        onThinking?.invoke(response.thinking)
-        onAction?.invoke(response.action)
+        listener?.onThinking(response.thinking)
+        listener?.onAction(response.action)
 
         // 保存最后一次执行的thinking和action，供监督器使用
         lastAgentThinking = response.thinking
@@ -1007,10 +960,10 @@ class PhoneAgent(
         Logger.action("Parsed: type=${parsedAction.type}, params=${parsedAction.params}")
 
         Logger.startTimer("action_execute")
-        onBeforeAction?.invoke()  // 操作执行前隐藏悬浮窗，避免遮挡点击目标
+        listener?.onBeforeAction()  // 操作执行前隐藏悬浮窗，避免遮挡点击目标
         delay(300)  // 等一帧，确保主线程完成悬浮窗 GONE 渲染后再执行点击
         val actionResult = actionExecutor.execute(parsedAction)
-        onAfterAction?.invoke()   // 操作执行后恢复悬浮窗
+        listener?.onAfterAction()   // 操作执行后恢复悬浮窗
         val actionTime = Logger.endTimer("action_execute", Logger.ACTION)
         Logger.action("Result: success=${actionResult.success}, message=${actionResult.message}, time=${actionTime}ms")
 
@@ -1031,17 +984,17 @@ class PhoneAgent(
         val stepTime = Logger.endTimer("step_$currentStep")
         Logger.agent("Step $currentStep completed: success=${stepResult.success}, finished=${stepResult.finished}, time=${stepTime}ms")
 
-        onStepComplete?.invoke(stepResult)
+        listener?.onStepComplete(stepResult)
         return stepResult
     }
 
     private suspend fun captureScreenWithOverlayControl() = try {
-        onBeforeScreenshot?.invoke()
+        listener?.onBeforeScreenshot()
         // 给系统一个很短的窗口，把悬浮条从下一帧中移除
         delay(200)
         screenCapture.capture()
     } finally {
-        onAfterScreenshot?.invoke()
+        listener?.onAfterScreenshot()
     }
 
     /**
