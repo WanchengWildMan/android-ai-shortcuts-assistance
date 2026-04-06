@@ -9,10 +9,10 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.autoglm.assistant.util.Logger
 
 /**
  * 系统 STT 文本匹配唤醒引擎（模仿 Operit 方案重构）
@@ -31,7 +31,6 @@ class SystemSttWakeEngine(
 ) : SttWakeEngine(context) {
 
     companion object {
-        private const val TAG = "WakeEngine:SystemSTT"
         // 错误重试延迟（毫秒）：分级策略
         private const val RESTART_DELAY_NORMAL_MS = 300L   // 无匹配/说话结束 → 短延迟
         private const val RESTART_DELAY_ERROR_MS = 1500L   // 一般错误 → 中延迟
@@ -63,13 +62,13 @@ class SystemSttWakeEngine(
             }
             currentConfig = config
             _engineState.value = WakeEngine.EngineState.READY
-            Log.i(TAG, "初始化成功, 唤醒词: '${config.wakePhrase}', 正则: ${config.regexEnabled}")
+            Logger.i(Logger.WAKE, "初始化成功, 唤醒词: '${config.wakePhrase}', 正则: ${config.regexEnabled}")
             true
         } catch (e: IllegalStateException) {
             val errorMsg = "初始化失败: ${e.message}"
             _lastError.value = errorMsg
             _engineState.value = WakeEngine.EngineState.ERROR
-            Log.e(TAG, errorMsg, e)
+            Logger.e(Logger.WAKE, errorMsg, e)
             false
         }
     }
@@ -86,17 +85,17 @@ class SystemSttWakeEngine(
 
     override suspend fun startListening(onWakeDetected: (confidence: Float) -> Unit) {
         if (_engineState.value == WakeEngine.EngineState.LISTENING) {
-            Log.w(TAG, "已在监听中，忽略重复调用")
+            Logger.w(Logger.WAKE, "已在监听中，忽略重复调用")
             return
         }
         if (_engineState.value != WakeEngine.EngineState.READY) {
-            Log.w(TAG, "引擎未就绪（${_engineState.value}），无法启动监听")
+            Logger.w(Logger.WAKE, "引擎未就绪（${_engineState.value}），无法启动监听")
             return
         }
         this.onWakeDetected = onWakeDetected
         _engineState.value = WakeEngine.EngineState.LISTENING
         consecutiveErrors = 0
-        Log.i(TAG, "开始持续唤醒监听...")
+        Logger.i(Logger.WAKE, "开始持续唤醒监听...")
         startRecognitionLoop()
     }
 
@@ -111,13 +110,13 @@ class SystemSttWakeEngine(
         handler.post {
             // 步骤1: 检查是否仍在 LISTENING 状态
             if (_engineState.value != WakeEngine.EngineState.LISTENING) {
-                Log.d(TAG, "非 LISTENING 状态，停止识别循环")
+                Logger.d(Logger.WAKE, "非 LISTENING 状态，停止识别循环")
                 return@post
             }
             try {
                 startSingleRecognition()
             } catch (e: Exception) {
-                Log.e(TAG, "启动识别异常: ${e.message}", e)
+                Logger.e(Logger.WAKE, "启动识别异常: ${e.message}", e)
                 scheduleRestart(RESTART_DELAY_ERROR_MS)
             }
         }
@@ -134,7 +133,7 @@ class SystemSttWakeEngine(
         try {
             speechRecognizer?.destroy()
         } catch (e: Exception) {
-            Log.w(TAG, "销毁旧识别器时异常: ${e.message}")
+            Logger.w(Logger.WAKE, "销毁旧识别器时异常: ${e.message}")
         }
 
         // 步骤3: 创建新识别器并设置回调
@@ -145,7 +144,7 @@ class SystemSttWakeEngine(
         // 步骤4: 启动识别
         val intent = createRecognizerIntent(config)
         speechRecognizer?.startListening(intent)
-        Log.d(TAG, "已启动本轮识别, 唤醒词: '${config.wakePhrase}'")
+        Logger.d(Logger.WAKE, "已启动本轮识别, 唤醒词: '${config.wakePhrase}'")
     }
 
     /** 权限校验 */
@@ -156,7 +155,7 @@ class SystemSttWakeEngine(
         ) {
             _lastError.value = "缺少 RECORD_AUDIO 权限"
             _engineState.value = WakeEngine.EngineState.ERROR
-            Log.e(TAG, "权限不足: RECORD_AUDIO 未授予")
+            Logger.e(Logger.WAKE, "权限不足: RECORD_AUDIO 未授予")
             return false
         }
         return true
@@ -188,7 +187,7 @@ class SystemSttWakeEngine(
     private fun createRecognitionListener(): RecognitionListener {
         return object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
-                Log.d(TAG, "准备接收语音")
+                Logger.d(Logger.WAKE, "准备接收语音")
                 consecutiveErrors = 0 // 成功启动，重置错误计数
             }
 
@@ -198,9 +197,9 @@ class SystemSttWakeEngine(
                 if (matches.isNullOrEmpty()) return
                 for (text in matches) {
                     if (text.isBlank()) continue
-                    Log.d(TAG, "partial: '$text'")
+                    Logger.d(Logger.WAKE, "partial: '$text'")
                     if (matchWakePhrase(text)) {
-                        Log.i(TAG, "唤醒词在 partial 阶段命中: '$text'")
+                        Logger.i(Logger.WAKE, "唤醒词在 partial 阶段命中: '$text'")
                         triggerWake()
                         return
                     }
@@ -212,9 +211,9 @@ class SystemSttWakeEngine(
                 if (!matches.isNullOrEmpty()) {
                     for (text in matches) {
                         if (text.isBlank()) continue
-                        Log.d(TAG, "final: '$text'")
+                        Logger.d(Logger.WAKE, "final: '$text'")
                         if (matchWakePhrase(text)) {
-                            Log.i(TAG, "唤醒词在 final 阶段命中: '$text'")
+                            Logger.i(Logger.WAKE, "唤醒词在 final 阶段命中: '$text'")
                             triggerWake()
                             return
                         }
@@ -226,7 +225,7 @@ class SystemSttWakeEngine(
 
             override fun onError(error: Int) {
                 val errorMsg = getErrorText(error)
-                Log.w(TAG, "识别错误: $errorMsg (code=$error)")
+                Logger.w(Logger.WAKE, "识别错误: $errorMsg (code=$error)")
 
                 when (error) {
                     // 致命错误：权限 → 停止
@@ -250,7 +249,7 @@ class SystemSttWakeEngine(
                         consecutiveErrors++
                         // 指数退避，最大30秒
                         val delay = (RESTART_DELAY_NETWORK_MS * consecutiveErrors).coerceAtMost(30_000L)
-                        Log.w(TAG, "网络相关错误，${delay}ms 后重试 (连续错误: $consecutiveErrors)")
+                        Logger.w(Logger.WAKE, "网络相关错误，${delay}ms 后重试 (连续错误: $consecutiveErrors)")
                         scheduleRestart(delay)
                     }
                     // 其他错误 → 中等延迟
@@ -262,8 +261,8 @@ class SystemSttWakeEngine(
                 }
             }
 
-            override fun onEndOfSpeech() { Log.d(TAG, "说话结束") }
-            override fun onBeginningOfSpeech() { Log.d(TAG, "开始说话") }
+            override fun onEndOfSpeech() { Logger.d(Logger.WAKE, "说话结束") }
+            override fun onBeginningOfSpeech() { Logger.d(Logger.WAKE, "开始说话") }
             override fun onRmsChanged(rmsdB: Float) { /* 静默，避免日志洪水 */ }
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -280,7 +279,7 @@ class SystemSttWakeEngine(
             speechRecognizer?.stopListening()
             speechRecognizer?.cancel()
         } catch (e: Exception) {
-            Log.w(TAG, "停止识别异常: ${e.message}")
+            Logger.w(Logger.WAKE, "停止识别异常: ${e.message}")
         }
 
         // 步骤2: 状态切回 READY（上层会重新调用 startListening）
@@ -309,10 +308,10 @@ class SystemSttWakeEngine(
                 speechRecognizer?.stopListening()
                 speechRecognizer?.cancel()
             } catch (e: Exception) {
-                Log.w(TAG, "停止监听异常: ${e.message}")
+                Logger.w(Logger.WAKE, "停止监听异常: ${e.message}")
             }
             consecutiveErrors = 0
-            Log.i(TAG, "停止监听")
+            Logger.i(Logger.WAKE, "停止监听")
         }
     }
 
@@ -321,12 +320,12 @@ class SystemSttWakeEngine(
         try {
             speechRecognizer?.destroy()
         } catch (e: Exception) {
-            Log.w(TAG, "释放识别器异常: ${e.message}")
+            Logger.w(Logger.WAKE, "释放识别器异常: ${e.message}")
         }
         speechRecognizer = null
         consecutiveErrors = 0
         super.release()
-        Log.i(TAG, "释放所有资源")
+        Logger.i(Logger.WAKE, "释放所有资源")
     }
 
     private fun getErrorText(errorCode: Int): String {

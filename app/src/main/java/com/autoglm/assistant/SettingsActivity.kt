@@ -36,6 +36,7 @@ import com.autoglm.assistant.service.WakeWordService
 import com.autoglm.assistant.ui.theme.AutoGLMAssistantTheme
 import com.autoglm.assistant.util.PreferenceManager
 import kotlinx.coroutines.launch
+import com.autoglm.assistant.util.Logger
 
 // Placeholder for SettingsActivity
 class SettingsActivity : ComponentActivity() {
@@ -165,10 +166,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                 prefs.customPpnPath = destFile.absolutePath
                 prefs.wakeWordKeyword = "CUSTOM"
 
-                android.util.Log.i("AutoGLM", "自定义 ppn 模型已导入: $fileName -> ${destFile.absolutePath}")
+                Logger.i(Logger.SETTINGS, "自定义 ppn 模型已导入: $fileName -> ${destFile.absolutePath}")
                 android.widget.Toast.makeText(context, "模型文件已导入: $fileName", android.widget.Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                android.util.Log.e("AutoGLM", "导入 ppn 文件失败: ${e.message}", e)
+                Logger.e(Logger.SETTINGS, "导入 ppn 文件失败: ${e.message}", e)
                 android.widget.Toast.makeText(context, "导入失败: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
@@ -187,7 +188,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
                 Toast.makeText(context, if (prefs.language == "cn") "配置已导出" else "Config exported", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                android.util.Log.e("AutoGLM", "导出配置失败: ${e.message}", e)
+                Logger.e(Logger.SETTINGS, "导出配置失败: ${e.message}", e)
                 Toast.makeText(context, if (prefs.language == "cn") "导出失败: ${e.message}" else "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
@@ -210,7 +211,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 // 重建 Activity 以刷新所有 remember 状态
                 (context as? Activity)?.recreate()
             } catch (e: Exception) {
-                android.util.Log.e("AutoGLM", "导入配置失败: ${e.message}", e)
+                Logger.e(Logger.SETTINGS, "导入配置失败: ${e.message}", e)
                 Toast.makeText(context, if (prefs.language == "cn") "导入失败: ${e.message}" else "Import failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }

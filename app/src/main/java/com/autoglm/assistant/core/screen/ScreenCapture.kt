@@ -25,6 +25,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
+import com.autoglm.assistant.util.Logger
 
 data class Screenshot(
     val base64Data: String,
@@ -76,7 +77,7 @@ class ScreenCapture(private val context: Context) {
         // Android 14+ (API 34) 要求在 createVirtualDisplay 之前注册 callback，否则抛出 IllegalStateException
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
-                android.util.Log.d("ScreenCapture", "MediaProjection stopped via callback")
+                Logger.d(Logger.SCREEN, "MediaProjection stopped via callback")
                 // 步骤1: 释放 VirtualDisplay 和 ImageReader（不重复 stop mediaProjection，因为已经在 onStop 中）
                 virtualDisplay?.release()
                 virtualDisplay = null
@@ -114,7 +115,7 @@ class ScreenCapture(private val context: Context) {
                     }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Logger.e(Logger.SCREEN, "截屏回调异常", e)
             }
         }, handler)
 
@@ -132,20 +133,20 @@ class ScreenCapture(private val context: Context) {
 
     suspend fun capture(): Screenshot? = withContext(Dispatchers.IO) {
         // 步骤1: 优先使用无障碍服务截图（Android 11+，不需要root）
-        android.util.Log.d("ScreenCapture", "capture() 开始，尝试无障碍服务截图...")
+        Logger.d(Logger.SCREEN, "capture() 开始，尝试无障碍服务截图...")
         val accessibilityScreenshot = captureViaAccessibility()
         if (accessibilityScreenshot != null) {
-            android.util.Log.d("ScreenCapture", "✅ 无障碍服务截图成功: ${accessibilityScreenshot.width}x${accessibilityScreenshot.height}, sensitive=${accessibilityScreenshot.isSensitive}")
+            Logger.d(Logger.SCREEN, "✅ 无障碍服务截图成功: ${accessibilityScreenshot.width}x${accessibilityScreenshot.height}, sensitive=${accessibilityScreenshot.isSensitive}")
             return@withContext accessibilityScreenshot
         }
-        android.util.Log.w("ScreenCapture", "❌ 无障碍服务截图失败，尝试 MediaProjection...")
+        Logger.w(Logger.SCREEN, "❌ 无障碍服务截图失败，尝试 MediaProjection...")
         
         // 步骤2: 如果 MediaProjection 可用，使用它
-        android.util.Log.d("ScreenCapture", "MediaProjection=${mediaProjection != null}, imageReader=${imageReader != null}, latestBitmap=${latestBitmap != null}")
+        Logger.d(Logger.SCREEN, "MediaProjection=${mediaProjection != null}, imageReader=${imageReader != null}, latestBitmap=${latestBitmap != null}")
         if (mediaProjection != null && imageReader != null) {
             var bitmap = captureViaMediaProjection()
             if (bitmap != null) {
-                android.util.Log.d("ScreenCapture", "✅ MediaProjection 截图成功: ${bitmap.width}x${bitmap.height}")
+                Logger.d(Logger.SCREEN, "✅ MediaProjection 截图成功: ${bitmap.width}x${bitmap.height}")
                 // 缩放图片以减少数据量
                 val resized = ImageUtils.resizeBitmap(bitmap, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT)
                 if (resized !== bitmap) {
@@ -164,14 +165,14 @@ class ScreenCapture(private val context: Context) {
                     )
                 }
             } else {
-                android.util.Log.w("ScreenCapture", "❌ MediaProjection 截图返回 null bitmap")
+                Logger.w(Logger.SCREEN, "❌ MediaProjection 截图返回 null bitmap")
             }
         } else {
-            android.util.Log.w("ScreenCapture", "❌ MediaProjection 不可用，跳过")
+            Logger.w(Logger.SCREEN, "❌ MediaProjection 不可用，跳过")
         }
 
         // 步骤3: 回退到 shell screencap（需要 root/shell 权限）
-        android.util.Log.w("ScreenCapture", "⚠️ 回退到 shell screencap（非root可能返回黑图）...")
+        Logger.w(Logger.SCREEN, "⚠️ 回退到 shell screencap（非root可能返回黑图）...")
         return@withContext captureViaShell()
     }
     
@@ -236,7 +237,7 @@ class ScreenCapture(private val context: Context) {
             
             return null
         } catch (e: Exception) {
-            android.util.Log.e("ScreenCapture", "无障碍服务截图失败", e)
+            Logger.e(Logger.SCREEN, "无障碍服务截图失败", e)
             return null
         }
     }

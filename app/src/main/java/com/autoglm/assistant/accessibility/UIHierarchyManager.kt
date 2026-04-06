@@ -11,7 +11,6 @@ import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
-import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.autoglm.assistant.R
@@ -29,6 +28,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.coroutines.resume
+import com.autoglm.assistant.util.Logger
 
 /**
  * UI 层次结构管理器
@@ -42,7 +42,6 @@ import kotlin.coroutines.resume
  * 4. 安装管理：从 assets 提取并安装提供者 APK
  */
 object UIHierarchyManager {
-    private const val TAG = "UIHierarchyManager"
     private const val BIND_SERVICE_TIMEOUT_MS = 3000L // 3秒超时
     
     // 步骤1：无障碍服务提供者应用配置
@@ -66,7 +65,7 @@ object UIHierarchyManager {
     // 步骤3：定义服务连接回调
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            Log.d(TAG, "无障碍服务提供者已连接")
+            Logger.d(Logger.ACCESSIBILITY, "无障碍服务提供者已连接")
             accessibilityProvider = IAccessibilityProvider.Stub.asInterface(service)
             _isBound.value = true
             connectionContinuation?.invoke(true)
@@ -74,7 +73,7 @@ object UIHierarchyManager {
         }
         
         override fun onServiceDisconnected(name: ComponentName?) {
-            Log.d(TAG, "无障碍服务提供者已断开")
+            Logger.d(Logger.ACCESSIBILITY, "无障碍服务提供者已断开")
             accessibilityProvider = null
             _isBound.value = false
             connectionContinuation?.invoke(false)
@@ -96,10 +95,10 @@ object UIHierarchyManager {
                     inputStream.copyTo(outputStream)
                 }
             }
-            Log.d(TAG, "无障碍服务 APK 已提取到: ${apkFile.absolutePath}")
+            Logger.d(Logger.ACCESSIBILITY, "无障碍服务 APK 已提取到: ${apkFile.absolutePath}")
             apkFile
         } catch (e: Exception) {
-            Log.e(TAG, "从 assets 提取无障碍服务 APK 失败", e)
+            Logger.e(Logger.ACCESSIBILITY, "从 assets 提取无障碍服务 APK 失败", e)
             null
         }
     }
@@ -145,7 +144,7 @@ object UIHierarchyManager {
                 try {
                     context.startActivity(installIntent)
                 } catch (e: Exception) {
-                    Log.e(TAG, "启动安装界面失败", e)
+                    Logger.e(Logger.ACCESSIBILITY, "启动安装界面失败", e)
                     Toast.makeText(
                         context,
                         "操作失败: ${e.message}",
@@ -179,11 +178,11 @@ object UIHierarchyManager {
      */
     suspend fun bindToService(context: Context): Boolean {
         return bindingMutex.withLock {
-            Log.d(TAG, "开始绑定服务，线程：${Thread.currentThread().name}")
+            Logger.d(Logger.ACCESSIBILITY, "开始绑定服务，线程：${Thread.currentThread().name}")
             
             // 步骤7.1：检查是否已绑定或应用未安装
             if ((_isBound.value && accessibilityProvider != null) || !isProviderAppInstalled(context)) {
-                Log.d(TAG, "服务已绑定或应用未安装，跳过")
+                Logger.d(Logger.ACCESSIBILITY, "服务已绑定或应用未安装，跳过")
                 return@withLock _isBound.value
             }
             
@@ -192,11 +191,11 @@ object UIHierarchyManager {
             val resolveInfo: ResolveInfo? = context.packageManager.resolveService(implicitIntent, PackageManager.MATCH_ALL)
             
             if (resolveInfo == null) {
-                Log.e(TAG, "无法解析服务: $PROVIDER_ACTION")
+                Logger.e(Logger.ACCESSIBILITY, "无法解析服务: $PROVIDER_ACTION")
                 return@withLock false
             }
             
-            Log.d(TAG, "服务解析成功: ${resolveInfo.serviceInfo.packageName}/${resolveInfo.serviceInfo.name}")
+            Logger.d(Logger.ACCESSIBILITY, "服务解析成功: ${resolveInfo.serviceInfo.packageName}/${resolveInfo.serviceInfo.name}")
             
             // 步骤7.3：创建显式 Intent
             val explicitIntent = Intent(PROVIDER_ACTION).apply {
@@ -219,17 +218,17 @@ object UIHierarchyManager {
                             serviceConnection,
                             Context.BIND_AUTO_CREATE
                         )
-                        Log.d(TAG, "bindService 结果: $bound")
+                        Logger.d(Logger.ACCESSIBILITY, "bindService 结果: $bound")
                         
                         if (!bound) {
-                            Log.e(TAG, "bindService 返回 false")
+                            Logger.e(Logger.ACCESSIBILITY, "bindService 返回 false")
                             if (continuation.isActive) {
                                 continuation.resume(false)
                             }
                             connectionContinuation = null
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "绑定服务异常", e)
+                        Logger.e(Logger.ACCESSIBILITY, "绑定服务异常", e)
                         if (continuation.isActive) {
                             continuation.resume(false)
                         }
@@ -239,7 +238,7 @@ object UIHierarchyManager {
             }
             
             if (result == null) {
-                Log.e(TAG, "绑定服务超时 (${BIND_SERVICE_TIMEOUT_MS}ms)")
+                Logger.e(Logger.ACCESSIBILITY, "绑定服务超时 (${BIND_SERVICE_TIMEOUT_MS}ms)")
                 connectionContinuation = null
                 _isBound.value = false
                 try {
@@ -250,7 +249,7 @@ object UIHierarchyManager {
                 return@withLock false
             }
             
-            Log.d(TAG, "服务绑定成功")
+            Logger.d(Logger.ACCESSIBILITY, "服务绑定成功")
             result
         }
     }
@@ -263,11 +262,11 @@ object UIHierarchyManager {
             try {
                 context.applicationContext.unbindService(serviceConnection)
             } catch (e: Exception) {
-                Log.e(TAG, "解绑服务失败", e)
+                Logger.e(Logger.ACCESSIBILITY, "解绑服务失败", e)
             }
             _isBound.value = false
             accessibilityProvider = null
-            Log.d(TAG, "服务已解绑")
+            Logger.d(Logger.ACCESSIBILITY, "服务已解绑")
         }
     }
     
@@ -278,10 +277,10 @@ object UIHierarchyManager {
      */
     private suspend fun ensureBound(context: Context): Boolean {
         if (!_isBound.value || accessibilityProvider == null) {
-            Log.w(TAG, "服务未绑定，尝试自动重新绑定...")
+            Logger.w(Logger.ACCESSIBILITY, "服务未绑定，尝试自动重新绑定...")
             val bound = bindToService(context)
             if (!bound) {
-                Log.e(TAG, "自动重新绑定失败")
+                Logger.e(Logger.ACCESSIBILITY, "自动重新绑定失败")
                 return false
             }
         }
@@ -300,13 +299,13 @@ object UIHierarchyManager {
      */
     suspend fun performClick(context: Context, x: Int, y: Int): Boolean {
         if (!ensureBound(context)) {
-            Log.w(TAG, "服务未绑定，无法执行点击")
+            Logger.w(Logger.ACCESSIBILITY, "服务未绑定，无法执行点击")
             return false
         }
         return try {
             accessibilityProvider?.performClick(x, y) ?: false
         } catch (e: RemoteException) {
-            Log.e(TAG, "执行点击操作失败", e)
+            Logger.e(Logger.ACCESSIBILITY, "执行点击操作失败", e)
             false
         }
     }
@@ -316,13 +315,13 @@ object UIHierarchyManager {
      */
     suspend fun performLongPress(context: Context, x: Int, y: Int): Boolean {
         if (!ensureBound(context)) {
-            Log.w(TAG, "服务未绑定，无法执行长按")
+            Logger.w(Logger.ACCESSIBILITY, "服务未绑定，无法执行长按")
             return false
         }
         return try {
             accessibilityProvider?.performLongPress(x, y) ?: false
         } catch (e: RemoteException) {
-            Log.e(TAG, "执行长按操作失败", e)
+            Logger.e(Logger.ACCESSIBILITY, "执行长按操作失败", e)
             false
         }
     }
@@ -339,13 +338,13 @@ object UIHierarchyManager {
         duration: Long
     ): Boolean {
         if (!ensureBound(context)) {
-            Log.w(TAG, "服务未绑定，无法执行滑动")
+            Logger.w(Logger.ACCESSIBILITY, "服务未绑定，无法执行滑动")
             return false
         }
         return try {
             accessibilityProvider?.performSwipe(startX, startY, endX, endY, duration) ?: false
         } catch (e: RemoteException) {
-            Log.e(TAG, "执行滑动操作失败", e)
+            Logger.e(Logger.ACCESSIBILITY, "执行滑动操作失败", e)
             false
         }
     }
@@ -355,13 +354,13 @@ object UIHierarchyManager {
      */
     suspend fun getUIHierarchy(context: Context): String {
         if (!ensureBound(context)) {
-            Log.e(TAG, "服务未绑定，无法获取 UI 层次结构")
+            Logger.e(Logger.ACCESSIBILITY, "服务未绑定，无法获取 UI 层次结构")
             return ""
         }
         return try {
             accessibilityProvider?.uiHierarchy ?: ""
         } catch (e: RemoteException) {
-            Log.e(TAG, "获取 UI 层次结构失败", e)
+            Logger.e(Logger.ACCESSIBILITY, "获取 UI 层次结构失败", e)
             ""
         }
     }
@@ -371,13 +370,13 @@ object UIHierarchyManager {
      */
     suspend fun isAccessibilityServiceEnabled(context: Context): Boolean {
         if (!ensureBound(context)) {
-            Log.w(TAG, "服务未绑定，无法检查无障碍服务状态")
+            Logger.w(Logger.ACCESSIBILITY, "服务未绑定，无法检查无障碍服务状态")
             return false
         }
         return try {
             accessibilityProvider?.isAccessibilityServiceEnabled ?: false
         } catch (e: RemoteException) {
-            Log.e(TAG, "检查无障碍服务状态失败", e)
+            Logger.e(Logger.ACCESSIBILITY, "检查无障碍服务状态失败", e)
             false
         }
     }
@@ -395,7 +394,7 @@ object UIHierarchyManager {
      */
     suspend fun takeScreenshot(context: Context, savePath: String, format: String = "PNG"): Boolean {
         if (!ensureBound(context)) {
-            Log.w(TAG, "服务未绑定，无法截取屏幕截图")
+            Logger.w(Logger.ACCESSIBILITY, "服务未绑定，无法截取屏幕截图")
             return false
         }
         return try {
@@ -419,7 +418,7 @@ object UIHierarchyManager {
             }
             result
         } catch (e: Exception) {
-            Log.e(TAG, "截取屏幕截图失败", e)
+            Logger.e(Logger.ACCESSIBILITY, "截取屏幕截图失败", e)
             false
         }
     }
@@ -434,28 +433,28 @@ object UIHierarchyManager {
      * @return 焦点节点ID，如果没有焦点则返回 null
      */
     suspend fun findFocusedNodeId(context: Context): String? {
-        Log.d(TAG, "[TEXT_INPUT] 🔍 开始查找焦点节点")
-        Log.d(TAG, "[TEXT_INPUT] 当前绑定状态: isBound=${_isBound.value}, provider=${accessibilityProvider != null}")
+        Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] 🔍 开始查找焦点节点")
+        Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] 当前绑定状态: isBound=${_isBound.value}, provider=${accessibilityProvider != null}")
         
         if (!ensureBound(context)) {
-            Log.e(TAG, "[TEXT_INPUT] ❌ 服务未绑定，无法查找焦点节点")
+            Logger.e(Logger.ACCESSIBILITY, "[TEXT_INPUT] ❌ 服务未绑定，无法查找焦点节点")
             return null
         }
         
-        Log.d(TAG, "[TEXT_INPUT] ✅ 服务已绑定，调用 Provider.findFocusedNodeId()")
+        Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] ✅ 服务已绑定，调用 Provider.findFocusedNodeId()")
         return try {
             val nodeId = accessibilityProvider?.findFocusedNodeId()
             if (nodeId != null) {
-                Log.d(TAG, "[TEXT_INPUT] ✅ 找到焦点节点: nodeId=$nodeId")
+                Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] ✅ 找到焦点节点: nodeId=$nodeId")
             } else {
-                Log.w(TAG, "[TEXT_INPUT] ⚠️ Provider 返回 null (未找到焦点节点)")
+                Logger.w(Logger.ACCESSIBILITY, "[TEXT_INPUT] ⚠️ Provider 返回 null (未找到焦点节点)")
             }
             nodeId
         } catch (e: RemoteException) {
-            Log.e(TAG, "[TEXT_INPUT] ❌ 查找焦点节点失败 (RemoteException)", e)
+            Logger.e(Logger.ACCESSIBILITY, "[TEXT_INPUT] ❌ 查找焦点节点失败 (RemoteException)", e)
             null
         } catch (e: Exception) {
-            Log.e(TAG, "[TEXT_INPUT] ❌ 查找焦点节点失败 (异常)", e)
+            Logger.e(Logger.ACCESSIBILITY, "[TEXT_INPUT] ❌ 查找焦点节点失败 (异常)", e)
             null
         }
     }
@@ -472,28 +471,28 @@ object UIHierarchyManager {
      * @return 操作是否成功
      */
     suspend fun setTextOnNode(context: Context, nodeId: String, text: String): Boolean {
-        Log.d(TAG, "[TEXT_INPUT] ⌨️ 开始设置文本: nodeId=$nodeId, text='$text'")
-        Log.d(TAG, "[TEXT_INPUT] 当前绑定状态: isBound=${_isBound.value}, provider=${accessibilityProvider != null}")
+        Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] ⌨️ 开始设置文本: nodeId=$nodeId, text='$text'")
+        Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] 当前绑定状态: isBound=${_isBound.value}, provider=${accessibilityProvider != null}")
         
         if (!ensureBound(context)) {
-            Log.e(TAG, "[TEXT_INPUT] ❌ 服务未绑定，无法设置文本")
+            Logger.e(Logger.ACCESSIBILITY, "[TEXT_INPUT] ❌ 服务未绑定，无法设置文本")
             return false
         }
         
-        Log.d(TAG, "[TEXT_INPUT] ✅ 服务已绑定，调用 Provider.setTextOnNode()")
+        Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] ✅ 服务已绑定，调用 Provider.setTextOnNode()")
         return try {
             val result = accessibilityProvider?.setTextOnNode(nodeId, text) ?: false
             if (result) {
-                Log.d(TAG, "[TEXT_INPUT] ✅ 设置文本成功")
+                Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] ✅ 设置文本成功")
             } else {
-                Log.w(TAG, "[TEXT_INPUT] ⚠️ Provider 返回 false (设置文本失败)")
+                Logger.w(Logger.ACCESSIBILITY, "[TEXT_INPUT] ⚠️ Provider 返回 false (设置文本失败)")
             }
             result
         } catch (e: RemoteException) {
-            Log.e(TAG, "[TEXT_INPUT] ❌ 设置文本失败 (RemoteException)", e)
+            Logger.e(Logger.ACCESSIBILITY, "[TEXT_INPUT] ❌ 设置文本失败 (RemoteException)", e)
             false
         } catch (e: Exception) {
-            Log.e(TAG, "[TEXT_INPUT] ❌ 设置文本失败 (异常)", e)
+            Logger.e(Logger.ACCESSIBILITY, "[TEXT_INPUT] ❌ 设置文本失败 (异常)", e)
             false
         }
     }

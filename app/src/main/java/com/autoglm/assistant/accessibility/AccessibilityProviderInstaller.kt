@@ -4,8 +4,8 @@ import android.content.Context
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.Build
-import android.util.Log
 import kotlin.math.min
+import com.autoglm.assistant.util.Logger
 
 /**
  * 无障碍服务提供者应用安装管理器
@@ -19,7 +19,6 @@ import kotlin.math.min
  */
 class AccessibilityProviderInstaller {
     companion object {
-        private const val TAG = "AccessibilityProviderInstaller"
         
         // HARD: 必须与 UIHierarchyManager 中的包名保持一致
         private const val ACCESSIBILITY_PACKAGE_NAME = "com.autoglm.assistant.provider"
@@ -52,7 +51,7 @@ class AccessibilityProviderInstaller {
                 cachedBundledVersion = versionInfo
                 return versionInfo
             } catch (e: Exception) {
-                Log.e(TAG, "获取内置无障碍服务版本失败", e)
+                Logger.e(Logger.ACCESSIBILITY, "获取内置无障碍服务版本失败", e)
                 val unknown = "未知"
                 cachedBundledVersion = unknown
                 return unknown
@@ -89,7 +88,7 @@ class AccessibilityProviderInstaller {
                 cachedInstalledVersion = null
                 return null
             } catch (e: Exception) {
-                Log.e(TAG, "获取已安装无障碍服务版本出错", e)
+                Logger.e(Logger.ACCESSIBILITY, "获取已安装无障碍服务版本出错", e)
                 cachedInstalledVersion = null
                 return null
             }
@@ -160,7 +159,7 @@ class AccessibilityProviderInstaller {
                 updateCacheTimestamp()
                 return false
             } catch (e: Exception) {
-                Log.e(TAG, "比较无障碍服务版本时出错", e)
+                Logger.e(Logger.ACCESSIBILITY, "比较无障碍服务版本时出错", e)
                 cachedUpdateNeeded = false
                 updateCacheTimestamp()
                 return false
@@ -201,7 +200,7 @@ class AccessibilityProviderInstaller {
             cachedBundledVersion = null
             cachedUpdateNeeded = null
             lastCheckTime = 0
-            Log.d(TAG, "无障碍服务版本缓存已清除")
+            Logger.d(Logger.ACCESSIBILITY, "无障碍服务版本缓存已清除")
         }
     }
 }

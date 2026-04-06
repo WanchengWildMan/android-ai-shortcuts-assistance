@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.autoglm.assistant.util.Logger
 
 @Composable
 fun ParameterInputDialog(
@@ -30,7 +31,7 @@ fun ParameterInputDialog(
     var enableOptimizer by remember { mutableStateOf(shortcut.enableOptimizer) }
 
     // 调试日志：显示快捷指令的规划设置
-    android.util.Log.d("AutoGLM", "ParameterInputDialog: shortcut.enablePlanning=${shortcut.enablePlanning}, initial enablePlanning=$enablePlanning")
+    Logger.d(Logger.SETTINGS, "ParameterInputDialog: shortcut.enablePlanning=${shortcut.enablePlanning}, initial enablePlanning=$enablePlanning")
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -170,7 +171,7 @@ fun ParameterInputDialog(
                     Button(
                         onClick = {
                             val result = shortcut.fillParameters(parameterValues)
-                            android.util.Log.d("AutoGLM", "ParameterInputDialog confirm: enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer")
+                            Logger.d(Logger.SETTINGS, "ParameterInputDialog confirm: enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer")
                             onConfirm(result, enablePlanning, enableOptimizer)
                         },
                         enabled = parameterValues.values.all { it.isNotBlank() }

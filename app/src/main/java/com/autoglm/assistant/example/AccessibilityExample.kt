@@ -3,6 +3,7 @@ package com.autoglm.assistant.example
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import com.autoglm.assistant.util.Logger
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -76,7 +77,7 @@ class AccessibilityExample {
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context.startActivity(intent)
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    Logger.e(Logger.ACCESSIBILITY, "无障碍设置页面启动失败", e)
                 }
             }
         }

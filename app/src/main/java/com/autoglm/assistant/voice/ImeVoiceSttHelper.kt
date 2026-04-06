@@ -9,7 +9,6 @@ import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
-import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -22,6 +21,7 @@ import com.autoglm.assistant.accessibility.UIHierarchyManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import com.autoglm.assistant.util.Logger
 
 /**
  * 通过 IME（输入法）语音功能实现 STT 的辅助类
@@ -37,7 +37,6 @@ import kotlinx.coroutines.launch
 class ImeVoiceSttHelper(private val context: Context) {
 
     companion object {
-        private const val TAG = "ImeVoiceSTT"
         // 文字稳定后等待时间（毫秒），超过此时间无新文字则认为识别完成
         private const val TEXT_STABLE_DELAY_MS = 2000L
         // 弹出输入法后等待键盘就绪的延迟后备值（毫秒）；实际延迟由实例变量 keyboardReadyDelay 决定
@@ -128,9 +127,9 @@ class ImeVoiceSttHelper(private val context: Context) {
                     UIHierarchyManager.performClick(context, spaceX, spaceY)
                 }
                 // 步骤3: 记录最终结果
-                Log.i(TAG, "点击语音按钮 ($spaceX, $spaceY) [root=${com.autoglm.assistant.util.ShellExecutor.globalUseRoot}]: ${if (success) "成功" else "失败"}")
+                Logger.i(Logger.STT, "点击语音按钮 ($spaceX, $spaceY) [root=${com.autoglm.assistant.util.ShellExecutor.globalUseRoot}]: ${if (success) "成功" else "失败"}")
             } catch (e: Exception) {
-                Log.w(TAG, "点击语音按钮异常: ${e.message}")
+                Logger.w(Logger.STT, "点击语音按钮异常: ${e.message}")
             }
         }
     }
@@ -158,7 +157,7 @@ class ImeVoiceSttHelper(private val context: Context) {
                 stableCheckRunnable?.let { mainHandler.removeCallbacks(it) }
                 stableCheckRunnable = Runnable {
                     if (isActive && lastText.isNotBlank()) {
-                        Log.i(TAG, "文字已稳定: $lastText")
+                        Logger.i(Logger.STT, "文字已稳定: $lastText")
                         isActive = false
                         // 步骤: 再次点击原位结束录音
                         tapVoiceButton()
@@ -177,7 +176,7 @@ class ImeVoiceSttHelper(private val context: Context) {
     private fun startTimeout() {
         timeoutRunnable = Runnable {
             if (isActive) {
-                Log.w(TAG, "IME 语音输入超时")
+                Logger.w(Logger.STT, "IME 语音输入超时")
                 isActive = false
                 // 步骤: 点击原位结束录音
                 tapVoiceButton()

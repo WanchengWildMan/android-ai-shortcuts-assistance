@@ -1,11 +1,11 @@
 package com.autoglm.assistant.voice.wake
 
 import android.content.Context
-import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import com.autoglm.assistant.util.Logger
 
 /**
  * 唤醒引擎管理器 — 负责引擎的创建、切换、生命周期管理
@@ -14,7 +14,6 @@ import kotlinx.coroutines.sync.withLock
 class WakeEngineManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "WakeEngineManager"
     }
 
     private val mutex = Mutex()
@@ -35,14 +34,14 @@ class WakeEngineManager(private val context: Context) {
      */
     suspend fun switchEngine(type: WakeEngine.EngineType, config: WakeEngineConfig): Boolean {
         return mutex.withLock {
-            Log.i(TAG, "切换引擎: ${_activeEngineType.value} -> $type")
+            Logger.i(Logger.WAKE, "切换引擎: ${_activeEngineType.value} -> $type")
 
             // 步骤1: 停止当前引擎
             currentEngine?.let {
                 try {
                     it.stopListening()
                 } catch (e: Exception) {
-                    Log.e(TAG, "停止当前引擎失败", e)
+                    Logger.e(Logger.WAKE, "停止当前引擎失败", e)
                 }
             }
 
@@ -51,7 +50,7 @@ class WakeEngineManager(private val context: Context) {
                 try {
                     it.release()
                 } catch (e: Exception) {
-                    Log.e(TAG, "释放当前引擎失败", e)
+                    Logger.e(Logger.WAKE, "释放当前引擎失败", e)
                 }
             }
             currentEngine = null
@@ -63,7 +62,7 @@ class WakeEngineManager(private val context: Context) {
                 val errorMsg = "不支持的引擎类型: $type"
                 _lastError.value = errorMsg
                 _engineState.value = WakeEngine.EngineState.ERROR
-                Log.e(TAG, errorMsg)
+                Logger.e(Logger.WAKE, errorMsg)
                 return@withLock false
             }
 
@@ -75,12 +74,12 @@ class WakeEngineManager(private val context: Context) {
                 // 代理状态到管理器
                 _engineState.value = newEngine.engineState.value
                 _lastError.value = newEngine.lastError.value
-                Log.i(TAG, "引擎切换成功: $type")
+                Logger.i(Logger.WAKE, "引擎切换成功: $type")
             } else {
                 newEngine.release()
                 _engineState.value = WakeEngine.EngineState.ERROR
                 _lastError.value = newEngine.lastError.value
-                Log.e(TAG, "引擎初始化失败: $type")
+                Logger.e(Logger.WAKE, "引擎初始化失败: $type")
             }
 
             success
@@ -93,7 +92,7 @@ class WakeEngineManager(private val context: Context) {
         if (engine == null) {
             val errorMsg = "无活跃引擎，无法开始监听"
             _lastError.value = errorMsg
-            Log.e(TAG, errorMsg)
+            Logger.e(Logger.WAKE, errorMsg)
             return
         }
 
@@ -119,17 +118,17 @@ class WakeEngineManager(private val context: Context) {
             if (engine == null) {
                 val errorMsg = "无活跃引擎，无法重新初始化"
                 _lastError.value = errorMsg
-                Log.e(TAG, errorMsg)
+                Logger.e(Logger.WAKE, errorMsg)
                 return@withLock false
             }
 
-            Log.i(TAG, "重新初始化引擎: ${engine.engineType}")
+            Logger.i(Logger.WAKE, "重新初始化引擎: ${engine.engineType}")
 
             // 停止监听
             try {
                 engine.stopListening()
             } catch (e: Exception) {
-                Log.e(TAG, "停止监听失败", e)
+                Logger.e(Logger.WAKE, "停止监听失败", e)
             }
 
             // 重新初始化
@@ -138,9 +137,9 @@ class WakeEngineManager(private val context: Context) {
             _lastError.value = engine.lastError.value
 
             if (success) {
-                Log.i(TAG, "重新初始化成功")
+                Logger.i(Logger.WAKE, "重新初始化成功")
             } else {
-                Log.e(TAG, "重新初始化失败")
+                Logger.e(Logger.WAKE, "重新初始化失败")
             }
 
             success
@@ -149,7 +148,7 @@ class WakeEngineManager(private val context: Context) {
 
     /** 释放所有资源 */
     fun release() {
-        Log.i(TAG, "释放所有资源")
+        Logger.i(Logger.WAKE, "释放所有资源")
         currentEngine?.release()
         currentEngine = null
         _activeEngineType.value = null
@@ -161,20 +160,20 @@ class WakeEngineManager(private val context: Context) {
     private fun createEngine(type: WakeEngine.EngineType): WakeEngine? {
         return when (type) {
             WakeEngine.EngineType.PORCUPINE -> {
-                Log.i(TAG, "正在创建 Porcupine 唤醒引擎")
+                Logger.i(Logger.WAKE, "正在创建 Porcupine 唤醒引擎")
                 PorcupineWakeEngine(context)
             }
             WakeEngine.EngineType.PERSONAL_TEMPLATE -> {
-                Log.i(TAG, "正在创建个人模板唤醒引擎")
+                Logger.i(Logger.WAKE, "正在创建个人模板唤醒引擎")
                 PersonalTemplateWakeEngine(context)
             }
             WakeEngine.EngineType.STT_SYSTEM -> {
-                Log.i(TAG, "正在创建系统 STT 唤醒引擎")
+                Logger.i(Logger.WAKE, "正在创建系统 STT 唤醒引擎")
                 SystemSttWakeEngine(context)
             }
             WakeEngine.EngineType.STT_SHERPA -> {
                 // TODO: Phase 3 实现
-                Log.e(TAG, "无法启动：Sherpa STT 引擎尚未实现，请在设置中切换引擎")
+                Logger.e(Logger.WAKE, "无法启动：Sherpa STT 引擎尚未实现，请在设置中切换引擎")
                 null
             }
         }

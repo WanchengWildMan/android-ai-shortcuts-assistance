@@ -75,6 +75,7 @@ import androidx.compose.animation.fadeOut
 import com.autoglm.assistant.ai.MessageBuilder
 import com.autoglm.assistant.core.planner.SmartCoordinator
 import com.autoglm.assistant.core.planner.PromptOptimizer
+import com.autoglm.assistant.util.Logger
 
 class MainActivity : ComponentActivity() {
 
@@ -85,7 +86,7 @@ class MainActivity : ComponentActivity() {
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            android.util.Log.d("AutoGLM", "=== MainActivity.onServiceConnected ===")
+            Logger.d(Logger.SERVICE, "=== MainActivity.onServiceConnected ===")
             val binder = service as WakeWordService.LocalBinder
             wakeWordService = binder.getService()
             serviceBound = true
@@ -93,7 +94,7 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            android.util.Log.d("AutoGLM", "=== MainActivity.onServiceDisconnected ===")
+            Logger.d(Logger.SERVICE, "=== MainActivity.onServiceDisconnected ===")
             wakeWordService = null
             serviceBound = false
             _serviceConnected.value = false
@@ -126,7 +127,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             // 读取 _serviceConnected 以便服务绑定后触发 recomposition
             val isConnected = _serviceConnected.value
-            android.util.Log.d("AutoGLM", "=== MainActivity.setContent recomposing, isConnected=$isConnected ===")
+            Logger.d(Logger.SERVICE, "=== MainActivity.setContent recomposing, isConnected=$isConnected ===")
             val currentService = if (isConnected) wakeWordService else null
             AutoGLMAssistantTheme {
                 MainScreen(
@@ -175,7 +176,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (needed.isNotEmpty()) {
-            android.util.Log.i("AutoGLM_START", "应用启动，主动申请权限: $needed")
+            Logger.i(Logger.SERVICE, "应用启动，主动申请权限: $needed")
             requestPermissionLauncher.launch(needed.toTypedArray())
         }
     }
@@ -195,7 +196,7 @@ class MainActivity : ComponentActivity() {
         val hasOverlayPermission = Settings.canDrawOverlays(this)
 
         if (hasMicPermission && hasOverlayPermission) {
-            android.util.Log.i("AutoGLM", "=== 语音唤醒已开启，自动启动服务 ===")
+            Logger.i(Logger.SERVICE, "=== 语音唤醒已开启，自动启动服务 ===")
             val serviceIntent = Intent(this, WakeWordService::class.java).apply {
                 putExtra("START_WAKE_WORD", true)
             }
@@ -206,10 +207,10 @@ class MainActivity : ComponentActivity() {
                     startService(serviceIntent)
                 }
             } catch (e: Exception) {
-                android.util.Log.e("AutoGLM", "自动启动服务失败: ${e.message}", e)
+                Logger.e(Logger.SERVICE, "自动启动服务失败: ${e.message}", e)
             }
         } else {
-            android.util.Log.w("AutoGLM", "=== 语音唤醒已开启但权限不足（mic=$hasMicPermission, overlay=$hasOverlayPermission），跳过自动启动 ===")
+            Logger.w(Logger.SERVICE, "=== 语音唤醒已开启但权限不足（mic=$hasMicPermission, overlay=$hasOverlayPermission），跳过自动启动 ===")
         }
     }
 
@@ -218,19 +219,19 @@ class MainActivity : ComponentActivity() {
         // 步骤: 仅在尚未绑定时绑定服务
         // 任务执行期间 onStop 会跳过解绑，此时 serviceBound 仍为 true，无需重复绑定
         if (!serviceBound) {
-            android.util.Log.d("AutoGLM", "=== MainActivity.onStart: Binding service... ===")
+            Logger.d(Logger.SERVICE, "=== MainActivity.onStart: Binding service... ===")
             bindService(
                 Intent(this, WakeWordService::class.java),
                 serviceConnection,
                 Context.BIND_AUTO_CREATE
             )
         } else {
-            android.util.Log.d("AutoGLM", "=== MainActivity.onStart: Service already bound. ===")
+            Logger.d(Logger.SERVICE, "=== MainActivity.onStart: Service already bound. ===")
         }
     }
 
     override fun onStop() {
-        android.util.Log.d("AutoGLM", "=== MainActivity.onStop() called - activity going to background ===")
+        Logger.d(Logger.SERVICE, "=== MainActivity.onStop() called - activity going to background ===")
         super.onStop()
         if (serviceBound) {
             // 步骤: 任务执行期间保持绑定，作为双重保险
@@ -238,9 +239,9 @@ class MainActivity : ComponentActivity() {
             // 此处额外保留绑定，避免极端情况（如前台服务启动失败）下服务被销毁
             val isTaskRunning = wakeWordService?.serviceState?.value == WakeWordService.ServiceState.EXECUTING_TASK
             if (isTaskRunning) {
-                android.util.Log.d("AutoGLM", "=== MainActivity.onStop(): task running, keeping service bound ===")
+                Logger.d(Logger.SERVICE, "=== MainActivity.onStop(): task running, keeping service bound ===")
             } else {
-                android.util.Log.d("AutoGLM", "=== MainActivity: unbinding service (no task running) ===")
+                Logger.d(Logger.SERVICE, "=== MainActivity: unbinding service (no task running) ===")
                 unbindService(serviceConnection)
                 serviceBound = false
             }
@@ -248,7 +249,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startServiceWithPermissions() {
-        android.util.Log.d("AutoGLM_START", "startServiceWithPermissions called")
+        Logger.d(Logger.SERVICE, "startServiceWithPermissions called")
         val permissions = mutableListOf(
             Manifest.permission.RECORD_AUDIO
         )
@@ -269,10 +270,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startWakeWordService() {
-        android.util.Log.d("AutoGLM_START", "startWakeWordService called")
+        Logger.d(Logger.SERVICE, "startWakeWordService called")
         // 步骤1: 如果有悬浮窗权限则允许展示原有外层窗体，这里不再强制 return 阻塞
         if (!Settings.canDrawOverlays(this)) {
-            android.util.Log.w("AutoGLM_START", "No overlay permission. The app can still listen inside, but floating UI will fallback or not show outside.")
+            Logger.w(Logger.SERVICE, "No overlay permission. The app can still listen inside, but floating UI will fallback or not show outside.")
         }
 
         // 步骤2: 检查并请求电池优化豁免
@@ -280,7 +281,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
             if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
-                android.util.Log.w("AutoGLM", "=== 应用未在电池优化白名单中，请求加入 ===")
+                Logger.w(Logger.SERVICE, "=== 应用未在电池优化白名单中，请求加入 ===")
                 try {
                     val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                         data = Uri.parse("package:$packageName")
@@ -288,14 +289,14 @@ class MainActivity : ComponentActivity() {
                     startActivity(intent)
                     Toast.makeText(this, "请允许应用在后台运行，以确保任务不被中断", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {
-                    android.util.Log.e("AutoGLM", "请求电池优化豁免失败", e)
+                    Logger.e(Logger.SERVICE, "请求电池优化豁免失败", e)
                 }
             }
         }
 
         // 步骤3: 启动语音唤醒服务（需要麦克风权限）
         val wakeWordEnabled = App.instance.preferenceManager.wakeWordEnabled
-        android.util.Log.d("AutoGLM_START", "startWakeWordService preparing intent, wakeWordEnabled=$wakeWordEnabled")
+        Logger.d(Logger.SERVICE, "startWakeWordService preparing intent, wakeWordEnabled=$wakeWordEnabled")
         val serviceIntent = Intent(this, WakeWordService::class.java).apply {
             putExtra("START_WAKE_WORD", wakeWordEnabled)
         }
@@ -307,7 +308,7 @@ class MainActivity : ComponentActivity() {
             }
         } catch (e: Exception) {
             Toast.makeText(this, "启动服务失败: ${e.message}", Toast.LENGTH_LONG).show()
-            android.util.Log.e("MainActivity", "启动服务失败", e)
+            Logger.e(Logger.SERVICE, "启动服务失败", e)
         }
     }
 
@@ -329,7 +330,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
             if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
-                android.util.Log.w("AutoGLM", "=== 警告：应用未在电池优化白名单中，任务可能被中断 ===")
+                Logger.w(Logger.SERVICE, "=== 警告：应用未在电池优化白名单中，任务可能被中断 ===")
             }
         }
         
@@ -369,7 +370,7 @@ class MainActivity : ComponentActivity() {
                 startService(serviceIntent)
             }
         } catch (e: Exception) {
-            android.util.Log.w("MainActivity", "⚠️ 无法启动前台服务: ${e.message}")
+            Logger.w(Logger.SERVICE, "⚠️ 无法启动前台服务: ${e.message}")
         }
     }
     
@@ -384,8 +385,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopCurrentTask() {
-        android.util.Log.w("AutoGLM", "=== MainActivity.stopCurrentTask() 被调用 - UI 请求停止 ===")
-        Exception("MainActivity stopCurrentTask trace").printStackTrace()
+        Logger.w(Logger.SERVICE, "=== MainActivity.stopCurrentTask() 被调用 - UI 请求停止 ===", Exception("stopCurrentTask trace"))
         wakeWordService?.stopCurrentTask()
         Toast.makeText(this, "任务已停止", Toast.LENGTH_SHORT).show()
     }
@@ -419,7 +419,7 @@ class MainActivity : ComponentActivity() {
                 return
             } catch (e: Exception) {
                 Toast.makeText(this, "启动服务失败: ${e.message}", Toast.LENGTH_LONG).show()
-                android.util.Log.e("MainActivity", "启动服务失败", e)
+                Logger.e(Logger.SERVICE, "启动服务失败", e)
                 return
             }
         }
@@ -478,7 +478,7 @@ fun MainScreen(
     //       若用 != IDLE 会导致右上角显示"启动"按钮，用户无法停止服务
     val isServiceRunning = serviceState?.value != null
         
-    android.util.Log.d("AutoGLM_START", "MainScreen recompose: serviceState=${serviceState?.value}, isServiceRunning=$isServiceRunning")
+    Logger.d(Logger.SERVICE, "MainScreen recompose: serviceState=${serviceState?.value}, isServiceRunning=$isServiceRunning")
     
     val wakeWordError = getLastWakeWordError()?.collectAsState()
     val activeEngine = getActiveEngineType()?.collectAsState()
@@ -1101,7 +1101,7 @@ fun MainScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             FilledTonalIconButton(
                                 onClick = {
-                                    android.util.Log.d("AutoGLM_START", "Button clicked! isServiceRunning=$isServiceRunning")
+                                    Logger.d(Logger.SERVICE, "Button clicked! isServiceRunning=$isServiceRunning")
                                     if (isServiceRunning) onStopService() else onStartService()
                                 },
                                 colors = IconButtonDefaults.filledTonalIconButtonColors(
@@ -1142,7 +1142,7 @@ fun MainScreen(
                     HomeScreen(
                         onShortcutClick = { prompt, enablePlanning, enableOptimizer ->
                             // Create new conversation for new task
-                            android.util.Log.d("AutoGLM", "Shortcut clicked: $prompt, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer")
+                            Logger.d(Logger.SERVICE, "Shortcut clicked: $prompt, enablePlanning=$enablePlanning, enableOptimizer=$enableOptimizer")
                             createNewConversation()
                             addMessage(ChatMessage(content = prompt, isUser = true))
                             // 步骤: 锁定任务所属对话
@@ -1174,18 +1174,18 @@ fun MainScreen(
 
                     // Debug: log when composable enters
                     LaunchedEffect(Unit) {
-                        android.util.Log.e("AutoGLM", "=== ChatScreen entered, stateFlow = $stateFlow")
+                        Logger.e(Logger.SERVICE, "=== ChatScreen entered, stateFlow = $stateFlow")
                     }
 
                     // Collect StateFlow and update isAgentRunning
                     LaunchedEffect(stateFlow) {
                         if (stateFlow != null) {
                             stateFlow.collect { state ->
-                                android.util.Log.e("AutoGLM", "=== ChatScreen collected state: $state")
+                                Logger.e(Logger.SERVICE, "=== ChatScreen collected state: $state")
                                 isAgentRunning = state == WakeWordService.ServiceState.EXECUTING_TASK
                             }
                         } else {
-                            android.util.Log.e("AutoGLM", "=== ChatScreen: stateFlow is NULL!")
+                            Logger.e(Logger.SERVICE, "=== ChatScreen: stateFlow is NULL!")
                         }
                     }
 

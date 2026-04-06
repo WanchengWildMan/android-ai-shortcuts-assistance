@@ -1,5 +1,6 @@
 package com.autoglm.assistant.ui.chat
 
+import com.autoglm.assistant.util.Logger
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -98,13 +99,13 @@ fun ChatScreen(
                     // 用户滚动中，检查是否离开底部
                     if (!isNearBottom()) {
                         userScrolledUp = true
-                        android.util.Log.d("ChatScroll", "User scrolled up")
+                        Logger.d(Logger.SERVICE, "User scrolled up")
                     }
                 }
                 // 滚动停止时，如果回到底部，清除标记
                 if (!isScrolling && userScrolledUp && isNearBottom()) {
                     userScrolledUp = false
-                    android.util.Log.d("ChatScroll", "User back to bottom")
+                    Logger.d(Logger.SERVICE, "User back to bottom")
                 }
             }
     }

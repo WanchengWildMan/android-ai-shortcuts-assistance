@@ -18,6 +18,14 @@ object Logger {
     const val VOICE = "Voice"
     const val SHELL = "Shell"
     const val SERVICE = "Service"
+    const val COORDINATOR = "Coordinator"
+    const val OPTIMIZER = "Optimizer"
+    const val INTENT = "Intent"
+    const val SETTINGS = "Settings"
+    const val OVERLAY = "Overlay"
+    const val WAKE = "Wake"
+    const val STT = "STT"
+    const val ACCESSIBILITY = "Accessibility"
 
     private val isDebug: Boolean = BuildConfig.DEBUG
 
@@ -31,8 +39,12 @@ object Logger {
         Log.i(TAG, "=== [$module] $message")
     }
 
-    fun w(module: String, message: String) {
-        Log.w(TAG, "=== [$module] $message")
+    fun w(module: String, message: String, throwable: Throwable? = null) {
+        if (throwable != null) {
+            Log.w(TAG, "=== [$module] $message", throwable)
+        } else {
+            Log.w(TAG, "=== [$module] $message")
+        }
     }
 
     fun e(module: String, message: String, throwable: Throwable? = null) {

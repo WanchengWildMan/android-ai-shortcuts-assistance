@@ -2,6 +2,7 @@ package com.autoglm.assistant.util
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.autoglm.assistant.util.Logger
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -77,7 +78,7 @@ object SecureStorage {
 
             String(cipher.doFinal(encrypted), Charsets.UTF_8)
         } catch (e: Exception) {
-            android.util.Log.e("SecureStorage", "解密失败: ${e.message}")
+            Logger.e(Logger.SERVICE, "解密失败: ${e.message}")
             ""
         }
     }

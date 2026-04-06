@@ -4,12 +4,12 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
+import com.autoglm.assistant.util.Logger
 
 /**
  * 个人声纹模板唤醒引擎 (Phase 2 基础框架)
@@ -39,7 +39,7 @@ class PersonalTemplateWakeEngine(private val context: Context) : WakeEngine {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     override suspend fun initialize(config: WakeEngineConfig): Boolean {
-        Log.i(TAG, "初始化个人模板引擎...")
+        Logger.i(Logger.WAKE, "初始化个人模板引擎...")
         _engineState.value = WakeEngine.EngineState.INITIALIZING
         
         if (config !is WakeEngineConfig.PersonalTemplateConfig) {
@@ -52,13 +52,13 @@ class PersonalTemplateWakeEngine(private val context: Context) : WakeEngine {
         // val templateFile = File(context.filesDir, "wake_template.dat")
         
         _engineState.value = WakeEngine.EngineState.READY
-        Log.i(TAG, "初始化完成")
+        Logger.i(Logger.WAKE, "初始化完成")
         return true
     }
 
     override suspend fun startListening(onWakeDetected: (Float) -> Unit) {
         if (_engineState.value != WakeEngine.EngineState.READY) {
-            Log.w(TAG, "引擎未就绪")
+            Logger.w(Logger.WAKE, "引擎未就绪")
             return
         }
 
@@ -86,7 +86,7 @@ class PersonalTemplateWakeEngine(private val context: Context) : WakeEngine {
                 }
 
                 audioRecord?.startRecording()
-                Log.i(TAG, "开始录音监听...")
+                Logger.i(Logger.WAKE, "开始录音监听...")
 
                 val buffer = ShortArray(BUFFER_SIZE)
                 while (isActive && _engineState.value == WakeEngine.EngineState.LISTENING) {
@@ -107,7 +107,7 @@ class PersonalTemplateWakeEngine(private val context: Context) : WakeEngine {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "监听过程出错: ${e.message}")
+                Logger.e(Logger.WAKE, "监听过程出错: ${e.message}")
                 _lastError.value = e.message
                 _engineState.value = WakeEngine.EngineState.ERROR
             } finally {
@@ -127,7 +127,7 @@ class PersonalTemplateWakeEngine(private val context: Context) : WakeEngine {
     }
 
     override suspend fun stopListening() {
-        Log.i(TAG, "停止监听")
+        Logger.i(Logger.WAKE, "停止监听")
         _engineState.value = WakeEngine.EngineState.READY
         val j = job
         job = null
@@ -141,7 +141,7 @@ class PersonalTemplateWakeEngine(private val context: Context) : WakeEngine {
     }
 
     override fun release() {
-        Log.i(TAG, "释放引擎资源")
+        Logger.i(Logger.WAKE, "释放引擎资源")
         _engineState.value = WakeEngine.EngineState.UNINITIALIZED
         val j = job
         if (j != null) {

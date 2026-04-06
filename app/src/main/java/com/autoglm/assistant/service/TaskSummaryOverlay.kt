@@ -2,6 +2,7 @@ package com.autoglm.assistant.service
 
 import android.content.Context
 import android.graphics.Color
+import com.autoglm.assistant.util.Logger
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -196,7 +197,7 @@ class TaskSummaryOverlay(context: Context) {
             windowManager.addView(rootLayout, params)
             overlayView = rootLayout
         }.onFailure {
-            android.util.Log.e("TaskSummaryOverlay", "显示总结悬浮窗失败: ${it.message}")
+            Logger.e(Logger.OVERLAY, "显示总结悬浮窗失败: ${it.message}")
         }
     }
 

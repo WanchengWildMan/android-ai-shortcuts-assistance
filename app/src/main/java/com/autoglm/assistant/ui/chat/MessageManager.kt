@@ -1,6 +1,7 @@
 package com.autoglm.assistant.ui.chat
 
 import android.content.Context
+import com.autoglm.assistant.util.Logger
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.io.File
@@ -49,7 +50,7 @@ class MessageManager(private val context: Context) {
                     }
                     oldFile.delete()
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    Logger.e(Logger.SERVICE, "旧会话数据迁移失败", e)
                 }
             }
 
@@ -60,7 +61,7 @@ class MessageManager(private val context: Context) {
                         val conv = gson.fromJson(file.readText(), Conversation::class.java)
                         list.add(conv)
                     } catch (e: Exception) {
-                        e.printStackTrace()
+                        Logger.e(Logger.SERVICE, "会话文件解析失败: ${file.name}", e)
                     }
                 }
             }
@@ -75,7 +76,7 @@ class MessageManager(private val context: Context) {
                 val json = gson.toJson(conversation)
                 file.writeText(json)
             } catch (e: Exception) {
-                e.printStackTrace()
+                Logger.e(Logger.SERVICE, "会话保存失败: ${conversation.id}", e)
             }
         }
     }

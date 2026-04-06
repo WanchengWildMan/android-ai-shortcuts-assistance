@@ -1,9 +1,9 @@
 package com.autoglm.assistant.voice.wake
 
 import android.content.Context
-import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import com.autoglm.assistant.util.Logger
 
 /**
  * STT 文本匹配唤醒引擎抽象基类
@@ -16,7 +16,6 @@ abstract class SttWakeEngine(
 ) : WakeEngine {
 
     companion object {
-        private const val TAG = "WakeEngine:STT"
     }
 
     protected val _engineState = MutableStateFlow(WakeEngine.EngineState.UNINITIALIZED)
@@ -41,7 +40,7 @@ abstract class SttWakeEngine(
         // 检查冷却时间
         val now = System.currentTimeMillis()
         if (now - lastWakeTime < config.cooldownMs) {
-            Log.d(TAG, "冷却中，忽略: $recognizedText")
+            Logger.d(Logger.WAKE, "冷却中，忽略: $recognizedText")
             return false
         }
 
@@ -55,7 +54,7 @@ abstract class SttWakeEngine(
                 val regex = Regex(wakePhrase, RegexOption.IGNORE_CASE)
                 regex.containsMatchIn(normalized)
             } catch (e: Exception) {
-                Log.w(TAG, "正则表达式错误: ${e.message}")
+                Logger.w(Logger.WAKE, "正则表达式错误: ${e.message}")
                 false
             }
         } else {
@@ -65,7 +64,7 @@ abstract class SttWakeEngine(
 
         if (matched) {
             lastWakeTime = now
-            Log.i(TAG, "唤醒词匹配: '$recognizedText' -> '$wakePhrase'")
+            Logger.i(Logger.WAKE, "唤醒词匹配: '$recognizedText' -> '$wakePhrase'")
         }
 
         return matched

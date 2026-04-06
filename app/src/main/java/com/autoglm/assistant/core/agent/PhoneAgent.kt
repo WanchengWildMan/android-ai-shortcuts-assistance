@@ -1059,8 +1059,7 @@ class PhoneAgent(
     }
 
     fun stop() {
-        Logger.w(Logger.AGENT, "PhoneAgent.stop() called - who called this?")
-        Exception("Stop trace").printStackTrace() // Print stack trace to logcat
+        Logger.w(Logger.AGENT, "PhoneAgent.stop() called - who called this?", Exception("Stop trace"))
         stopRequested = true
         _isRunning.value = false
     }

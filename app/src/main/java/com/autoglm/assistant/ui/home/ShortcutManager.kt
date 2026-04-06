@@ -1,6 +1,7 @@
 package com.autoglm.assistant.ui.home
 
 import android.content.Context
+import com.autoglm.assistant.util.Logger
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.ui.graphics.Color
@@ -107,7 +108,7 @@ class ShortcutManager(private val context: Context) {
                 DEFAULT_SHORTCUTS
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Logger.e(Logger.SERVICE, "快捷指令加载失败", e)
             DEFAULT_SHORTCUTS
         }
     }
@@ -116,7 +117,7 @@ class ShortcutManager(private val context: Context) {
         try {
             file.writeText(gson.toJson(shortcuts))
         } catch (e: Exception) {
-            e.printStackTrace()
+            Logger.e(Logger.SERVICE, "快捷指令保存失败", e)
         }
     }
 

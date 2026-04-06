@@ -3,6 +3,7 @@ package com.autoglm.assistant.ui.home
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.autoglm.assistant.util.Logger
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -146,7 +147,7 @@ fun ShortcutEditDialog(
                                                     selection = TextRange(optimized.length)
                                                 )
                                             } catch (e: Exception) {
-                                                e.printStackTrace()
+                                                Logger.e(Logger.OPTIMIZER, "Prompt优化失败", e)
                                             } finally {
                                                 isOptimizing = false
                                             }

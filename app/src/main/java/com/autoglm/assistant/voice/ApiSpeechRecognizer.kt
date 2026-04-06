@@ -7,7 +7,6 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Base64
-import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +23,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import com.autoglm.assistant.util.Logger
 
 /**
  * 基于 AudioRecord + API 的语音识别器，支持多种 STT 后端
@@ -40,7 +40,6 @@ import javax.crypto.spec.SecretKeySpec
 class ApiSpeechRecognizer(private val context: Context) {
 
     companion object {
-        private const val TAG = "ApiSTT"
         private const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
@@ -131,7 +130,7 @@ class ApiSpeechRecognizer(private val context: Context) {
                 }
 
                 audioRecord?.startRecording()
-                Log.i(TAG, "开始录音")
+                Logger.i(Logger.STT, "开始录音")
 
                 withContext(Dispatchers.Main) {
                     onReadyForSpeech?.invoke()
@@ -146,7 +145,7 @@ class ApiSpeechRecognizer(private val context: Context) {
                     onPartialResult?.invoke("正在识别...")
                 }
 
-                Log.i(TAG, "录音完成，PCM 大小: ${pcmData.size} bytes")
+                Logger.i(Logger.STT, "录音完成，PCM 大小: ${pcmData.size} bytes")
 
                 if (pcmData.size < SAMPLE_RATE) { // 少于 0.5 秒的音频
                     withContext(Dispatchers.Main) {
@@ -161,19 +160,19 @@ class ApiSpeechRecognizer(private val context: Context) {
                 } else {
                     // OpenAI 模式需要 WAV 格式
                     val wavBytes = pcmToWav(pcmData, SAMPLE_RATE, 1, 16)
-                    Log.i(TAG, "WAV 大小: ${wavBytes.size} bytes")
+                    Logger.i(Logger.STT, "WAV 大小: ${wavBytes.size} bytes")
                     callOpenAiSttApi(wavBytes, language)
                 }
-                Log.i(TAG, "识别结果: $text")
+                Logger.i(Logger.STT, "识别结果: $text")
 
                 withContext(Dispatchers.Main) {
                     onResult?.invoke(text)
                 }
 
             } catch (e: CancellationException) {
-                Log.i(TAG, "录音被取消")
+                Logger.i(Logger.STT, "录音被取消")
             } catch (e: Exception) {
-                Log.e(TAG, "语音识别失败", e)
+                Logger.e(Logger.STT, "语音识别失败", e)
                 withContext(Dispatchers.Main) {
                     onError?.invoke("语音识别失败: ${e.message}")
                 }
@@ -222,14 +221,14 @@ class ApiSpeechRecognizer(private val context: Context) {
                 if (silenceStartMs == 0L) {
                     silenceStartMs = now
                 } else if (now - silenceStartMs > SILENCE_DURATION_MS) {
-                    Log.i(TAG, "VAD: 静音 ${SILENCE_DURATION_MS}ms，自动停止")
+                    Logger.i(Logger.STT, "VAD: 静音 ${SILENCE_DURATION_MS}ms，自动停止")
                     break
                 }
             }
 
             // 超时保护
             if (elapsed > MAX_RECORD_DURATION_MS) {
-                Log.i(TAG, "VAD: 达到最大录音时长 ${MAX_RECORD_DURATION_MS}ms")
+                Logger.i(Logger.STT, "VAD: 达到最大录音时长 ${MAX_RECORD_DURATION_MS}ms")
                 break
             }
         }
@@ -294,7 +293,7 @@ class ApiSpeechRecognizer(private val context: Context) {
      */
     private fun callOpenAiSttApi(wavBytes: ByteArray, language: String): String {
         val url = "${apiBaseUrl.trimEnd('/')}/audio/transcriptions"
-        Log.i(TAG, "调用 STT API: $url, model=$model, language=$language")
+        Logger.i(Logger.STT, "调用 STT API: $url, model=$model, language=$language")
 
         val requestBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
@@ -355,7 +354,7 @@ class ApiSpeechRecognizer(private val context: Context) {
             "&format=pcm" +
             "&sample_rate=$SAMPLE_RATE" +
             "&enable_punctuation_prediction=true"
-        Log.i(TAG, "调用阿里 NLS API: appkey=${aliNlsAppKey}, pcm=${pcmData.size} bytes")
+        Logger.i(Logger.STT, "调用阿里 NLS API: appkey=${aliNlsAppKey}, pcm=${pcmData.size} bytes")
 
         // 步骤3: 发送 PCM 数据
         val request = Request.Builder()
@@ -389,7 +388,7 @@ class ApiSpeechRecognizer(private val context: Context) {
         } catch (e: IOException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "阿里 NLS 响应解析异常: $responseBody", e)
+            Logger.w(Logger.STT, "阿里 NLS 响应解析异常: $responseBody", e)
             responseBody.trim()
         }
     }
@@ -462,7 +461,7 @@ class ApiSpeechRecognizer(private val context: Context) {
             val body = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {
-                Log.e(TAG, "获取阿里云 Token 失败: ${response.code}, body=$body")
+                Logger.e(Logger.STT, "获取阿里云 Token 失败: ${response.code}, body=$body")
                 return ""
             }
 
@@ -475,14 +474,14 @@ class ApiSpeechRecognizer(private val context: Context) {
             if (tokenId.isNotBlank() && expireTime > 0) {
                 aliToken = tokenId
                 aliTokenExpireTime = expireTime
-                Log.i(TAG, "阿里云 Token 获取成功，过期时间: ${Date(expireTime * 1000)}")
+                Logger.i(Logger.STT, "阿里云 Token 获取成功，过期时间: ${Date(expireTime * 1000)}")
                 return aliToken
             }
 
-            Log.w(TAG, "阿里云 Token 响应不符合预期: $body")
+            Logger.w(Logger.STT, "阿里云 Token 响应不符合预期: $body")
             return ""
         } catch (e: Exception) {
-            Log.e(TAG, "获取阿里云 Token 异常", e)
+            Logger.e(Logger.STT, "获取阿里云 Token 异常", e)
             return ""
         }
     }

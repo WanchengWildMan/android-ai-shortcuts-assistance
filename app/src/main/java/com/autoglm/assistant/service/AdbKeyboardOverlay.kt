@@ -2,6 +2,7 @@ package com.autoglm.assistant.service
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import com.autoglm.assistant.util.Logger
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -178,7 +179,7 @@ class AdbKeyboardOverlay(private val context: Context) {
             windowManager.addView(rootLayout, params)
             overlayView = rootLayout
         }.onFailure {
-            android.util.Log.e("AdbKeyboardOverlay", "显示悬浮窗失败: ${it.message}")
+            Logger.e(Logger.OVERLAY, "显示悬浮窗失败: ${it.message}")
         }
     }
 

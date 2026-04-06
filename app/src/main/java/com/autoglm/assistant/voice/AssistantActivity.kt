@@ -2,7 +2,6 @@ package com.autoglm.assistant.voice
 
 import android.app.Activity
 import android.os.Bundle
-import android.util.Log
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,6 +9,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
 import android.speech.SpeechRecognizer as AndroidSpeechRecognizer
+import com.autoglm.assistant.util.Logger
 
 /**
  * 透明 Activity，用于绕过 Android 11+ 后台麦克风限制
@@ -19,7 +19,6 @@ import android.speech.SpeechRecognizer as AndroidSpeechRecognizer
  */
 class AssistantActivity : Activity() {
     companion object {
-        private const val TAG = "AutoGLM_START"
         private const val REQUEST_RECORD_AUDIO = 100
     }
 
@@ -28,11 +27,11 @@ class AssistantActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.i(TAG, "AssistantActivity onCreate")
+        Logger.i(Logger.STT, "AssistantActivity onCreate")
 
         // 诊断日志：系统是否有可用的语音识别服务
         val sttAvailable = AndroidSpeechRecognizer.isRecognitionAvailable(this)
-        Log.i(TAG, "系统语音识别可用: $sttAvailable")
+        Logger.i(Logger.STT, "系统语音识别可用: $sttAvailable")
         if (!sttAvailable) {
             Toast.makeText(this, "此设备不支持系统语音识别，请安装 Google 语音服务", Toast.LENGTH_LONG).show()
             finish()
@@ -41,7 +40,7 @@ class AssistantActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        Log.i(TAG, "onWindowFocusChanged hasFocus=$hasFocus, hasStartedStt=$hasStartedStt")
+        Logger.i(Logger.STT, "onWindowFocusChanged hasFocus=$hasFocus, hasStartedStt=$hasStartedStt")
 
         if (!hasFocus || hasStartedStt) return
 
@@ -49,7 +48,7 @@ class AssistantActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             if (!permissionRequested) {
                 permissionRequested = true
-                Log.w(TAG, "RECORD_AUDIO 权限未授予，弹出系统权限弹窗")
+                Logger.w(Logger.STT, "RECORD_AUDIO 权限未授予，弹出系统权限弹窗")
                 requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
             }
             return
@@ -65,10 +64,10 @@ class AssistantActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_RECORD_AUDIO) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                Log.i(TAG, "RECORD_AUDIO 权限已授予（从弹窗）")
+                Logger.i(Logger.STT, "RECORD_AUDIO 权限已授予（从弹窗）")
                 doStartStt()
             } else {
-                Log.e(TAG, "RECORD_AUDIO 权限被拒绝")
+                Logger.e(Logger.STT, "RECORD_AUDIO 权限被拒绝")
                 if (!shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
                     Toast.makeText(this, "请在设置中手动开启麦克风权限", Toast.LENGTH_LONG).show()
                     try {
@@ -76,7 +75,7 @@ class AssistantActivity : Activity() {
                             data = Uri.parse("package:$packageName")
                         })
                     } catch (e: Exception) {
-                        Log.e(TAG, "无法打开应用设置", e)
+                        Logger.e(Logger.STT, "无法打开应用设置", e)
                     }
                 } else {
                     Toast.makeText(this, "需要麦克风权限才能语音控制", Toast.LENGTH_LONG).show()
@@ -92,13 +91,13 @@ class AssistantActivity : Activity() {
     private fun doStartStt() {
         if (hasStartedStt) return
         hasStartedStt = true
-        Log.i(TAG, "窗口已聚焦且权限已授予，通知 WakeWordService 启动 STT")
+        Logger.i(Logger.STT, "窗口已聚焦且权限已授予，通知 WakeWordService 启动 STT")
         com.autoglm.assistant.service.WakeWordService.instance?.onSttActivityCreated(this)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.i(TAG, "AssistantActivity onDestroy")
+        Logger.i(Logger.STT, "AssistantActivity onDestroy")
         com.autoglm.assistant.service.WakeWordService.instance?.onSttActivityDestroyed()
     }
 }

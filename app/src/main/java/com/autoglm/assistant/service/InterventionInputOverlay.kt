@@ -2,6 +2,7 @@ package com.autoglm.assistant.service
 
 import android.content.Context
 import android.graphics.Color
+import com.autoglm.assistant.util.Logger
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -235,7 +236,7 @@ class InterventionInputOverlay(context: Context) {
             inputField.requestFocus()
             mainHandler.postDelayed({ showKeyboard() }, 200)
         }.onFailure {
-            android.util.Log.e("InterventionOverlay", "Failed to show overlay: ${it.message}")
+            Logger.e(Logger.OVERLAY, "Failed to show overlay: ${it.message}")
         }
     }
 

@@ -12,6 +12,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.BufferedReader
 import java.util.concurrent.TimeUnit
+import com.autoglm.assistant.util.Logger
 
 class ModelClient(private val config: ModelConfig) {
 
@@ -286,7 +287,7 @@ class ModelClient(private val config: ModelConfig) {
             if (match != null) {
                 val appName = match.groupValues[1].trim()
                 if (appName.isNotEmpty() && appName.length < 20) {
-                    android.util.Log.w("AutoGLM", "=== 从描述中提取了启动操作: app=$appName ===")
+                    Logger.w(Logger.MODEL, "=== 从描述中提取了启动操作: app=$appName ===")
                     return "do(action=\"Launch\", app=\"$appName\")"
                 }
             }
@@ -298,19 +299,19 @@ class ModelClient(private val config: ModelConfig) {
         if (tapMatch != null) {
             val x = tapMatch.groupValues[1]
             val y = tapMatch.groupValues[2]
-            android.util.Log.w("AutoGLM", "=== 从描述中提取了点击操作: x=$x, y=$y ===")
+            Logger.w(Logger.MODEL, "=== 从描述中提取了点击操作: x=$x, y=$y ===")
             return "do(action=\"Tap\", element=[$x, $y])"
         }
 
         // 返回操作
         if (content.contains("返回") && (content.contains("按") || content.contains("点击返回") || content.contains("执行返回"))) {
-            android.util.Log.w("AutoGLM", "=== 从描述中提取了返回操作 ===")
+            Logger.w(Logger.MODEL, "=== 从描述中提取了返回操作 ===")
             return "do(action=\"Back\")"
         }
 
         // Home 操作
         if (content.contains("返回主屏幕") || content.contains("回到桌面") || content.contains("按Home")) {
-            android.util.Log.w("AutoGLM", "=== 从描述中提取了 Home 操作 ===")
+            Logger.w(Logger.MODEL, "=== 从描述中提取了 Home 操作 ===")
             return "do(action=\"Home\")"
         }
 

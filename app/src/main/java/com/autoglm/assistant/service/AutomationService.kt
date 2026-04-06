@@ -6,6 +6,7 @@ import android.graphics.Path
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.autoglm.assistant.util.Logger
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -166,11 +167,11 @@ class AutomationService : AccessibilityService() {
                 )
             }
             val result = focusedNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-            android.util.Log.d("AutomationService", "[TEXT_INPUT] text=${text.take(30)}..., success=$result")
+            Logger.d(Logger.ACCESSIBILITY, "[TEXT_INPUT] text=${text.take(30)}..., success=$result")
             return result
         }
 
-        android.util.Log.w("AutomationService", "[TEXT_INPUT] No focused input node found")
+        Logger.w(Logger.ACCESSIBILITY, "[TEXT_INPUT] No focused input node found")
         return false
     }
 
@@ -178,28 +179,28 @@ class AutomationService : AccessibilityService() {
         // 方法1: 使用 findFocus(FOCUS_INPUT) 查找输入焦点（operit 推荐方式）
         val inputFocus = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         if (inputFocus != null && inputFocus.isEditable) {
-            android.util.Log.d("AutomationService", "[FIND_INPUT] Found via FOCUS_INPUT: ${inputFocus.className}")
+            Logger.d(Logger.ACCESSIBILITY, "[FIND_INPUT] Found via FOCUS_INPUT: ${inputFocus.className}")
             return inputFocus
         }
 
         // 方法2: 使用 findFocus(FOCUS_ACCESSIBILITY) 查找无障碍焦点
         val accessibilityFocus = rootNode.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
         if (accessibilityFocus != null && accessibilityFocus.isEditable) {
-            android.util.Log.d("AutomationService", "[FIND_INPUT] Found via FOCUS_ACCESSIBILITY: ${accessibilityFocus.className}")
+            Logger.d(Logger.ACCESSIBILITY, "[FIND_INPUT] Found via FOCUS_ACCESSIBILITY: ${accessibilityFocus.className}")
             return accessibilityFocus
         }
 
         // 方法3: 递归搜索 isFocused && isEditable 的节点
         val recursiveResult = findFocusedInputNodeRecursive(rootNode)
         if (recursiveResult != null) {
-            android.util.Log.d("AutomationService", "[FIND_INPUT] Found via recursive search: ${recursiveResult.className}")
+            Logger.d(Logger.ACCESSIBILITY, "[FIND_INPUT] Found via recursive search: ${recursiveResult.className}")
             return recursiveResult
         }
 
         // 方法4: 递归搜索所有 isEditable 的节点（最后手段）
         val editableNode = findFirstEditableNode(rootNode)
         if (editableNode != null) {
-            android.util.Log.d("AutomationService", "[FIND_INPUT] Found first editable node: ${editableNode.className}")
+            Logger.d(Logger.ACCESSIBILITY, "[FIND_INPUT] Found first editable node: ${editableNode.className}")
             return editableNode
         }
 

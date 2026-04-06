@@ -7,6 +7,7 @@ import com.autoglm.assistant.service.WakeWordService.CoordinatorMessage
 import com.autoglm.assistant.service.WakeWordService.CoordinatorMessageType
 import com.autoglm.assistant.service.WakeWordService.ServiceState
 import com.autoglm.assistant.service.InterventionInputOverlay
+import com.autoglm.assistant.util.Logger
 
 /**
  * Agent 回调绑定器
@@ -25,7 +26,6 @@ internal class AgentCallbackBinder(
     private val service: WakeWordService
 ) {
     companion object {
-        private const val TAG = "AgentCallbackBinder"
         private const val COORDINATOR_STREAM_DEBOUNCE_MS = 300L
     }
 
@@ -129,16 +129,16 @@ internal class AgentCallbackBinder(
 
             // ---- 4. 意图识别器回调 ----
             onIntentRecognizing = {
-                android.util.Log.d(TAG, "IntentRecognizer: recognizing...")
+                Logger.d(Logger.INTENT, "IntentRecognizer: recognizing...")
                 service.agentStatusOverlay?.updatePlannerStatus("正在识别意图...")
             }
 
             onIntentRecognized = { result ->
                 service.agentStatusOverlay?.updatePlannerStatus("")
                 if (result.matched) {
-                    android.util.Log.d(TAG, "IntentRecognizer: matched shortcut '${result.matchedShortcutTitle}', prompt: ${result.filledPrompt}")
+                    Logger.d(Logger.INTENT, "IntentRecognizer: matched shortcut '${result.matchedShortcutTitle}', prompt: ${result.filledPrompt}")
                 } else {
-                    android.util.Log.d(TAG, "IntentRecognizer: no match")
+                    Logger.d(Logger.INTENT, "IntentRecognizer: no match")
                 }
             }
 
@@ -147,7 +147,7 @@ internal class AgentCallbackBinder(
 
             // 干预处理完成回调
             onInterventionProcessed = { instruction ->
-                android.util.Log.i(TAG, "Intervention processed by Agent: $instruction")
+                Logger.i(Logger.AGENT, "Intervention processed by Agent: $instruction")
             }
 
             // 任务总结回调
@@ -214,7 +214,7 @@ internal class AgentCallbackBinder(
             }
 
             onCoordinatorThinking = { thinking ->
-                android.util.Log.d(TAG, "[COORDINATOR] Thinking: ${thinking.take(100)}...")
+                Logger.d(Logger.COORDINATOR, "Thinking: ${thinking.take(100)}...")
                 service._coordinatorMessage.value = CoordinatorMessage(
                     type = CoordinatorMessageType.COORDINATOR_THINKING,
                     content = thinking
@@ -261,7 +261,7 @@ internal class AgentCallbackBinder(
                         type = CoordinatorMessageType.PLAN_COMPLETE,
                         content = planText
                     )
-                    android.util.Log.i(TAG, "[COORDINATOR] Task plan generated with ${taskPlan.subTasks.size} sub-tasks")
+                    Logger.i(Logger.COORDINATOR, "Task plan generated with ${taskPlan.subTasks.size} sub-tasks")
                 } else {
                     service._coordinatorMessage.value = CoordinatorMessage(
                         type = CoordinatorMessageType.PLAN_COMPLETE,
@@ -288,7 +288,7 @@ internal class AgentCallbackBinder(
                     type = CoordinatorMessageType.SUBTASK_CARD,
                     content = cardText.trim()
                 )
-                android.util.Log.i(TAG, "[COORDINATOR] SubTask ${subTask.index} card displayed: ${subTask.goal}")
+                Logger.i(Logger.COORDINATOR, "SubTask ${subTask.index} card displayed: ${subTask.goal}")
             }
 
             agent.onSubTaskStart = { subTask ->
@@ -359,7 +359,7 @@ internal class AgentCallbackBinder(
                     service.agentStatusOverlay?.onTaskFinished()
                     service.startWakeWordListening()
                 } else {
-                    android.util.Log.w(TAG, "onError called while task job still active, skipping state reset. error=$error")
+                    Logger.w(Logger.AGENT, "onError called while task job still active, skipping state reset. error=$error")
                 }
                 service.onError?.invoke(error)
                 service._coordinatorMessage.value = CoordinatorMessage(
@@ -376,7 +376,7 @@ internal class AgentCallbackBinder(
 
             // Agent 中途提问回调 — 显示浮窗等待用户输入后返回
             onUserQuestionAsked = { question ->
-                android.util.Log.i(TAG, "Agent asks question: $question")
+                Logger.i(Logger.AGENT, "Agent asks question: $question")
                 service.speak(question)
                 service._agentMessage.value = AgentMessage("$question", AgentMessageType.ACTION)
 
@@ -395,7 +395,7 @@ internal class AgentCallbackBinder(
                 }
 
                 val answer = answerDeferred.await()
-                android.util.Log.i(TAG, "User answered question: $answer")
+                Logger.i(Logger.AGENT, "User answered question: $answer")
                 service._agentMessage.value = AgentMessage("用户回答：$answer", AgentMessageType.ACTION)
                 answer
             }
