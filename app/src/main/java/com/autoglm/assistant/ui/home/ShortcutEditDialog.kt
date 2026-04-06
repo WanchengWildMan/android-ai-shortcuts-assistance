@@ -29,6 +29,7 @@ import com.autoglm.assistant.App
 import com.autoglm.assistant.ai.Message
 import com.autoglm.assistant.ai.ModelClient
 import com.autoglm.assistant.ai.ModelConfig
+import com.autoglm.assistant.util.PreferenceManager
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -50,8 +51,9 @@ fun ShortcutEditDialog(
     }
     var selectedIcon by remember { mutableStateOf(shortcut?.iconName ?: "Star") }
     var selectedColor by remember { mutableStateOf(shortcut?.colorHex ?: 0xFF64B5F6) }
-    // 新建快捷指令时使用全局设置作为默认值，编辑时使用快捷指令自己的设置
+    // 新建快捷指令时以全局设置作为默认值，编辑时使用快捷指令自己的设置
     var enablePlanning by remember { mutableStateOf(shortcut?.enablePlanning ?: prefs.smartCoordinatorEnabled) }
+    var enableOptimizer by remember { mutableStateOf(shortcut?.enableOptimizer ?: true) }
     var description by remember { mutableStateOf(shortcut?.description ?: "") }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showAddParamDialog by remember { mutableStateOf(false) }
@@ -61,12 +63,13 @@ fun ShortcutEditDialog(
     val scope = rememberCoroutineScope()
 
     // 检查是否有未保存的修改
-    val hasUnsavedChanges = remember(title, promptValue.text, selectedIcon, selectedColor, enablePlanning, description) {
+    val hasUnsavedChanges = remember(title, promptValue.text, selectedIcon, selectedColor, enablePlanning, enableOptimizer, description) {
         title != (shortcut?.title ?: "") ||
         promptValue.text != (shortcut?.prompt ?: "") ||
         selectedIcon != (shortcut?.iconName ?: "Star") ||
         selectedColor != (shortcut?.colorHex ?: 0xFF64B5F6) ||
         enablePlanning != (shortcut?.enablePlanning ?: prefs.smartCoordinatorEnabled) ||
+        enableOptimizer != (shortcut?.enableOptimizer ?: true) ||
         description != (shortcut?.description ?: "")
     }
 
@@ -130,13 +133,7 @@ fun ShortcutEditDialog(
                                                     // 使用优化器专用的配置，而不是通用模型配置
                                                     val config = ModelConfig(
                                                         apiKey = run {
-                                                            val model = prefs.optimizerModelName
-                                                            val key = when {
-                                                                model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
-                                                                model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
-                                                                model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
-                                                                else -> prefs.optimizerApiKey
-                                                            }
+                                                            val key = prefs.resolveApiKey(prefs.optimizerModelName, PreferenceManager.ApiModule.OPTIMIZER)
                                                             if (key.isNotBlank()) key else prefs.apiKey
                                                         },
                                                         baseUrl = if (prefs.optimizerApiUrl.isNotBlank()) prefs.optimizerApiUrl else prefs.apiUrl,
@@ -236,6 +233,32 @@ fun ShortcutEditDialog(
                     Switch(
                         checked = enablePlanning,
                         onCheckedChange = { enablePlanning = it }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Enable optimizer toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "启用指令优化",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "执行前由AI重写优化指令内容（可能改变原文）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = enableOptimizer,
+                        onCheckedChange = { enableOptimizer = it }
                     )
                 }
 
@@ -368,6 +391,7 @@ fun ShortcutEditDialog(
                                         iconName = selectedIcon,
                                         colorHex = selectedColor,
                                         enablePlanning = enablePlanning,
+                                        enableOptimizer = enableOptimizer,
                                         description = description.trim()
                                     )
                                 )

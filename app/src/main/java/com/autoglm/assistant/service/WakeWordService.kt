@@ -62,6 +62,7 @@ class WakeWordService : Service() {
     private var interventionOverlay: InterventionInputOverlay? = null
     private var wakeListeningOverlay: WakeListeningOverlay? = null
     private var taskSummaryOverlay: TaskSummaryOverlay? = null
+    private var adbKeyboardOverlay: AdbKeyboardOverlay? = null
 
     // WakeLock 防止 CPU 休眠
     private var wakeLock: PowerManager.WakeLock? = null
@@ -297,15 +298,9 @@ class WakeWordService : Service() {
         val plannerConfig = if (prefs.coordinatorApiUrl.isNotBlank() &&
                                 prefs.coordinatorApiKey.isNotBlank() &&
                                 prefs.coordinatorModelName.isNotBlank()) {
-                val coordinatorApiKey = when {
-                    prefs.coordinatorModelName.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
-                    prefs.coordinatorModelName.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
-                    prefs.coordinatorModelName.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
-                    else -> prefs.coordinatorApiKey
-                }
                 val coordinatorModelConfig = ModelConfig(
                     baseUrl = prefs.coordinatorApiUrl,
-                    apiKey = coordinatorApiKey,
+                    apiKey = prefs.resolveApiKey(prefs.coordinatorModelName, com.autoglm.assistant.util.PreferenceManager.ApiModule.COORDINATOR),
                     modelName = prefs.coordinatorModelName,
                     enableThinking = prefs.coordinatorEnableThinking
                 )
@@ -332,15 +327,9 @@ class WakeWordService : Service() {
 
         // 创建Prompt优化器配置（如果启用）
         val optimizerConfig = if (prefs.promptOptimizerEnabled) {
-            val optimizerApiKey = when {
-                prefs.optimizerModelName.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
-                prefs.optimizerModelName.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
-                prefs.optimizerModelName.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
-                else -> prefs.optimizerApiKey
-            }
             val optimizerModelConfig = ModelConfig(
                 baseUrl = prefs.optimizerApiUrl,
-                apiKey = optimizerApiKey,
+                apiKey = prefs.resolveApiKey(prefs.optimizerModelName, com.autoglm.assistant.util.PreferenceManager.ApiModule.OPTIMIZER),
                 modelName = prefs.optimizerModelName
             )
             PromptOptimizerConfig(
@@ -358,15 +347,9 @@ class WakeWordService : Service() {
 
         // 创建意图识别器配置（如果启用）
         val intentConfig = if (prefs.intentRecognizerEnabled) {
-            val intentApiKey = when {
-                prefs.intentModelName.startsWith("deepseek") -> prefs.intentApiKeyDeepseek
-                prefs.intentModelName.startsWith("glm-") -> prefs.intentApiKeyBigmodel
-                prefs.intentModelName.startsWith("doubao") -> prefs.intentApiKeyDoubao
-                else -> prefs.intentApiKey
-            }
             val intentModelConfig = ModelConfig(
                 baseUrl = prefs.intentApiUrl,
-                apiKey = intentApiKey,
+                apiKey = prefs.resolveApiKey(prefs.intentModelName, com.autoglm.assistant.util.PreferenceManager.ApiModule.INTENT),
                 modelName = prefs.intentModelName
             )
             com.autoglm.assistant.core.agent.IntentRecognizerConfig(
@@ -493,6 +476,9 @@ class WakeWordService : Service() {
                     android.util.Log.d("AutoGLM", "IntentRecognizer: no match")
                 }
             }
+
+            // ADB Keyboard 未安装回调 - 触发悬浮窗提示安装
+            onAdbKeyboardNotInstalled = { showAdbKeyboardOverlay() }
 
             // 干预处理完成回调
             onInterventionProcessed = { instruction ->
@@ -799,14 +785,8 @@ class WakeWordService : Service() {
                 android.util.Log.e("AutoGLM_START", "STT Error during command listening: $error")
                 android.util.Log.e(TAG, "STT Error during command listening: $error")
                 // 出错时关闭监听悬浮窗
-                wakeListeningOverlay?.dismiss()
+                wakeListeningOverlay?.showResult("语音识别失败")
                 finishSttActivity()
-                // 向用户显示错误提示，避免静默失败
-                scope.launch(Dispatchers.Main) {
-                    android.widget.Toast.makeText(
-                        this@WakeWordService, "语音识别失败: $error", android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
                 onError?.invoke(error)
                 // 出错时恢复唤醒词监听
                 startWakeWordListening()
@@ -954,12 +934,8 @@ class WakeWordService : Service() {
             }
             onError = { error ->
                 Log.e(TAG, "API STT 错误: $error")
-                wakeListeningOverlay?.dismiss()
-                scope.launch(Dispatchers.Main) {
-                    android.widget.Toast.makeText(
-                        this@WakeWordService, "语音识别失败: $error", android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
+                // 步骤: 通过悬浮窗显示错误状态，避免在用户其他 app 内弹出 Toast 打扰
+                wakeListeningOverlay?.showResult("语音识别失败")
                 this@WakeWordService.onError?.invoke(error)
                 startWakeWordListening()
             }
@@ -980,6 +956,8 @@ class WakeWordService : Service() {
         imeVoiceSttHelper = ImeVoiceSttHelper(this).apply {
             spaceX = prefs.imeVoiceSpaceX
             spaceY = prefs.imeVoiceSpaceY
+            // 步骤: 从配置读取键盘就绪延迟，允许用户在设置中针对不同设备调整
+            keyboardReadyDelay = prefs.imeVoiceKeyboardDelay
             onResult = { result ->
                 Log.i(TAG, "IME 语音识别结果: $result")
                 wakeListeningOverlay?.showResult(result)
@@ -987,12 +965,8 @@ class WakeWordService : Service() {
             }
             onError = { error ->
                 Log.e(TAG, "IME 语音识别错误: $error")
-                wakeListeningOverlay?.dismiss()
-                scope.launch(Dispatchers.Main) {
-                    android.widget.Toast.makeText(
-                        this@WakeWordService, "语音输入失败: $error", android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
+                // 步骤: 通过悬浮窗显示错误状态，避免在用户其他 app 内弹出 Toast 打扰
+                wakeListeningOverlay?.showResult("语音输入失败")
                 startWakeWordListening()
             }
             onStatusChange = { status ->
@@ -1368,6 +1342,17 @@ class WakeWordService : Service() {
     }
 
     /**
+     * 显示 ADB Keyboard 未安装提示悬浮窗
+     * 调用位置：onAdbKeyboardNotInstalled 回调 → adb keyboard 输入失败时展示
+     */
+    private fun showAdbKeyboardOverlay() {
+        if (adbKeyboardOverlay == null) {
+            adbKeyboardOverlay = AdbKeyboardOverlay(this)
+        }
+        adbKeyboardOverlay?.show()
+    }
+
+    /**
      * 处理用户的干预指令
      * 流程：stop 已中断当前执行 → 注入干预消息到对话历史 → 重新启动 agent 执行
      * 行为类似"发送新对话"，但保留已有对话上下文
@@ -1533,6 +1518,8 @@ class WakeWordService : Service() {
             wakeListeningOverlay = null
             taskSummaryOverlay?.dismiss()
             taskSummaryOverlay = null
+            adbKeyboardOverlay?.dismiss()
+            adbKeyboardOverlay = null
         }
     }
 }

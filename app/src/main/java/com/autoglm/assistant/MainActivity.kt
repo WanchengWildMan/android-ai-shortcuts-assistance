@@ -325,13 +325,11 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 步骤3.1: 检查电池优化设置
-        // 业务目的：在执行任务前提醒用户关闭电池优化，避免任务被系统中断
+        // 步骤3.1: 记录电池优化警告（已有首页 BatteryRestrictionCard 引导，不再重复弹 Toast）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
             if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
                 android.util.Log.w("AutoGLM", "=== 警告：应用未在电池优化白名单中，任务可能被中断 ===")
-                Toast.makeText(this, "建议关闭电池优化，避免任务被中断", Toast.LENGTH_SHORT).show()
             }
         }
         
@@ -654,8 +652,8 @@ fun MainScreen(
     LaunchedEffect(lastRecognizedText?.value) {
         lastRecognizedText?.value?.let { text ->
             if (text.isNotBlank()) {
-                // 步骤1: 确保存在当前对话；语音唤醒时没有对话则自动创建
-                if (currentConversation == null) createNewConversation()
+                // 步骤1: 每次语音唤醒都新建对话，避免消息写入旧的历史对话
+                createNewConversation()
                 addMessage(ChatMessage(content = text, isUser = true))
                 // 步骤2: 锁定任务所属对话，防止后续消息写入用户切换后的新对话
                 taskOwnerConversationId = currentConversation?.id
@@ -676,12 +674,12 @@ fun MainScreen(
     // 跟踪是否已经显示了subtask卡片
     var hasShownSubtaskCards by remember { mutableStateOf(false) }
 
-    // 当切换对话时，重置流式索引
+    // 当切换对话时，重置 UI 标志位（不重置流式消息索引）
+    // 注意：optimizerMessageIndex/plannerMessageIndex/summaryMessageIndex/stepMessageIndex
+    // 不在此处重置，因为语音唤醒时 _lastRecognizedText 触发 createNewConversation()，
+    // 对话 ID 变化可能与 optimizer 流式输出并发，导致索引被错误清零后重复新建 bubble。
+    // 这些索引由 CoordinatorMessageType.CLEAR 消息统一重置（任务完成/出错时发送）。
     LaunchedEffect(currentConversation?.id) {
-        optimizerMessageIndex = -1
-        plannerMessageIndex = -1
-        summaryMessageIndex = -1
-        stepMessageIndex = -1
         hasShownSubtaskCards = false
         lastCoordinatorContent = null
     }
@@ -1291,6 +1289,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalAliNlsAppKey = remember { prefs.aliNlsAppKey }
     val originalImeVoiceSpaceX = remember { prefs.imeVoiceSpaceX.toString() }
     val originalImeVoiceSpaceY = remember { prefs.imeVoiceSpaceY.toString() }
+    val originalImeVoiceKeyboardDelay = remember { prefs.imeVoiceKeyboardDelay.toString() }
     val originalLockScreenPassword = remember {
         com.autoglm.assistant.util.SecureStorage.getDecrypted(
             context, com.autoglm.assistant.util.ScreenUnlocker.SECURE_KEY_LOCK_PASSWORD
@@ -1303,13 +1302,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalShowCoordinatorThinking = remember { prefs.showCoordinatorThinking }
     val originalCoordinatorApiUrl = remember { prefs.coordinatorApiUrl }
     val originalCoordinatorApiKey = remember {
-        val model = prefs.coordinatorModelName
-        when {
-            model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
-            model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
-            model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
-            else -> prefs.coordinatorApiKey
-        }
+        prefs.resolveApiKey(prefs.coordinatorModelName, PreferenceManager.ApiModule.COORDINATOR)
     }
     val originalCoordinatorModelName = remember { prefs.coordinatorModelName }
     val originalCoordinatorEnableVision = remember { prefs.coordinatorEnableVision }
@@ -1323,13 +1316,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalPromptOptimizerEnabled = remember { prefs.promptOptimizerEnabled }
     val originalOptimizerApiUrl = remember { prefs.optimizerApiUrl }
     val originalOptimizerApiKey = remember {
-        val model = prefs.optimizerModelName
-        when {
-            model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
-            model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
-            model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
-            else -> prefs.optimizerApiKey
-        }
+        prefs.resolveApiKey(prefs.optimizerModelName, PreferenceManager.ApiModule.OPTIMIZER)
     }
     val originalOptimizerModelName = remember { prefs.optimizerModelName }
     val originalTaskSummaryEnabled = remember { prefs.taskSummaryEnabled }
@@ -1338,13 +1325,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val originalIntentRecognizerEnabled = remember { prefs.intentRecognizerEnabled }
     val originalIntentApiUrl = remember { prefs.intentApiUrl }
     val originalIntentApiKey = remember {
-        val model = prefs.intentModelName
-        when {
-            model.startsWith("deepseek") -> prefs.intentApiKeyDeepseek
-            model.startsWith("glm-") -> prefs.intentApiKeyBigmodel
-            model.startsWith("doubao") -> prefs.intentApiKeyDoubao
-            else -> prefs.intentApiKey
-        }
+        prefs.resolveApiKey(prefs.intentModelName, PreferenceManager.ApiModule.INTENT)
     }
     val originalIntentModelName = remember { prefs.intentModelName }
 
@@ -1465,9 +1446,10 @@ fun SettingsScreen(onBack: () -> Unit) {
     var aliNlsAkId by remember { mutableStateOf(TextFieldValue(prefs.aliNlsAkId)) }
     var aliNlsAkSecret by remember { mutableStateOf(TextFieldValue(prefs.aliNlsAkSecret)) }
     var aliNlsAppKey by remember { mutableStateOf(TextFieldValue(prefs.aliNlsAppKey)) }
-    // IME 语音输入坐标配置
+    // IME 语音输入坐标及键盘就绪延迟配置
     var imeVoiceSpaceX by remember { mutableStateOf(TextFieldValue(prefs.imeVoiceSpaceX.toString())) }
     var imeVoiceSpaceY by remember { mutableStateOf(TextFieldValue(prefs.imeVoiceSpaceY.toString())) }
+    var imeVoiceKeyboardDelay by remember { mutableStateOf(TextFieldValue(prefs.imeVoiceKeyboardDelay.toString())) }
     // 息屏唤醒 — 锁屏密码（加密存储，初始化时解密读取）
     var lockScreenPassword by remember {
         mutableStateOf(TextFieldValue(
@@ -1484,15 +1466,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     var showCoordinatorThinking by remember { mutableStateOf(prefs.showCoordinatorThinking) }
     var coordinatorApiUrl by remember { mutableStateOf(TextFieldValue(prefs.coordinatorApiUrl)) }
     var coordinatorApiKey by remember {
-        val model = prefs.coordinatorModelName
         mutableStateOf(
             TextFieldValue(
-                when {
-                    model.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek
-                    model.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel
-                    model.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao
-                    else -> prefs.coordinatorApiKey
-                }
+                prefs.resolveApiKey(prefs.coordinatorModelName, PreferenceManager.ApiModule.COORDINATOR)
             )
         )
     }
@@ -1514,15 +1490,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     var promptOptimizerEnabled by remember { mutableStateOf(prefs.promptOptimizerEnabled) }
     var optimizerApiUrl by remember { mutableStateOf(TextFieldValue(prefs.optimizerApiUrl)) }
     var optimizerApiKey by remember {
-        val model = prefs.optimizerModelName
         mutableStateOf(
             TextFieldValue(
-                when {
-                    model.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek
-                    model.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel
-                    model.startsWith("doubao") -> prefs.optimizerApiKeyDoubao
-                    else -> prefs.optimizerApiKey
-                }
+                prefs.resolveApiKey(prefs.optimizerModelName, PreferenceManager.ApiModule.OPTIMIZER)
             )
         )
     }
@@ -1537,15 +1507,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     var intentRecognizerEnabled by remember { mutableStateOf(prefs.intentRecognizerEnabled) }
     var intentApiUrl by remember { mutableStateOf(TextFieldValue(prefs.intentApiUrl)) }
     var intentApiKey by remember {
-        val model = prefs.intentModelName
         mutableStateOf(
             TextFieldValue(
-                when {
-                    model.startsWith("deepseek") -> prefs.intentApiKeyDeepseek
-                    model.startsWith("glm-") -> prefs.intentApiKeyBigmodel
-                    model.startsWith("doubao") -> prefs.intentApiKeyDoubao
-                    else -> prefs.intentApiKey
-                }
+                prefs.resolveApiKey(prefs.intentModelName, PreferenceManager.ApiModule.INTENT)
             )
         )
     }
@@ -1577,6 +1541,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             aliNlsAppKey.text != originalAliNlsAppKey ||
             imeVoiceSpaceX.text != originalImeVoiceSpaceX ||
             imeVoiceSpaceY.text != originalImeVoiceSpaceY ||
+            imeVoiceKeyboardDelay.text != originalImeVoiceKeyboardDelay ||
             lockScreenPassword.text != originalLockScreenPassword ||
             maxSteps.text != originalMaxSteps ||
             language != originalLanguage ||
@@ -1743,9 +1708,10 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.aliNlsAkId = aliNlsAkId.text
         prefs.aliNlsAkSecret = aliNlsAkSecret.text
         prefs.aliNlsAppKey = aliNlsAppKey.text
-        // IME 语音坐标
+        // IME 语音坐标及键盘就绪延迟
         prefs.imeVoiceSpaceX = imeVoiceSpaceX.text.toIntOrNull() ?: PreferenceManager.DEFAULT_IME_VOICE_SPACE_X
         prefs.imeVoiceSpaceY = imeVoiceSpaceY.text.toIntOrNull() ?: PreferenceManager.DEFAULT_IME_VOICE_SPACE_Y
+        prefs.imeVoiceKeyboardDelay = imeVoiceKeyboardDelay.text.toLongOrNull() ?: PreferenceManager.DEFAULT_IME_VOICE_KEYBOARD_DELAY_MS
         // 锁屏密码 → 加密存储（不经过普通 SharedPreferences）
         com.autoglm.assistant.util.SecureStorage.putEncrypted(
             context, com.autoglm.assistant.util.ScreenUnlocker.SECURE_KEY_LOCK_PASSWORD,
@@ -1757,13 +1723,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         prefs.smartCoordinatorEnabled = smartCoordinatorEnabled
         prefs.showCoordinatorThinking = showCoordinatorThinking
         prefs.coordinatorApiUrl = coordinatorApiUrl.text
-        // Save coordinator API key to provider-specific slot
-        when {
-            coordinatorModelName.text.startsWith("deepseek") -> prefs.coordinatorApiKeyDeepseek = coordinatorApiKey.text
-            coordinatorModelName.text.startsWith("glm-") -> prefs.coordinatorApiKeyBigmodel = coordinatorApiKey.text
-            coordinatorModelName.text.startsWith("doubao") -> prefs.coordinatorApiKeyDoubao = coordinatorApiKey.text
-            else -> prefs.coordinatorApiKey = coordinatorApiKey.text
-        }
+        // 保存协调器 API Key 到对应厂商槽位
+        prefs.saveApiKey(coordinatorModelName.text, PreferenceManager.ApiModule.COORDINATOR, coordinatorApiKey.text)
         prefs.coordinatorSystemPrompt = coordinatorSystemPrompt.text
         prefs.coordinatorModelName = coordinatorModelName.text
         prefs.coordinatorEnableVision = coordinatorEnableVision
@@ -1776,26 +1737,16 @@ fun SettingsScreen(onBack: () -> Unit) {
         // Prompt Optimizer settings
         prefs.promptOptimizerEnabled = promptOptimizerEnabled
         prefs.optimizerApiUrl = optimizerApiUrl.text
-        // Save optimizer API key to provider-specific slot
-        when {
-            optimizerModelName.text.startsWith("deepseek") -> prefs.optimizerApiKeyDeepseek = optimizerApiKey.text
-            optimizerModelName.text.startsWith("glm-") -> prefs.optimizerApiKeyBigmodel = optimizerApiKey.text
-            optimizerModelName.text.startsWith("doubao") -> prefs.optimizerApiKeyDoubao = optimizerApiKey.text
-            else -> prefs.optimizerApiKey = optimizerApiKey.text
-        }
+        // 保存优化器 API Key 到对应厂商槽位
+        prefs.saveApiKey(optimizerModelName.text, PreferenceManager.ApiModule.OPTIMIZER, optimizerApiKey.text)
         prefs.optimizerModelName = optimizerModelName.text
         prefs.taskSummaryEnabled = taskSummaryEnabled
         prefs.optimizerSystemPrompt = optimizerSystemPrompt.text
         // Intent Recognizer settings
         prefs.intentRecognizerEnabled = intentRecognizerEnabled
         prefs.intentApiUrl = intentApiUrl.text
-        // Save intent API key to provider-specific slot
-        when {
-            intentModelName.text.startsWith("deepseek") -> prefs.intentApiKeyDeepseek = intentApiKey.text
-            intentModelName.text.startsWith("glm-") -> prefs.intentApiKeyBigmodel = intentApiKey.text
-            intentModelName.text.startsWith("doubao") -> prefs.intentApiKeyDoubao = intentApiKey.text
-            else -> prefs.intentApiKey = intentApiKey.text
-        }
+        // 保存意图识别器 API Key 到对应厂商槽位
+        prefs.saveApiKey(intentModelName.text, PreferenceManager.ApiModule.INTENT, intentApiKey.text)
         prefs.intentModelName = intentModelName.text
 
         // 如果关键配置变化，重启服务使其生效
@@ -2378,6 +2329,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                         singleLine = true,
                         supportingText = { Text(if (isChinese) "输入法空格键中心的屏幕 Y 坐标（像素）" else "Screen Y coordinate of space bar center (px)") }
                     )
+                    OutlinedTextField(
+                        value = imeVoiceKeyboardDelay,
+                        onValueChange = { imeVoiceKeyboardDelay = it },
+                        label = { Text(if (isChinese) "键盘就绪延迟（毫秒）" else "Keyboard Ready Delay (ms)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        supportingText = { Text(if (isChinese) "弹出键盘后等待多久再点击语音按钮，过短会导致点击无效（默认 1200）" else "Wait time after keyboard appears before tapping voice button (default 1200)") }
+                    )
                 }
 
                 // 阿里 NLS 配置（仅在选择 ALI_NLS 时显示）
@@ -2653,20 +2612,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                         selected = coordinatorModelName.text == model,
                         onClick = {
                             coordinatorModelName = TextFieldValue(model)
-                            // Auto-switch Coordinator API URL based on selected model
-                            coordinatorApiUrl = when {
-                                model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
-                                model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
-                                model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
-                                else -> coordinatorApiUrl
-                            }
-                            // Auto-switch Coordinator API Key based on selected model
-                            coordinatorApiKey = when {
-                                model.startsWith("deepseek") -> TextFieldValue(prefs.coordinatorApiKeyDeepseek)
-                                model.startsWith("glm-") -> TextFieldValue(prefs.coordinatorApiKeyBigmodel)
-                                model.startsWith("doubao") -> TextFieldValue(prefs.coordinatorApiKeyDoubao)
-                                else -> coordinatorApiKey
-                            }
+                            // 切换模型时自动切换对应厂商的 URL 和 Key
+                            val newCoordUrl = prefs.resolveDefaultApiUrl(model)
+                            if (newCoordUrl.isNotEmpty()) coordinatorApiUrl = TextFieldValue(newCoordUrl)
+                            coordinatorApiKey = TextFieldValue(prefs.resolveApiKey(model, PreferenceManager.ApiModule.COORDINATOR))
                         },
                         label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
                     )
@@ -3057,20 +3006,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                             selected = optimizerModelName.text == model,
                             onClick = {
                                 optimizerModelName = TextFieldValue(model)
-                                // Auto-switch Optimizer API URL based on selected model
-                                optimizerApiUrl = when {
-                                    model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
-                                    model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
-                                    model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
-                                    else -> optimizerApiUrl
-                                }
-                                // Auto-switch Optimizer API Key based on selected model
-                                optimizerApiKey = when {
-                                    model.startsWith("deepseek") -> TextFieldValue(prefs.optimizerApiKeyDeepseek)
-                                    model.startsWith("glm-") -> TextFieldValue(prefs.optimizerApiKeyBigmodel)
-                                    model.startsWith("doubao") -> TextFieldValue(prefs.optimizerApiKeyDoubao)
-                                    else -> optimizerApiKey
-                                }
+                                // 切换模型时自动切换对应厂商的 URL 和 Key
+                                val newOptUrl = prefs.resolveDefaultApiUrl(model)
+                                if (newOptUrl.isNotEmpty()) optimizerApiUrl = TextFieldValue(newOptUrl)
+                                optimizerApiKey = TextFieldValue(prefs.resolveApiKey(model, PreferenceManager.ApiModule.OPTIMIZER))
                             },
                             label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
                         )
@@ -3400,18 +3339,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                             selected = intentModelName.text == model,
                             onClick = {
                                 intentModelName = TextFieldValue(model)
-                                intentApiUrl = when {
-                                    model.startsWith("deepseek") -> TextFieldValue("https://api.deepseek.com/v1")
-                                    model.startsWith("glm-") -> TextFieldValue("https://open.bigmodel.cn/api/paas/v4")
-                                    model.startsWith("doubao") -> TextFieldValue("https://ark.cn-beijing.volces.com/api/v3")
-                                    else -> intentApiUrl
-                                }
-                                intentApiKey = when {
-                                    model.startsWith("deepseek") -> TextFieldValue(prefs.intentApiKeyDeepseek)
-                                    model.startsWith("glm-") -> TextFieldValue(prefs.intentApiKeyBigmodel)
-                                    model.startsWith("doubao") -> TextFieldValue(prefs.intentApiKeyDoubao)
-                                    else -> intentApiKey
-                                }
+                                // 切换模型时自动切换对应厂商的 URL 和 Key
+                                val newIntentUrl = prefs.resolveDefaultApiUrl(model)
+                                if (newIntentUrl.isNotEmpty()) intentApiUrl = TextFieldValue(newIntentUrl)
+                                intentApiKey = TextFieldValue(prefs.resolveApiKey(model, PreferenceManager.ApiModule.INTENT))
                             },
                             label = { Text(displayName, style = MaterialTheme.typography.labelSmall) }
                         )
@@ -3652,6 +3583,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             if (aliNlsAppKey.text != originalAliNlsAppKey) add("NLS AppKey")
             if (imeVoiceSpaceX.text != originalImeVoiceSpaceX) add(if (isChinese) "IME 语音坐标X" else "IME Voice X")
             if (imeVoiceSpaceY.text != originalImeVoiceSpaceY) add(if (isChinese) "IME 语音坐标Y" else "IME Voice Y")
+            if (imeVoiceKeyboardDelay.text != originalImeVoiceKeyboardDelay) add(if (isChinese) "IME 键盘就绪延迟" else "IME Keyboard Delay")
             if (lockScreenPassword.text != originalLockScreenPassword) add(if (isChinese) "锁屏密码" else "Lock Password")
             if (maxSteps.text != originalMaxSteps) add(if (isChinese) "最大步数" else "Max Steps")
             if (language != originalLanguage) add(if (isChinese) "语言" else "Language")

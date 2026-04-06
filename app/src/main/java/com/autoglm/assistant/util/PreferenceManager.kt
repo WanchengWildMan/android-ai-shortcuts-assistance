@@ -102,6 +102,7 @@ class PreferenceManager(context: Context) {
         // IME 语音输入配置（通过模拟长按输入法空格键触发语音输入）
         private const val KEY_IME_VOICE_SPACE_X = "ime_voice_space_x"
         private const val KEY_IME_VOICE_SPACE_Y = "ime_voice_space_y"
+        private const val KEY_IME_VOICE_KEYBOARD_DELAY = "ime_voice_keyboard_delay"
 
         // 默认值 - BigModel API
         const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱自定义唤醒词
@@ -139,6 +140,8 @@ class PreferenceManager(context: Context) {
         // IME 语音输入默认坐标（需根据设备/键盘实际调整）
         const val DEFAULT_IME_VOICE_SPACE_X = 704
         const val DEFAULT_IME_VOICE_SPACE_Y = 2978
+        // IME 语音键盘就绪等待时间默认值（毫秒）；不同机型弹键盘速度不同，可在设置中调整
+        const val DEFAULT_IME_VOICE_KEYBOARD_DELAY_MS = 1200L
     }
 
     var apiUrl: String
@@ -441,6 +444,11 @@ class PreferenceManager(context: Context) {
         get() = prefs.getInt(KEY_IME_VOICE_SPACE_Y, DEFAULT_IME_VOICE_SPACE_Y)
         set(value) = prefs.edit { putInt(KEY_IME_VOICE_SPACE_Y, value) }
 
+    // IME 语音：弹出输入法后等待键盘就绪的延迟（毫秒），过短会导致语音按钮点击无效
+    var imeVoiceKeyboardDelay: Long
+        get() = prefs.getLong(KEY_IME_VOICE_KEYBOARD_DELAY, DEFAULT_IME_VOICE_KEYBOARD_DELAY_MS)
+        set(value) = prefs.edit { putLong(KEY_IME_VOICE_KEYBOARD_DELAY, value) }
+
     // 配置监听器注册和注销
     fun registerListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
         prefs.registerOnSharedPreferenceChangeListener(listener)
@@ -448,6 +456,112 @@ class PreferenceManager(context: Context) {
 
     fun unregisterListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
         prefs.unregisterOnSharedPreferenceChangeListener(listener)
+    }
+
+    /**
+     * API 模块枚举 — 用于 resolveApiKey 统一分发
+     */
+    enum class ApiModule {
+        AGENT,        // 主 Agent（PhoneAgent 执行操作）
+        COORDINATOR,  // 智能协调器（SmartCoordinator）
+        OPTIMIZER,    // 指令优化器（PromptOptimizer）
+        INTENT        // 意图识别器（IntentRecognizer）
+    }
+
+    /**
+     * 根据模型名称和模块，统一解析应使用的 API Key
+     *
+     * 业务目的: 消除 19 处重复的 when { startsWith("deepseek")... } 分发逻辑
+     * 规则: 按模型名称前缀匹配 provider-specific key，未匹配时回退到模块默认 key
+     *
+     * @param modelName 模型名称（如 "deepseek-chat", "glm-4v" 等）
+     * @param module    API 模块
+     * @return 解析后的 API Key
+     */
+    fun resolveApiKey(modelName: String, module: ApiModule): String {
+        return when {
+            modelName.startsWith("deepseek") -> when (module) {
+                ApiModule.AGENT -> apiKeyDeepseek
+                ApiModule.COORDINATOR -> coordinatorApiKeyDeepseek
+                ApiModule.OPTIMIZER -> optimizerApiKeyDeepseek
+                ApiModule.INTENT -> intentApiKeyDeepseek
+            }
+            modelName.startsWith("glm-") -> when (module) {
+                ApiModule.AGENT -> apiKeyBigmodel
+                ApiModule.COORDINATOR -> coordinatorApiKeyBigmodel
+                ApiModule.OPTIMIZER -> optimizerApiKeyBigmodel
+                ApiModule.INTENT -> intentApiKeyBigmodel
+            }
+            modelName.startsWith("doubao") -> when (module) {
+                ApiModule.AGENT -> apiKeyDoubao
+                ApiModule.COORDINATOR -> coordinatorApiKeyDoubao
+                ApiModule.OPTIMIZER -> optimizerApiKeyDoubao
+                ApiModule.INTENT -> intentApiKeyDoubao
+            }
+            modelName.startsWith("qwen") -> when (module) {
+                ApiModule.AGENT -> apiKeyQwen
+                ApiModule.COORDINATOR -> coordinatorApiKey  // coordinator/optimizer/intent 暂无 qwen 独立 key
+                ApiModule.OPTIMIZER -> optimizerApiKey
+                ApiModule.INTENT -> intentApiKey
+            }
+            else -> when (module) {
+                ApiModule.AGENT -> apiKey
+                ApiModule.COORDINATOR -> coordinatorApiKey
+                ApiModule.OPTIMIZER -> optimizerApiKey
+                ApiModule.INTENT -> intentApiKey
+            }
+        }
+    }
+
+    /**
+     * 根据模型名称和模块，统一保存 API Key 到对应的 provider-specific 字段
+     *
+     * @param modelName 模型名称
+     * @param module    API 模块
+     * @param key       要保存的 API Key 值
+     */
+    fun saveApiKey(modelName: String, module: ApiModule, key: String) {
+        when {
+            modelName.startsWith("deepseek") -> when (module) {
+                ApiModule.AGENT -> apiKeyDeepseek = key
+                ApiModule.COORDINATOR -> coordinatorApiKeyDeepseek = key
+                ApiModule.OPTIMIZER -> optimizerApiKeyDeepseek = key
+                ApiModule.INTENT -> intentApiKeyDeepseek = key
+            }
+            modelName.startsWith("glm-") -> when (module) {
+                ApiModule.AGENT -> apiKeyBigmodel = key
+                ApiModule.COORDINATOR -> coordinatorApiKeyBigmodel = key
+                ApiModule.OPTIMIZER -> optimizerApiKeyBigmodel = key
+                ApiModule.INTENT -> intentApiKeyBigmodel = key
+            }
+            modelName.startsWith("doubao") -> when (module) {
+                ApiModule.AGENT -> apiKeyDoubao = key
+                ApiModule.COORDINATOR -> coordinatorApiKeyDoubao = key
+                ApiModule.OPTIMIZER -> optimizerApiKeyDoubao = key
+                ApiModule.INTENT -> intentApiKeyDoubao = key
+            }
+            else -> when (module) {
+                ApiModule.AGENT -> apiKey = key
+                ApiModule.COORDINATOR -> coordinatorApiKey = key
+                ApiModule.OPTIMIZER -> optimizerApiKey = key
+                ApiModule.INTENT -> intentApiKey = key
+            }
+        }
+    }
+
+    /**
+     * 根据模型名称推断默认的 API URL
+     *
+     * 业务目的: 消除 MainActivity 中 6+ 处重复的 URL 分发逻辑
+     */
+    fun resolveDefaultApiUrl(modelName: String): String {
+        return when {
+            modelName.startsWith("deepseek") -> "https://api.deepseek.com/v1"
+            modelName.startsWith("glm-") || modelName.startsWith("autoglm") -> DEFAULT_API_URL
+            modelName.startsWith("doubao") -> "https://ark.cn-beijing.volces.com/api/v3"
+            modelName.startsWith("qwen") -> "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            else -> DEFAULT_API_URL
+        }
     }
 
     /**
