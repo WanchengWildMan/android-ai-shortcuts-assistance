@@ -42,7 +42,6 @@ class WakeWordService : Service() {
 
     companion object {
         private const val TAG = "WakeWordService"
-        private const val COORDINATOR_STREAM_DEBOUNCE_MS = 300L
         const val ACTION_SHOW_INTERVENTION = "com.autoglm.assistant.ACTION_SHOW_INTERVENTION"
         var instance: WakeWordService? = null
             private set
@@ -58,19 +57,19 @@ class WakeWordService : Service() {
     private var imeVoiceSttHelper: ImeVoiceSttHelper? = null
     private lateinit var textToSpeech: TextToSpeech
     private var phoneAgent: PhoneAgent? = null
-    private var agentStatusOverlay: AgentStatusOverlayController? = null
-    private var interventionOverlay: InterventionInputOverlay? = null
+    internal var agentStatusOverlay: AgentStatusOverlayController? = null
+    internal var interventionOverlay: InterventionInputOverlay? = null
     private var wakeListeningOverlay: WakeListeningOverlay? = null
-    private var taskSummaryOverlay: TaskSummaryOverlay? = null
+    internal var taskSummaryOverlay: TaskSummaryOverlay? = null
     private var adbKeyboardOverlay: AdbKeyboardOverlay? = null
 
     // WakeLock 防止 CPU 休眠
     private var wakeLock: PowerManager.WakeLock? = null
-    private var currentTaskJob: Job? = null
+    internal var currentTaskJob: Job? = null
     // 步骤: 防止 startWakeWordListening 并发重入（invoke + onStartCommand 同时触发时只保留一次初始化）
     private var wakeListeningJob: Job? = null
 
-    private val _serviceState = MutableStateFlow(ServiceState.IDLE)
+    internal val _serviceState = MutableStateFlow(ServiceState.IDLE)
     val serviceState: StateFlow<ServiceState> = _serviceState
 
     private val _lastRecognizedText = MutableStateFlow("")
@@ -124,11 +123,11 @@ class WakeWordService : Service() {
     )
 
     // 带有类型标签的 Agent 响应消息，用于根据设置进行过滤
-    private val _agentMessage = MutableStateFlow<AgentMessage?>(null)
+    internal val _agentMessage = MutableStateFlow<AgentMessage?>(null)
     val agentMessage: StateFlow<AgentMessage?> = _agentMessage
 
     // Coordinator 消息 - 使用类型标签区分
-    private val _coordinatorMessage = MutableStateFlow<CoordinatorMessage?>(null)
+    internal val _coordinatorMessage = MutableStateFlow<CoordinatorMessage?>(null)
     val coordinatorMessage: StateFlow<CoordinatorMessage?> = _coordinatorMessage
 
     // 用于 UI 更新的回调
@@ -374,389 +373,10 @@ class WakeWordService : Service() {
 
         phoneAgent = PhoneAgent(this, modelConfig, agentConfig).apply {
             initialize()
-
-            var lastCoordinatorStreamEmitAtMs = 0L
-            var agentStreamingContent = StringBuilder()  // Agent执行阶段的流式内容
-
-            fun emitCoordinatorStream(type: CoordinatorMessageType, content: String, force: Boolean = false) {
-                val now = System.currentTimeMillis()
-                if (!force && (now - lastCoordinatorStreamEmitAtMs) < COORDINATOR_STREAM_DEBOUNCE_MS) {
-                    return
-                }
-                lastCoordinatorStreamEmitAtMs = now
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = type,
-                    content = content
-                )
-            }
-
-            onStepStart = { step ->
-                agentStatusOverlay?.updateStep(step)
-                agentStreamingContent.clear()  // 新步骤开始，清空流式缓冲
-                // 步骤：同步通知栏显示当前执行步数
-                updateNotification("执行中 第${step}步...")
-            }
-
-            onThinking = { thinking ->
-                // 发送思考过程消息
-                _agentMessage.value = AgentMessage(thinking, AgentMessageType.THINKING)
-                agentStatusOverlay?.updateThinking(thinking)
-            }
-
-            onAction = { action ->
-                // 发送动作消息
-                _agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
-                // 悬浮窗同步显示当前操作
-                agentStatusOverlay?.updateActionStatus(action)
-            }
-
-            onBeforeScreenshot = {
-                agentStatusOverlay?.hideForScreenshot()
-                interventionOverlay?.hideForScreenshot()
-                taskSummaryOverlay?.hideForScreenshot()
-            }
-
-            onAfterScreenshot = {
-                agentStatusOverlay?.restoreAfterScreenshot()
-                interventionOverlay?.restoreAfterScreenshot()
-                taskSummaryOverlay?.restoreAfterScreenshot()
-            }
-
-            // 操作执行时隐藏悬浮窗 — 避免遮挡点击/滑动目标
-            onBeforeAction = {
-                agentStatusOverlay?.hideForScreenshot()
-                interventionOverlay?.hideForScreenshot()
-                taskSummaryOverlay?.hideForScreenshot()
-            }
-
-            onAfterAction = {
-                agentStatusOverlay?.restoreAfterScreenshot()
-                interventionOverlay?.restoreAfterScreenshot()
-                taskSummaryOverlay?.restoreAfterScreenshot()
-            }
-
-            // Prompt 优化器回调 - 支持流式输出
-            var optimizerStreamingContent = StringBuilder()
-            var isOptimizing = false
-            var summaryStreamingContent = StringBuilder()
-            var isSummarizing = false
-            var summaryAlreadySent = false  // 用于跟踪总结是否已通过 SUMMARY_COMPLETE 发送
-
-            onPromptOptimizing = {
-                isOptimizing = true
-                optimizerStreamingContent.clear()
-                agentStatusOverlay?.updatePlannerStatus("✨ 正在优化指令...")
-                emitCoordinatorStream(
-                    type = CoordinatorMessageType.OPTIMIZER_STREAMING,
-                    content = "",
-                    force = true
-                )
-            }
-
-            onPromptOptimized = { optimizedPrompt ->
-                isOptimizing = false
-                agentStatusOverlay?.updatePlannerStatus("")  // 清除优化状态
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.OPTIMIZER_COMPLETE,
-                    content = optimizedPrompt
-                )
-            }
-
-            // 意图识别器回调
-            onIntentRecognizing = {
-                android.util.Log.d("AutoGLM", "IntentRecognizer: recognizing...")
-                agentStatusOverlay?.updatePlannerStatus("🔍 正在识别意图...")
-            }
-
-            onIntentRecognized = { result ->
-                agentStatusOverlay?.updatePlannerStatus("")  // 清除识别状态
-                if (result.matched) {
-                    android.util.Log.d("AutoGLM", "IntentRecognizer: matched shortcut '${result.matchedShortcutTitle}', prompt: ${result.filledPrompt}")
-                } else {
-                    android.util.Log.d("AutoGLM", "IntentRecognizer: no match")
-                }
-            }
-
-            // ADB Keyboard 未安装回调 - 触发悬浮窗提示安装
-            onAdbKeyboardNotInstalled = { showAdbKeyboardOverlay() }
-
-            // 干预处理完成回调
-            onInterventionProcessed = { instruction ->
-                android.util.Log.i("AutoGLM", "Intervention processed by Agent: $instruction")
-            }
-
-            onTaskSummarizing = {
-                isSummarizing = true
-                summaryAlreadySent = false  // 为新的总结生成重置标志
-                summaryStreamingContent.clear()
-                emitCoordinatorStream(
-                    type = CoordinatorMessageType.SUMMARY_STREAMING,
-                    content = "",
-                    force = true
-                )
-            }
-
-            onTaskSummary = { summary ->
-                isSummarizing = false
-                summaryAlreadySent = true  // 标记总结已通过 SUMMARY_COMPLETE 发送
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.SUMMARY_COMPLETE,
-                    content = summary
-                )
-                // 步骤: 任务总结完成后显示悬浮窗（半透明 Markdown 渲染）
-                showTaskSummaryOverlay(summary)
-            }
-
-            // SmartCoordinator 结构化回调 - 显示格式化内容
-            var plannerStreamingContent = StringBuilder()
-            var isPlanning = false
-
-            phoneAgent?.onPlanningStart = {
-                isPlanning = true
-                plannerStreamingContent.clear()
-                agentStatusOverlay?.updatePlannerStatus("🤔 正在规划任务...")
-                emitCoordinatorStream(
-                    type = CoordinatorMessageType.PLANNING_STREAMING,
-                    content = "",
-                    force = true
-                )
-            }
-
-            onStreamToken = { token ->
-                // 流式显示内容 - 根据当前状态决定是优化器、规划器还是总结器
-                if (isOptimizing) {
-                    optimizerStreamingContent.append(token)
-                    emitCoordinatorStream(
-                        type = CoordinatorMessageType.OPTIMIZER_STREAMING,
-                        content = optimizerStreamingContent.toString()
-                    )
-                } else if (isPlanning) {
-                    plannerStreamingContent.append(token)
-                    emitCoordinatorStream(
-                        type = CoordinatorMessageType.PLANNING_STREAMING,
-                        content = plannerStreamingContent.toString()
-                    )
-                } else if (isSummarizing) {
-                    summaryStreamingContent.append(token)
-                    emitCoordinatorStream(
-                        type = CoordinatorMessageType.SUMMARY_STREAMING,
-                        content = summaryStreamingContent.toString()
-                    )
-                } else {
-                    // Agent执行阶段：流式更新悬浮窗显示实时思考内容
-                    agentStreamingContent.append(token)
-                    agentStatusOverlay?.updateStreamingTail(agentStreamingContent.toString())
-                }
-            }
-
-            onCoordinatorThinking = { thinking ->
-                // 在聊天中展示协调器的思考分析过程（已格式化为自然语言）
-                android.util.Log.d("AutoGLM", "[COORDINATOR] Thinking: ${thinking.take(100)}...")
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.COORDINATOR_THINKING,
-                    content = thinking
-                )
-                // 悬浮窗同步显示协调器思考尾部
-                agentStatusOverlay?.updatePlannerStatus("🤔 ${thinking.takeLast(30)}")
-            }
-
-            onStreamEnd = {
-                isPlanning = false
-                agentStatusOverlay?.updatePlannerStatus("")  // 清除规划状态
-            }
-
-            // 协调器步数回调 — 在消息中显示当前执行步数
-            phoneAgent?.onCoordinatorStep = { currentStep, maxSteps ->
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.COORDINATOR_STEP,
-                    content = "$currentStep|$maxSteps"
-                )
-            }
-
-            onDecisionComplete = { decision ->
-                val taskText = when {
-                    !decision.nextInstruction.isNullOrBlank() -> decision.nextInstruction
-                    decision.assessment.isNotBlank() -> decision.assessment
-                    else -> null
-                }
-                // 在悬浮窗显示当前任务
-                taskText?.let { agentStatusOverlay?.updateCoordinatorTask(it) }
-                // 决策完成后显示决策结果（目标型指令）
-                if (!decision.nextInstruction.isNullOrBlank()) {
-                    _coordinatorMessage.value = CoordinatorMessage(
-                        type = CoordinatorMessageType.SUBTASK_START,
-                        content = "**下一步目标：** ${decision.nextInstruction}"
-                    )
-                } else if (decision.assessment.isNotBlank()) {
-                    // 任务完成或失败 — 显示评估结果，不发送无意义的 0|0 步数
-                    _coordinatorMessage.value = CoordinatorMessage(
-                        type = CoordinatorMessageType.SUBTASK_START,
-                        content = "**结果：** ${decision.assessment}"
-                    )
-                }
-            }
-
-            phoneAgent?.onPlanningComplete = { taskPlan ->
-                if (taskPlan != null) {
-                    // 使用TaskPlan的toReadableText方法，但去掉emoji前缀
-                    val planText = taskPlan.toReadableText()
-                    _coordinatorMessage.value = CoordinatorMessage(
-                        type = CoordinatorMessageType.PLAN_COMPLETE,
-                        content = planText
-                    )
-                    android.util.Log.i("AutoGLM", "[COORDINATOR] Task plan generated with ${taskPlan.subTasks.size} sub-tasks")
-                } else {
-                    _coordinatorMessage.value = CoordinatorMessage(
-                        type = CoordinatorMessageType.PLAN_COMPLETE,
-                        content = "任务规划失败，将直接执行"
-                    )
-                }
-            }
-
-            phoneAgent?.onSubTaskGenerated = { subTask ->
-                // 子任务生成时立即显示卡片
-                val cardText = buildString {
-                    appendLine("### 步骤 ${subTask.index}")
-                    appendLine()
-                    appendLine("**目标：** ${subTask.goal}")
-                    if (subTask.currentState.isNotBlank()) {
-                        appendLine()
-                        appendLine("**当前状态：** ${subTask.currentState}")
-                    }
-                    if (subTask.actions.isNotBlank()) {
-                        appendLine()
-                        appendLine("**操作：** ${subTask.actions}")
-                    }
-                }
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.SUBTASK_CARD,
-                    content = cardText.trim()
-                )
-                android.util.Log.i("AutoGLM", "[COORDINATOR] SubTask ${subTask.index} card displayed: ${subTask.goal}")
-            }
-
-            phoneAgent?.onSubTaskStart = { subTask ->
-                agentStatusOverlay?.updateCoordinatorTask(subTask.goal)
-                val subTaskText = buildString {
-                    appendLine("### ▶️ 开始执行子任务 ${subTask.index}")
-                    appendLine()
-                    appendLine("**目标：** ${subTask.goal}")
-                    if (subTask.actions.isNotBlank()) {
-                        appendLine()
-                        appendLine("**操作指导：**")
-                        appendLine(subTask.actions)
-                    }
-                    if (subTask.context.isNotBlank() && subTask.context != "协调器提供的任务指导") {
-                        appendLine()
-                        appendLine("**注意事项：** ${subTask.context}")
-                    }
-                }
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.SUBTASK_START,
-                    content = subTaskText.trim()
-                )
-            }
-
-            phoneAgent?.onSupervisionResult = { result ->
-                val resultText = buildString {
-                    appendLine("**评估：**${result.assessment}")
-                    if (result.correctionInstruction != null) {
-                        appendLine()
-                        appendLine("**纠正指令：**${result.correctionInstruction}")
-                    }
-                    if (result.gatheredInfo.isNotBlank()) {
-                        appendLine()
-                        appendLine("**收集信息：**${result.gatheredInfo}")
-                    }
-                }
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.SUPERVISION_RESULT,
-                    // 在content中存储状态和内容，用|分隔
-                    content = "${result.status.name}|${resultText.trim()}"
-                )
-            }
-
-            onTaskComplete = { message ->
-                _serviceState.value = ServiceState.IDLE
-                agentStatusOverlay?.onTaskFinished()
-                // 步骤：任务完成时更新通知栏状态
-                updateNotification("任务已完成")
-                onTaskCompleted?.invoke(message)
-                // 清理coordinator消息
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.CLEAR,
-                    content = ""
-                )
-                // Emit final result message only if summary wasn't already sent
-                // This avoids duplicate messages when task summary is enabled
-                if (!summaryAlreadySent) {
-                    _agentMessage.value = AgentMessage(message, AgentMessageType.RESULT)
-                } else {
-                    // Reset the flag for next task
-                    summaryAlreadySent = false
-                }
-                speak(message)
-                startWakeWordListening()
-            }
-
-            onError = { error ->
-                // 安全检查：仅当任务协程确实已停止时才重置状态
-                // 避免中间错误（如模型调用失败）过早将状态设为 IDLE，
-                // 导致后续竞争条件（如协程被意外取消）
-                val jobStillActive = currentTaskJob?.isActive == true
-                if (!jobStillActive) {
-                    _serviceState.value = ServiceState.IDLE
-                    agentStatusOverlay?.onTaskFinished()
-                    startWakeWordListening()
-                } else {
-                    android.util.Log.w("AutoGLM", "onError called while task job still active, skipping state reset. error=$error")
-                }
-                this@WakeWordService.onError?.invoke(error)
-                // 清理coordinator消息
-                _coordinatorMessage.value = CoordinatorMessage(
-                    type = CoordinatorMessageType.CLEAR,
-                    content = ""
-                )
-                // Emit error as result
-                _agentMessage.value = AgentMessage(error, AgentMessageType.RESULT)
-            }
-
-            onHumanInterventionNeeded = { message ->
-                speak(message)
-                // Emit as action message
-                _agentMessage.value = AgentMessage(message, AgentMessageType.ACTION)
-            }
-
-            // Agent中途提问回调 — 显示悬浮窗等待用户输入，返回用户回答
-            onUserQuestionAsked = { question ->
-                android.util.Log.i(TAG, "Agent asks question: $question")
-                speak(question)
-                _agentMessage.value = AgentMessage("💬 $question", AgentMessageType.ACTION)
-
-                // 使用CompletableDeferred挂起等待用户回答
-                val answerDeferred = kotlinx.coroutines.CompletableDeferred<String>()
-
-                // 在主线程创建并显示提问浮窗
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    val questionOverlay = InterventionInputOverlay(this@WakeWordService).apply {
-                        customTitle = "助手提问"
-                        customHint = question
-                        customInputHint = "请输入你的回答..."
-                        onInterventionSubmit = { answer ->
-                            answerDeferred.complete(answer)
-                            dismiss()
-                        }
-                    }
-                    questionOverlay.show()
-                }
-
-                // 挂起等待用户回答
-                val answer = answerDeferred.await()
-                android.util.Log.i(TAG, "User answered question: $answer")
-                _agentMessage.value = AgentMessage("用户回答：$answer", AgentMessageType.ACTION)
-                answer
-            }
         }
+
+        // 步骤：通过 AgentCallbackBinder 绑定所有回调到服务上下文
+        AgentCallbackBinder(this).bind(phoneAgent!!)
     }
 
     private var sttActivity: android.app.Activity? = null
@@ -1328,7 +948,7 @@ class WakeWordService : Service() {
      * 显示任务总结悬浮窗
      * 调用位置：onTaskSummary 回调 → 总结生成完成后展示
      */
-    private fun showTaskSummaryOverlay(summary: String) {
+    internal fun showTaskSummaryOverlay(summary: String) {
         if (taskSummaryOverlay == null) {
             taskSummaryOverlay = TaskSummaryOverlay(this)
         }
@@ -1339,7 +959,7 @@ class WakeWordService : Service() {
      * 显示 ADB Keyboard 未安装提示悬浮窗
      * 调用位置：onAdbKeyboardNotInstalled 回调 → adb keyboard 输入失败时展示
      */
-    private fun showAdbKeyboardOverlay() {
+    internal fun showAdbKeyboardOverlay() {
         if (adbKeyboardOverlay == null) {
             adbKeyboardOverlay = AdbKeyboardOverlay(this)
         }
@@ -1385,7 +1005,7 @@ class WakeWordService : Service() {
         }
     }
 
-    private fun speak(text: String) {
+    internal fun speak(text: String) {
         textToSpeech.speak(text)
     }
 
@@ -1416,7 +1036,7 @@ class WakeWordService : Service() {
             .build()
     }
 
-    private fun updateNotification(text: String) {
+    internal fun updateNotification(text: String) {
         // 构建干预操作的 PendingIntent（仅任务执行中时显示）
         val isExecuting = _serviceState.value == ServiceState.EXECUTING_TASK
 
