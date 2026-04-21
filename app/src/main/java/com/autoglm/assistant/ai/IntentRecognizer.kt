@@ -153,7 +153,8 @@ class IntentRecognizer(
                 matchedShortcutTitle = matchedShortcut.title,
                 parameters = parameters,
                 filledPrompt = filledPrompt,
-                enablePlanning = matchedShortcut.enablePlanning
+                enablePlanning = matchedShortcut.enablePlanning,
+                enableOptimizer = matchedShortcut.enableOptimizer
             )
         } catch (e: Exception) {
             Logger.e(Logger.AGENT, "Failed to parse intent JSON: $jsonStr, error: ${e.message}")
@@ -190,7 +191,9 @@ data class IntentResult(
     val matchedShortcutTitle: String? = null,
     val parameters: Map<String, String> = emptyMap(),
     val filledPrompt: String? = null,
-    val enablePlanning: Boolean = true
+    val enablePlanning: Boolean = true,
+    // 匹配快捷指令时，继承该快捷指令的指令优化器开关
+    val enableOptimizer: Boolean = true
 ) {
     companion object {
         fun notMatched() = IntentResult(matched = false)

@@ -323,8 +323,10 @@ class PhoneAgent(
         }
 
         // 步骤: 意图识别 — 将用户自然语言输入匹配到快捷指令
-        // 业务目的: 如果匹配到快捷指令，使用其结构化模板替代原始输入（提升执行准确度）
+        // 业务目的: 意图识别优先于指令优化器；匹配到快捷指令后，由快捷指令的配置决定是否启用优化器
         var intentTask = task
+        // effectiveEnableOptimizer 初始值为全局传入值，命中快捷指令时由快捷指令覆盖
+        var effectiveEnableOptimizer = enableOptimizer
         if (intentRecognizer != null) {
             if (stopRequested) {
                 Logger.i(Logger.AGENT, "Task stopped by user before intent recognition")
@@ -337,8 +339,10 @@ class PhoneAgent(
                 Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Intent matched: ${intentResult.matchedShortcutTitle}")
                 Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Filled prompt: ${intentResult.filledPrompt}")
                 intentTask = intentResult.filledPrompt
-                // 使用快捷指令自身的 enablePlanning 设置覆盖
+                // 快捷指令自身的 enablePlanning 和 enableOptimizer 设置优先于全局开关
                 shouldUseCoordinator = smartCoordinator != null && intentResult.enablePlanning
+                effectiveEnableOptimizer = intentResult.enableOptimizer
+                Logger.i(Logger.AGENT, "[PhoneAgent] ✓ Shortcut overrides: enablePlanning=${intentResult.enablePlanning}, enableOptimizer=${intentResult.enableOptimizer}")
             } else {
                 Logger.i(Logger.AGENT, "[PhoneAgent] Intent not matched, using original task")
             }
@@ -349,8 +353,8 @@ class PhoneAgent(
         }
 
         // 使用Prompt优化器优化任务描述（如果启用）
-        // 用户需求：允许协调器使用指令优化器来规划
-        val shouldOptimizePrompt = promptOptimizer != null && enableOptimizer
+        // 意图识别命中快捷指令时：由快捷指令的 enableOptimizer 决定；否则由全局开关决定
+        val shouldOptimizePrompt = promptOptimizer != null && effectiveEnableOptimizer
         val effectiveTask = if (shouldOptimizePrompt) {
             if (stopRequested) {
                 Logger.i(Logger.AGENT, "Task stopped by user before optimization")
