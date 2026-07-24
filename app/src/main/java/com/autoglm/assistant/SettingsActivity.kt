@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.autoglm.assistant.glass.GlassAuthHelper
 import com.autoglm.assistant.service.WakeWordService
 import com.autoglm.assistant.ui.theme.AutoGLMAssistantTheme
 import com.autoglm.assistant.util.PreferenceManager
@@ -49,6 +50,32 @@ class SettingsActivity : ComponentActivity() {
                     onBack = { finish() }
                 )
             }
+        }
+    }
+
+    /**
+     * Rokid 鉴权传统回调兜底。
+     * 业务目的：部分 SDK 版本的 requestAuthorization 仍可能通过 startActivityForResult 回传，
+     * Compose launcher 未收到时由这里解析 token 并触发眼镜通道初始化。
+     */
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != GlassAuthHelper.AUTH_REQUEST_CODE) return
+        val token = GlassAuthHelper(this).parseResult(resultCode, data)
+        if (token != null) {
+            App.instance.preferenceManager.glassAuthToken = token
+            Toast.makeText(this, "眼镜授权成功", Toast.LENGTH_SHORT).show()
+            if (WakeWordService.instance == null) {
+                ServiceHelper.startWakeWordService(this, false)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    WakeWordService.instance?.initGlassChannel()
+                }, 800L)
+            } else {
+                WakeWordService.instance?.initGlassChannel()
+            }
+        } else {
+            Toast.makeText(this, "眼镜授权失败或已取消", Toast.LENGTH_SHORT).show()
         }
     }
 }
@@ -765,6 +792,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                     supportingText = { Text(if (isChinese) "使用系统 STT 时的唤醒词（免费，无需 API Key）" else "Wake phrase for System STT (free, no API key required)") }
                 )
             }
+
+            Divider()
+
+            // ─── Rokid 眼镜通道 ───
+            Text(
+                if (isChinese) "眼镜通道" else "Glass Channel",
+                style = MaterialTheme.typography.titleMedium
+            )
+            com.autoglm.assistant.ui.settings.GlassChannelSection(isChinese = isChinese)
 
             Divider()
 

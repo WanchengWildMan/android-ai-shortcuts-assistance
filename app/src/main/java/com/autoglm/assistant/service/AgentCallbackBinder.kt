@@ -71,41 +71,41 @@ internal class AgentCallbackBinder(
     // ===== 1. Agent 基础回调 =====
 
     override fun onStepStart(step: Int) {
-        service.agentStatusOverlay?.updateStep(step)
+        service.statusSink.updateStep(step)
         agentStreamingContent.clear()
         service.updateNotification("执行中 第${step}步...")
     }
 
     override fun onThinking(thought: String) {
         service._agentMessage.value = AgentMessage(thought, AgentMessageType.THINKING)
-        service.agentStatusOverlay?.updateThinking(thought)
+        service.statusSink.updateThinking(thought)
     }
 
     override fun onAction(action: String) {
         service._agentMessage.value = AgentMessage(action, AgentMessageType.ACTION)
-        service.agentStatusOverlay?.updateActionStatus(action)
+        service.statusSink.updateActionStatus(action)
     }
 
     override fun onBeforeScreenshot() {
-        service.agentStatusOverlay?.hideForScreenshot()
+        service.statusSink.hideForScreenshot()
         service.interventionOverlay?.hideForScreenshot()
         service.taskSummaryOverlay?.hideForScreenshot()
     }
 
     override fun onAfterScreenshot() {
-        service.agentStatusOverlay?.restoreAfterScreenshot()
+        service.statusSink.restoreAfterScreenshot()
         service.interventionOverlay?.restoreAfterScreenshot()
         service.taskSummaryOverlay?.restoreAfterScreenshot()
     }
 
     override fun onBeforeAction() {
-        service.agentStatusOverlay?.hideForScreenshot()
+        service.statusSink.hideForScreenshot()
         service.interventionOverlay?.hideForScreenshot()
         service.taskSummaryOverlay?.hideForScreenshot()
     }
 
     override fun onAfterAction() {
-        service.agentStatusOverlay?.restoreAfterScreenshot()
+        service.statusSink.restoreAfterScreenshot()
         service.interventionOverlay?.restoreAfterScreenshot()
         service.taskSummaryOverlay?.restoreAfterScreenshot()
     }
@@ -115,7 +115,7 @@ internal class AgentCallbackBinder(
     override fun onPromptOptimizing() {
         isOptimizing = true
         optimizerStreamingContent.clear()
-        service.agentStatusOverlay?.updatePlannerStatus("正在优化指令...")
+        service.statusSink.updatePlannerStatus("正在优化指令...")
         emitCoordinatorStream(
             type = CoordinatorMessageType.OPTIMIZER_STREAMING,
             content = "",
@@ -125,7 +125,7 @@ internal class AgentCallbackBinder(
 
     override fun onPromptOptimized(optimizedPrompt: String) {
         isOptimizing = false
-        service.agentStatusOverlay?.updatePlannerStatus("")
+        service.statusSink.updatePlannerStatus("")
         service._coordinatorMessage.value = CoordinatorMessage(
             type = CoordinatorMessageType.OPTIMIZER_COMPLETE,
             content = optimizedPrompt
@@ -136,11 +136,11 @@ internal class AgentCallbackBinder(
 
     override fun onIntentRecognizing() {
         Logger.d(Logger.INTENT, "IntentRecognizer: recognizing...")
-        service.agentStatusOverlay?.updatePlannerStatus("正在识别意图...")
+        service.statusSink.updatePlannerStatus("正在识别意图...")
     }
 
     override fun onIntentRecognized(result: IntentResult) {
-        service.agentStatusOverlay?.updatePlannerStatus("")
+        service.statusSink.updatePlannerStatus("")
         if (result.matched) {
             Logger.d(Logger.INTENT, "IntentRecognizer: matched shortcut '${result.matchedShortcutTitle}', prompt: ${result.filledPrompt}")
         } else {
@@ -182,7 +182,7 @@ internal class AgentCallbackBinder(
     override fun onPlanningStart() {
         isPlanning = true
         plannerStreamingContent.clear()
-        service.agentStatusOverlay?.updatePlannerStatus("正在规划任务...")
+        service.statusSink.updatePlannerStatus("正在规划任务...")
         emitCoordinatorStream(
             type = CoordinatorMessageType.PLANNING_STREAMING,
             content = "",
@@ -212,7 +212,7 @@ internal class AgentCallbackBinder(
             )
         } else {
             agentStreamingContent.append(token)
-            service.agentStatusOverlay?.updateStreamingTail(agentStreamingContent.toString())
+            service.statusSink.updateStreamingTail(agentStreamingContent.toString())
         }
     }
 
@@ -222,12 +222,12 @@ internal class AgentCallbackBinder(
             type = CoordinatorMessageType.COORDINATOR_THINKING,
             content = thinking
         )
-        service.agentStatusOverlay?.updatePlannerStatus(thinking.takeLast(30))
+        service.statusSink.updatePlannerStatus(thinking.takeLast(30))
     }
 
     override fun onStreamEnd() {
         isPlanning = false
-        service.agentStatusOverlay?.updatePlannerStatus("")
+        service.statusSink.updatePlannerStatus("")
     }
 
     override fun onCoordinatorStep(currentStep: Int, maxSteps: Int) {
@@ -243,7 +243,7 @@ internal class AgentCallbackBinder(
             decision.assessment.isNotBlank() -> decision.assessment
             else -> null
         }
-        taskText?.let { service.agentStatusOverlay?.updateCoordinatorTask(it) }
+        taskText?.let { service.statusSink.updateCoordinatorTask(it) }
         if (!decision.nextInstruction.isNullOrBlank()) {
             service._coordinatorMessage.value = CoordinatorMessage(
                 type = CoordinatorMessageType.SUBTASK_START,
@@ -295,7 +295,7 @@ internal class AgentCallbackBinder(
     }
 
     override fun onSubTaskStart(task: PlannedSubTask) {
-        service.agentStatusOverlay?.updateCoordinatorTask(task.goal)
+        service.statusSink.updateCoordinatorTask(task.goal)
         val subTaskText = buildString {
             appendLine("### > 开始执行子任务 ${task.index}")
             appendLine()
@@ -338,7 +338,7 @@ internal class AgentCallbackBinder(
 
     override fun onTaskComplete(message: String) {
         service._serviceState.value = ServiceState.IDLE
-        service.agentStatusOverlay?.onTaskFinished()
+        service.statusSink.onTaskFinished()
         service.updateNotification("任务已完成")
         service.onTaskCompleted?.invoke(message)
         service._coordinatorMessage.value = CoordinatorMessage(
@@ -360,7 +360,7 @@ internal class AgentCallbackBinder(
         val jobStillActive = service.currentTaskJob?.isActive == true
         if (!jobStillActive) {
             service._serviceState.value = ServiceState.IDLE
-            service.agentStatusOverlay?.onTaskFinished()
+            service.statusSink.onTaskFinished()
             service.startWakeWordListening()
         } else {
             Logger.w(Logger.AGENT, "onError called while task job still active, skipping state reset. error=$error")

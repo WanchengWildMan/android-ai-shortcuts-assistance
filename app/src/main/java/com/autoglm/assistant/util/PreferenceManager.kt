@@ -104,6 +104,16 @@ class PreferenceManager(context: Context) {
         private const val KEY_IME_VOICE_SPACE_Y = "ime_voice_space_y"
         private const val KEY_IME_VOICE_KEYBOARD_DELAY = "ime_voice_keyboard_delay"
 
+        // Rokid 眼镜通道
+        private const val KEY_GLASS_CHANNEL_ENABLED = "glass_channel_enabled"
+        private const val KEY_GLASS_TARGET_PACKAGE = "glass_target_package"
+        private const val KEY_GLASS_AUTH_TOKEN = "glass_auth_token"
+        private const val KEY_GLASS_AUTO_START_APP = "glass_auto_start_app"
+        private const val KEY_GLASS_VAD_SILENCE_THRESHOLD = "glass_vad_silence_threshold"
+        private const val KEY_GLASS_VAD_SILENCE_DURATION_MS = "glass_vad_silence_duration_ms"
+        private const val KEY_GLASS_MAX_RECORD_DURATION_MS = "glass_max_record_duration_ms"
+        private const val KEY_GLASS_FEISHU_WEBHOOK_URL = "glass_feishu_webhook_url"
+
         // 默认值 - BigModel API
         const val DEFAULT_WAKE_WORD = "XIAOAI"  // 小爱自定义唤醒词
         const val DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4"
@@ -142,11 +152,56 @@ class PreferenceManager(context: Context) {
         const val DEFAULT_IME_VOICE_SPACE_Y = 2978
         // IME 语音键盘就绪等待时间默认值（毫秒）；不同机型弹键盘速度不同，可在设置中调整
         const val DEFAULT_IME_VOICE_KEYBOARD_DELAY_MS = 1200L
+        // Rokid 眼镜通道默认值
+        const val DEFAULT_GLASS_TARGET_PACKAGE = "com.autoglm.glass"
+        const val DEFAULT_GLASS_AUTO_START_APP = true
+        const val DEFAULT_GLASS_VAD_SILENCE_THRESHOLD = 800
+        const val DEFAULT_GLASS_VAD_SILENCE_DURATION_MS = 1500L
+        const val DEFAULT_GLASS_MAX_RECORD_DURATION_MS = 15000L
+        const val DEFAULT_GLASS_FEISHU_WEBHOOK_URL = ""
     }
 
     var apiUrl: String
         get() = prefs.getString(KEY_API_URL, DEFAULT_API_URL) ?: DEFAULT_API_URL
         set(value) = prefs.edit { putString(KEY_API_URL, value) }
+
+    // ---- Rokid 眼镜通道 ----
+    /** 眼镜通道总开关，默认关闭；旧机或未鉴权时走原手机麦克风唤醒路径 */
+    var glassChannelEnabled: Boolean
+        get() = prefs.getBoolean(KEY_GLASS_CHANNEL_ENABLED, false)
+        set(value) = prefs.edit { putBoolean(KEY_GLASS_CHANNEL_ENABLED, value) }
+
+    /** 眼镜端目标 App 包名，必须与 :glass 模块 applicationId 一致 */
+    var glassTargetPackage: String
+        get() = prefs.getString(KEY_GLASS_TARGET_PACKAGE, DEFAULT_GLASS_TARGET_PACKAGE) ?: DEFAULT_GLASS_TARGET_PACKAGE
+        set(value) = prefs.edit { putString(KEY_GLASS_TARGET_PACKAGE, value) }
+
+    /** Rokid 鉴权 token，鉴权成功后持久化，重启免重鉴权 */
+    var glassAuthToken: String
+        get() = prefs.getString(KEY_GLASS_AUTH_TOKEN, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_GLASS_AUTH_TOKEN, value) }
+
+    /** 链路就绪后是否自动推装并启动眼镜端 App */
+    var glassAutoStartApp: Boolean
+        get() = prefs.getBoolean(KEY_GLASS_AUTO_START_APP, DEFAULT_GLASS_AUTO_START_APP)
+        set(value) = prefs.edit { putBoolean(KEY_GLASS_AUTO_START_APP, value) }
+
+    var glassVadSilenceThreshold: Int
+        get() = prefs.getInt(KEY_GLASS_VAD_SILENCE_THRESHOLD, DEFAULT_GLASS_VAD_SILENCE_THRESHOLD)
+        set(value) = prefs.edit { putInt(KEY_GLASS_VAD_SILENCE_THRESHOLD, value) }
+
+    var glassVadSilenceDurationMs: Long
+        get() = prefs.getLong(KEY_GLASS_VAD_SILENCE_DURATION_MS, DEFAULT_GLASS_VAD_SILENCE_DURATION_MS)
+        set(value) = prefs.edit { putLong(KEY_GLASS_VAD_SILENCE_DURATION_MS, value) }
+
+    var glassMaxRecordDurationMs: Long
+        get() = prefs.getLong(KEY_GLASS_MAX_RECORD_DURATION_MS, DEFAULT_GLASS_MAX_RECORD_DURATION_MS)
+        set(value) = prefs.edit { putLong(KEY_GLASS_MAX_RECORD_DURATION_MS, value) }
+
+    /** 眼镜识别文本经飞书 webhook 中转的地址（vivo 作为桥接端时使用，电脑侧用另一个飞书应用的长连接订阅同一群收到消息）；为空则不中转 */
+    var glassFeishuWebhookUrl: String
+        get() = prefs.getString(KEY_GLASS_FEISHU_WEBHOOK_URL, DEFAULT_GLASS_FEISHU_WEBHOOK_URL) ?: DEFAULT_GLASS_FEISHU_WEBHOOK_URL
+        set(value) = prefs.edit { putString(KEY_GLASS_FEISHU_WEBHOOK_URL, value) }
 
     var apiKey: String
         get() = prefs.getString(KEY_API_KEY, "") ?: ""

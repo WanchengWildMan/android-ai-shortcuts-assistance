@@ -6,6 +6,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Rokid CustomApp 从公共目录读取眼镜端 APK 时需要（应用专属目录则不需要，maxSdk 32） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <!-- Install Packages (for ADB Keyboard auto-install) -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -65,6 +69,16 @@
             android:name=".SettingsActivity"
             android:exported="false"
             android:theme="@style/Theme.AutoGLMAssistant" />
+
+        <!-- 电脑通过受控 ADB 注入文字任务的入口 -->
+        <receiver
+            android:name=".service.ExternalTaskReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.autoglm.assistant.action.EXECUTE_EXTERNAL_TASK" />
+            </intent-filter>
+        </receiver>
 
         <!-- Wake Word Service -->
         <service

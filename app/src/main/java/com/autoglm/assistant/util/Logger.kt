@@ -26,6 +26,7 @@ object Logger {
     const val WAKE = "Wake"
     const val STT = "STT"
     const val ACCESSIBILITY = "Accessibility"
+    const val GLASS = "Glass"
 
     private val isDebug: Boolean = BuildConfig.DEBUG
 

@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.autoglm.assistant"
-        minSdk = 24
+        minSdk = 31  // HARD: Rokid client-l SDK 要求 minSdk≥31
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
@@ -102,6 +102,9 @@ dependencies {
 
     // Drag and drop reorderable list
     implementation("sh.calvin.reorderable:reorderable:2.4.0")
+
+    // Rokid CXR-L 手机端 SDK（眼镜通道，CUSTOMAPP 会话 + 自定义指令双向通道）
+    implementation("com.rokid.cxr:client-l:1.0.4")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

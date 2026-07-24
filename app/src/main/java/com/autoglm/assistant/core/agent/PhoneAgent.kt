@@ -22,6 +22,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.StateFlow
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -593,6 +594,17 @@ class PhoneAgent(
                         return result.message ?: "Task paused for human intervention"
                     }
 
+                    // 单步超时：汇报给协调器，由协调器决策换路或停止，不在这里直接 return
+                    // 让协调器能看到"上一指令卡住"并据此调整下一步策略
+                    if (result.timeout) {
+                        Logger.w(Logger.AGENT, "Sub-task timed out, reporting to coordinator")
+                        coordinatorInstructions.add(
+                            (decision.nextInstruction + "（执行超时，被强制中止）") to false
+                        )
+                        // 继续下一轮协调，让协调器基于"上一指令超时"信息决策
+                        continue
+                    }
+
                     // 业务目的：记录该指令的完成状态及干预信息
                     // 当Agent调用finish时，标记为已完成，避免协调器重复执行相同指令
                     // 干预指令以 "用户干预：" 前缀标识，附加到指令记录中供协调器参考
@@ -786,6 +798,12 @@ class PhoneAgent(
                 return result
             }
 
+            // 单步超时：直接跳出当前协调器步，把卡住状态汇报给协调器，避免后续 subStep 继续在卡住状态上死循环
+            if (result.timeout) {
+                Logger.w(Logger.AGENT, "单步超时，中止当前协调器步")
+                return result
+            }
+
             // 步骤：处理Agent中途提问 — 暂停执行，等待用户回答，注入对话后继续
             if (result.userQuestion != null) {
                 val question = result.userQuestion!!
@@ -835,6 +853,12 @@ class PhoneAgent(
                 break
             }
 
+            // 单步超时：直接结束直接执行模式，避免单步死循环拖垮整个任务
+            if (result.timeout) {
+                Logger.w(Logger.AGENT, "单步超时，结束直接执行模式")
+                break
+            }
+
             // 步骤：处理Agent中途提问 — 暂停执行，等待用户回答，注入对话后继续
             if (result.userQuestion != null) {
                 val question = result.userQuestion!!
@@ -874,6 +898,35 @@ class PhoneAgent(
      * 执行一步Agent操作
      */
     private suspend fun executeStep(
+        userPrompt: String? = null,
+        isNewTask: Boolean = false
+    ): StepResult {
+        // 单步超时检测：把整步（截图→调模型→解析→执行 action）包到 withTimeoutOrNull 里，
+        // 超过 agentConfig.stepTimeoutMs 仍未完成则视为卡住，强制中止当前步。
+        // 这样能防住模型流式响应死循环、actionExecutor 卡死等单步死循环场景。
+        val timeoutMs = agentConfig.stepTimeoutMs
+        val timed = withTimeoutOrNull(timeoutMs) {
+            executeStepInner(userPrompt, isNewTask)
+        }
+        if (timed == null) {
+            currentStep++
+            Logger.w(Logger.AGENT, "---------- Step $currentStep 超时（>${timeoutMs}ms）强制中止 ----------")
+            listener?.onStepStart(currentStep)
+            val timeoutResult = StepResult(
+                success = false,
+                finished = false,
+                action = null,
+                thinking = "",
+                message = "单步执行超时（>${timeoutMs}ms），强制中止以避免死循环",
+                timeout = true
+            )
+            listener?.onStepComplete(timeoutResult)
+            return timeoutResult
+        }
+        return timed
+    }
+
+    private suspend fun executeStepInner(
         userPrompt: String? = null,
         isNewTask: Boolean = false
     ): StepResult {

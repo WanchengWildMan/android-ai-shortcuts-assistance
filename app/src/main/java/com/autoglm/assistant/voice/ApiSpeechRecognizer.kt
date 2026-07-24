@@ -184,6 +184,46 @@ class ApiSpeechRecognizer(private val context: Context) {
     }
 
     /**
+     * 直接识别外部 16kHz/单声道/16bit PCM，不再读取手机麦克风。
+     */
+    fun recognizePcm(pcmData: ByteArray, language: String = "zh") {
+        if (_isListening.value) return
+        if (pcmData.size < SAMPLE_RATE) {
+            onResult?.invoke("")
+            return
+        }
+        if (apiType == "ALI_NLS") {
+            if (aliNlsAkId.isBlank() || aliNlsAkSecret.isBlank() || aliNlsAppKey.isBlank()) {
+                onError?.invoke("阿里 NLS 未配置（需要 AK ID、AK Secret 和 AppKey）")
+                return
+            }
+        } else if (apiBaseUrl.isBlank() || apiKey.isBlank()) {
+            onError?.invoke("语音识别 API 未配置（需要 OpenAI 兼容的 STT 端点）")
+            return
+        }
+
+        _isListening.value = true
+        recordingJob = CoroutineScope(Dispatchers.IO).launch {
+            try {
+                withContext(Dispatchers.Main) { onPartialResult?.invoke("正在识别...") }
+                val text = if (apiType == "ALI_NLS") {
+                    callAliNlsApi(pcmData, language)
+                } else {
+                    callOpenAiSttApi(pcmToWav(pcmData, SAMPLE_RATE, 1, 16), language)
+                }
+                withContext(Dispatchers.Main) { onResult?.invoke(text) }
+            } catch (e: CancellationException) {
+                Logger.i(Logger.STT, "外部 PCM 识别被取消")
+            } catch (e: Exception) {
+                Logger.e(Logger.STT, "外部 PCM 识别失败", e)
+                withContext(Dispatchers.Main) { onError?.invoke("语音识别失败: ${e.message}") }
+            } finally {
+                _isListening.value = false
+            }
+        }
+    }
+
+    /**
      * 录音 + 简易 VAD 静音检测
      * 当连续静音超过 SILENCE_DURATION_MS 或总时长超过 MAX_RECORD_DURATION_MS 时自动停止
      */

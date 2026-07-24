@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:label="AutoGLM 眼镜"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:usesCleartextTraffic="true">
+
+        <!--
+          入口 Activity：
+          - exported=true 供手机端 appStart 拉起
+          - 入口全名 com.autoglm.glass.activities.MainActivity 须与手机端 appStart 参数一致
+          - 同时带 LAUNCHER 便于眼镜端独立调试
+        -->
+        <activity
+            android:name=".activities.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:label="AutoGLM 乐奇桥接"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity
+            android:name=".RokidSkillActivity"
+            android:enabled="true"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <meta-data
+                android:name="com.rokid.ai.skill.local.ID"
+                android:value="AUTOG_LM_TEST_SKILL" />
+            <meta-data
+                android:name="com.rokid.ai.skill.local.FORM"
+                android:value="cut" />
+        </activity>
+    </application>
+</manifest>

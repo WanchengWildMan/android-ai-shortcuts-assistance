@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.os.Build
 import com.autoglm.assistant.util.PreferenceManager
 import com.autoglm.assistant.util.ShellExecutor
+import com.rokid.cxr.link.CXRLink
 
 class App : Application() {
 
@@ -21,6 +22,20 @@ class App : Application() {
 
     lateinit var preferenceManager: PreferenceManager
         private set
+
+    /**
+     * Rokid CXR-L 会话链路，进程内全局复用。
+     * 业务目的：鉴权后由 GlassSessionManager 创建赋值，供自定义指令网关与状态推送共用同一实例。
+     * 约束：setCXRLinkCbk 进程内只注册一次，子能力页不得 disconnect()。
+     */
+    @Volatile
+    var sharedLink: CXRLink? = null
+        internal set
+
+    /** 会话结束或需要重建时清空链路引用 */
+    fun resetGlassSession() {
+        sharedLink = null
+    }
 
     override fun onCreate() {
         super.onCreate()

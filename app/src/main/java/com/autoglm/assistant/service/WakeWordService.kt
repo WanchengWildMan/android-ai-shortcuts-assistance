@@ -53,10 +53,22 @@ class WakeWordService : Service() {
     lateinit var wakeEngineManager: WakeEngineManager
     private var speechRecognizer: SpeechRecognizer? = null
     private var apiSpeechRecognizer: ApiSpeechRecognizer? = null
+    private var glassSpeechRecognizer: ApiSpeechRecognizer? = null
     private var imeVoiceSttHelper: ImeVoiceSttHelper? = null
     private lateinit var textToSpeech: TextToSpeech
     private var phoneAgent: PhoneAgent? = null
     internal var agentStatusOverlay: AgentStatusOverlayController? = null
+
+    // ---- 眼镜通道：状态推送抽象 ----
+    // 业务目的：把 Agent 状态统一喂给 statusSink，手机悬浮窗(OverlayStatusSink)与眼镜端(GlassStatusSink)
+    // 作为同一组状态的两个消费者，由 StatusSinkHub 多路分发。
+    internal var statusSink: com.autoglm.assistant.glass.StatusSink =
+        com.autoglm.assistant.glass.NoopStatusSink
+    private var overlaySink: com.autoglm.assistant.glass.OverlayStatusSink? = null
+    internal var glassSession: com.autoglm.assistant.glass.GlassSessionManager? = null
+    private var glassStatusSink: com.autoglm.assistant.glass.GlassStatusSink? = null
+    private var glassAudioController: com.autoglm.assistant.glass.GlassAudioController? = null
+    private val glassRelayClient = com.autoglm.assistant.glass.GlassRelayClient()
     internal var interventionOverlay: InterventionInputOverlay? = null
     private var wakeListeningOverlay: WakeListeningOverlay? = null
     internal var taskSummaryOverlay: TaskSummaryOverlay? = null
@@ -278,6 +290,73 @@ class WakeWordService : Service() {
                 showInterventionInput()
             }
         }
+
+        // 步骤: 建立状态推送抽象 —— 手机悬浮窗作为一个 StatusSink 消费者
+        overlaySink = com.autoglm.assistant.glass.OverlayStatusSink(agentStatusOverlay!!)
+        rebuildStatusSink()
+
+        // 步骤: 启动眼镜通道（开关开启且已鉴权时才建立会话）
+        initGlassChannel()
+    }
+
+    /**
+     * 重建 statusSink：把当前已就绪的消费者（手机悬浮窗 + 眼镜端）组合成 StatusSinkHub。
+     * 业务目的：眼镜会话构建完成后追加 GlassStatusSink，无需重启服务即可生效。
+     */
+    private fun rebuildStatusSink() {
+        val sinks = mutableListOf<com.autoglm.assistant.glass.StatusSink>()
+        overlaySink?.let { sinks.add(it) }
+        glassStatusSink?.let { sinks.add(it) }
+        statusSink = if (sinks.isEmpty()) com.autoglm.assistant.glass.NoopStatusSink
+        else com.autoglm.assistant.glass.StatusSinkHub(sinks)
+    }
+
+    /**
+     * 初始化眼镜通道。
+     * 业务目的：开关开启且 token 有效时，创建 GlassSessionManager 并 connect；
+     * 会话构建完成后注册指令网关 + 启用 GlassStatusSink。
+     */
+    internal fun initGlassChannel() {
+        val prefs = App.instance.preferenceManager
+        if (!prefs.glassChannelEnabled) {
+            Logger.i(Logger.GLASS, "眼镜通道未开启，跳过")
+            return
+        }
+        if (glassSession != null) {
+            Logger.i(Logger.GLASS, "眼镜通道已初始化，跳过")
+            return
+        }
+        val token = prefs.glassAuthToken
+        if (token.isBlank()) {
+            Logger.w(Logger.GLASS, "眼镜 token 为空，请先在设置中授权眼镜")
+            return
+        }
+        glassSession = com.autoglm.assistant.glass.GlassSessionManager(this).also { mgr ->
+            mgr.onSessionBuilt = {
+                Logger.i(Logger.GLASS, "眼镜会话构建完成，注册指令网关、状态推送与音频流")
+                App.instance.sharedLink?.setCXRCustomCmdCbk(
+                    com.autoglm.assistant.glass.GlassCommandGateway(this)
+                )
+                glassStatusSink = com.autoglm.assistant.glass.GlassStatusSink(mgr)
+                glassAudioController = com.autoglm.assistant.glass.GlassAudioController(
+                    linkProvider = { App.instance.sharedLink },
+                    silenceThreshold = prefs.glassVadSilenceThreshold,
+                    silenceDurationMs = prefs.glassVadSilenceDurationMs,
+                    maxDurationMs = prefs.glassMaxRecordDurationMs,
+                    onPcmReady = { pcm -> recognizeGlassPcm(pcm) },
+                    onError = { error -> Logger.e(Logger.GLASS, error) }
+                )
+                rebuildStatusSink()
+            }
+            mgr.onAiInterrupt = {
+                if (_serviceState.value == ServiceState.EXECUTING_TASK) {
+                    Logger.w(Logger.GLASS, "任务执行中，忽略眼镜语音触发")
+                } else {
+                    glassAudioController?.onAiInterrupt()
+                }
+            }
+        }
+        glassSession?.start(token, prefs.glassTargetPackage)
     }
 
     private fun initializePhoneAgent() {
@@ -507,6 +586,39 @@ class WakeWordService : Service() {
         }
     }
 
+    private fun recognizeGlassPcm(pcm: ByteArray) {
+        val prefs = App.instance.preferenceManager
+        glassSpeechRecognizer?.release()
+        glassSpeechRecognizer = ApiSpeechRecognizer(this).apply {
+            // 注意: 眼镜 PCM 识别不能沿用 prefs.sttApiType（该设置面向手机本地 IME_VOICE 等无法处理原始 PCM 的引擎），
+            // 固定使用阿里 NLS（支持 PCM 流式上传，且已配置好 AK/AppKey）
+            apiType = "ALI_NLS"
+            aliNlsAkId = prefs.aliNlsAkId
+            aliNlsAkSecret = prefs.aliNlsAkSecret
+            aliNlsAppKey = prefs.aliNlsAppKey
+            onResult = { result ->
+                Logger.i(Logger.GLASS, "眼镜 STT 识别结果: $result")
+                // 步骤: vivo 作为眼镜桥接端，不在本地执行任务，只把识别文本中转给电脑
+                if (result.isNotBlank()) sendGlassResultToRelay(result)
+            }
+            onError = { error -> Logger.e(Logger.GLASS, "眼镜 STT 失败: $error") }
+        }
+        val language = if (prefs.language == "cn") "zh" else "en"
+        glassSpeechRecognizer?.recognizePcm(pcm, language)
+    }
+
+    /** 把眼镜识别文本经飞书 webhook 中转给电脑；未配置 webhook 时只记录警告，不在 vivo 本地执行任务 */
+    private fun sendGlassResultToRelay(text: String) {
+        val webhookUrl = App.instance.preferenceManager.glassFeishuWebhookUrl
+        if (webhookUrl.isBlank()) {
+            Logger.w(Logger.GLASS, "未配置飞书 webhook(glassFeishuWebhookUrl)，识别文本未发送: $text")
+            return
+        }
+        glassRelayClient.sendText(webhookUrl, text) { success, info ->
+            if (!success) Logger.e(Logger.GLASS, "中转失败，识别文本未送达电脑: $info")
+        }
+    }
+
     /**
      * API 模式的语音识别
      * 直接使用 AudioRecord + OpenAI 兼容 API，无需启动 Activity
@@ -617,7 +729,7 @@ class WakeWordService : Service() {
         _serviceState.value = ServiceState.EXECUTING_TASK
         onSpeechRecognized?.invoke(text)
         onTaskStarted?.invoke(text)
-        agentStatusOverlay?.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
+        statusSink.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
 
         // Execute task with phone agent
         // 与 executeTask() 保持一致：记录 Job 引用以便 stopCurrentTask() 能正确取消
@@ -633,7 +745,7 @@ class WakeWordService : Service() {
             } finally {
                 releaseWakeLock()
                 _serviceState.value = ServiceState.IDLE
-                agentStatusOverlay?.onTaskFinished()
+                statusSink.onTaskFinished()
                 startWakeWordListening()
             }
         }
@@ -843,7 +955,7 @@ class WakeWordService : Service() {
         _serviceState.value = ServiceState.EXECUTING_TASK
         Logger.d(Logger.SERVICE, "State changed to EXECUTING_TASK")
         onTaskStarted?.invoke(task)
-        agentStatusOverlay?.onTaskStarted(withCoordinator = enablePlanning)
+        statusSink.onTaskStarted(withCoordinator = enablePlanning)
         // 步骤：新任务开始时关闭旧的总结悬浮窗
         taskSummaryOverlay?.dismiss()
         // 步骤：任务开始时同步更新通知栏
@@ -868,7 +980,7 @@ class WakeWordService : Service() {
                     Logger.w(Logger.SERVICE, "任务结束后还原输入法失败: ${e.message}")
                 }
                 _serviceState.value = ServiceState.IDLE
-                agentStatusOverlay?.onTaskFinished()
+                statusSink.onTaskFinished()
                 // 步骤: 任务结束后更新通知栏
                 updateNotification("就绪")
             }
@@ -899,7 +1011,7 @@ class WakeWordService : Service() {
         currentTaskJob?.cancel()
         phoneAgent?.stop()
         _serviceState.value = ServiceState.IDLE
-        agentStatusOverlay?.onTaskFinished()
+        statusSink.onTaskFinished()
         interventionOverlay?.dismiss()
         taskSummaryOverlay?.dismiss()
         // 步骤: 停止任务后恢复唤醒词监听，避免用户需要手动重启服务
@@ -960,8 +1072,8 @@ class WakeWordService : Service() {
         // 恢复执行状态和悬浮窗（旧协程 cancel 后 finally 会关闭它们）
         _serviceState.value = ServiceState.EXECUTING_TASK
         val prefs = App.instance.preferenceManager
-        agentStatusOverlay?.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
-        agentStatusOverlay?.updateCoordinatorTask("干预: ${instruction.take(30)}...")
+        statusSink.onTaskStarted(withCoordinator = prefs.smartCoordinatorEnabled)
+        statusSink.updateCoordinatorTask("干预: ${instruction.take(30)}...")
         updateNotification("正在处理干预：${instruction.take(30)}...")
 
         // 通知 UI 添加干预消息气泡（利用 _lastRecognizedText 驱动 LaunchedEffect）
@@ -989,6 +1101,27 @@ class WakeWordService : Service() {
 
     internal fun speak(text: String) {
         textToSpeech.speak(text)
+    }
+
+    /**
+     * 眼镜端触发的介入入口（public，供 GlassCommandGateway 调用）。
+     * 业务目的：眼镜用户发来介入指令，根据当前是否有任务在执行做分流——
+     *   - 无任务执行：把介入文本当作新任务执行（executeTask）
+     *   - 有任务执行：复用既有 handleIntervention 注入对话历史并恢复执行
+     */
+    fun requestInterventionFromGlass(instruction: String) {
+        Logger.i(Logger.GLASS, "眼镜介入: ${instruction.take(40)}")
+        if (_serviceState.value != ServiceState.EXECUTING_TASK) {
+            // 无任务运行时，眼镜发来的介入文本直接作为新任务执行
+            val text = instruction.trim()
+            if (text.isNotEmpty()) {
+                executeTask(text)
+            } else {
+                Logger.w(Logger.GLASS, "介入文本为空且无运行中任务，忽略")
+            }
+            return
+        }
+        handleIntervention(instruction)
     }
 
     private fun vibrate() {
@@ -1082,8 +1215,10 @@ class WakeWordService : Service() {
             }
             try {
                 apiSpeechRecognizer?.release()
+                glassSpeechRecognizer?.release()
+                glassAudioController?.stop()
             } catch (e: Exception) {
-                Logger.e(Logger.SERVICE, "释放 API 语音识别器失败", e)
+                Logger.e(Logger.SERVICE, "释放 API/眼镜语音识别器失败", e)
             }
             try {
                 imeVoiceSttHelper?.cancel()
@@ -1105,6 +1240,8 @@ class WakeWordService : Service() {
             wakeEngineManager.release()
             speechRecognizer?.release()
             apiSpeechRecognizer?.release()
+            glassSpeechRecognizer?.release()
+            glassAudioController?.stop()
             imeVoiceSttHelper?.cancel()
             textToSpeech.release()
             phoneAgent?.release()
