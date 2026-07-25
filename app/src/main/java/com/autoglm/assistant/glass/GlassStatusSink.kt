@@ -119,4 +119,17 @@ class GlassStatusSink(private val sessionManager: GlassSessionManager) : StatusS
             link.sendCustomCmd(GlassProtocol.KEY_PHONE_TO_GLASS, encodeLogCaps(text))
         }.onFailure { Logger.w(Logger.GLASS, "推送 log 失败", it) }
     }
+
+    /**
+     * 推送一条对话消息到眼镜端消息历史。
+     * role: "user"(用户说的)/"agent"(执行反馈)/"system"(状态提示)。
+     * 业务目的：眼镜 STT 出文本后立即回显"你: xxx"，让用户确认识别内容并形成基本反馈。
+     */
+    fun pushChat(role: String, text: String) {
+        val link = App.instance.sharedLink ?: return
+        if (!sessionManager.isLinkReady || !sessionManager.sessionBuilt) return
+        runCatching {
+            link.sendCustomCmd(GlassProtocol.KEY_PHONE_TO_GLASS, encodeChatCaps(role, text))
+        }.onFailure { Logger.w(Logger.GLASS, "推送 chat 失败", it) }
+    }
 }

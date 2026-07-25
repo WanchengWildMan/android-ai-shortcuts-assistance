@@ -607,15 +607,27 @@ class WakeWordService : Service() {
         glassSpeechRecognizer?.recognizePcm(pcm, language)
     }
 
-    /** 把眼镜识别文本经飞书 webhook 中转给电脑；未配置 webhook 时只记录警告，不在 vivo 本地执行任务 */
+    /**
+     * 把眼镜识别文本经飞书 webhook 中转给电脑；未配置 webhook 时只记录警告，不在 vivo 本地执行任务。
+     * 同时把识别文本/发送结果回推眼镜端消息历史，让用户在眼镜上看到"你: xxx"及送达反馈。
+     */
     private fun sendGlassResultToRelay(text: String) {
+        // 步骤1: 无论是否配置 webhook，先把识别到的文本回显到眼镜历史，确认识别内容
+        glassStatusSink?.pushChat("user", text)
         val webhookUrl = App.instance.preferenceManager.glassFeishuWebhookUrl
         if (webhookUrl.isBlank()) {
             Logger.w(Logger.GLASS, "未配置飞书 webhook(glassFeishuWebhookUrl)，识别文本未发送: $text")
+            glassStatusSink?.pushChat("system", "未配置中转地址，未发送")
             return
         }
+        // 步骤2: 经飞书 webhook 中转，成功/失败都回推一条 system 消息，避免中间黑箱
         glassRelayClient.sendText(webhookUrl, text) { success, info ->
-            if (!success) Logger.e(Logger.GLASS, "中转失败，识别文本未送达电脑: $info")
+            if (success) {
+                glassStatusSink?.pushChat("system", "已发送")
+            } else {
+                Logger.e(Logger.GLASS, "中转失败，识别文本未送达电脑: $info")
+                glassStatusSink?.pushChat("system", "发送失败")
+            }
         }
     }
 

@@ -102,6 +102,14 @@ PhoneAgent 无障碍操作目标 App
 - `GlassStatusScreen` 顶部状态行 + LazyColumn 消息历史，新消息自动滚到最新
 - 触控板上下滑手势翻历史（Y 位移 >20px 翻一条）
 
+消息历史的数据源（vivo 侧回推，闭合"说完话眼镜要看到识别内容"的反馈）：
+
+- vivo STT 出文本后，`WakeWordService.sendGlassResultToRelay()` 先调用 `GlassStatusSink.pushChat("user", text)` 把识别文本回显到眼镜，用户即刻确认"你: xxx"
+- webhook 中转成功/失败再回推一条 `system` 消息（"已发送"/"发送失败"/"未配置中转地址"），避免"说完话不知道有没有发出去"的中间黑箱
+- `GlassStatusSink.pushChat(role, text)` 经 `encodeChatCaps` → `sendCustomCmd(KEY_PHONE_TO_GLASS)` 推送，仅在链路就绪且会话构建完成后发送
+
+**已知未闭环项**：执行任务的是 Xiaomi，眼镜连的是 vivo，两者无连接，因此 Xiaomi 上 PhoneAgent 的执行进度/最终结果目前无法回到眼镜。眼镜端只能看到"你说了什么 + 是否已中转发出"，看不到"Xiaomi 执行到哪一步/是否完成"。要做到全闭环需增加 Xiaomi→飞书→vivo→眼镜的回程通道，暂列后续。
+
 ## 8. "新建会话"文字匹配指令
 
 眼镜用户说"新建会话"（或其他配置的同义触发词），链路识别为指令而非任务：
